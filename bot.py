@@ -29,11 +29,30 @@ def _read_env_file_value(key):
 TOKEN = os.getenv('DISCORD_TOKEN') or os.getenv('TOKEN') or _read_env_file_value('DISCORD_TOKEN') or _read_env_file_value('TOKEN')
 PREFIX = '!'
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pokemon_game.db')
-OWNER_IDS = {
-    int(owner_id.strip())
-    for owner_id in os.getenv('DISCORD_OWNER_IDS', '').split(',')
-    if owner_id.strip().isdigit()
-}
+# Developer/owner Discord user IDs. Supports hosting variables or a local .env,
+# and accepts comma-, semicolon-, or whitespace-separated IDs.
+def _read_owner_ids():
+    raw = (
+        os.getenv('DISCORD_OWNER_IDS')
+        or os.getenv('OWNER_IDS')
+        or _read_env_file_value('DISCORD_OWNER_IDS')
+        or _read_env_file_value('OWNER_IDS')
+        or ''
+    )
+    # Allow values such as: 123456789012345678, 234567890123456789
+    # Quotes and brackets are tolerated to make common hosting formats work.
+    raw = raw.strip().strip('[](){}')
+    owner_ids = set()
+    for owner_id in re.split(r'[,;\s]+', raw):
+        owner_id = owner_id.strip().strip('\"\'')
+        if owner_id.isdigit():
+            try:
+                owner_ids.add(int(owner_id))
+            except ValueError:
+                pass
+    return owner_ids
+
+OWNER_IDS = _read_owner_ids()
 API = 'https://pokeapi.co/api/v2'
 API_CACHE, TYPE_CACHE, MOVE_CACHE = {}, {}, {}
 SESSION: Optional[aiohttp.ClientSession] = None
