@@ -7,7 +7,26 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-TOKEN = os.getenv('DISCORD_TOKEN')
+# Read token from the hosting environment first, then fall back to a local .env file.
+def _read_env_file_value(key):
+    for env_path in (os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'), os.path.join(os.getcwd(), '.env')):
+        try:
+            with open(env_path, 'r', encoding='utf-8') as env_file:
+                for raw_line in env_file:
+                    line = raw_line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    name, value = line.split('=', 1)
+                    if name.strip() == key:
+                        value = value.strip()
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('\"', "'"):
+                            value = value[1:-1]
+                        return value or None
+        except OSError:
+            continue
+    return None
+
+TOKEN = os.getenv('DISCORD_TOKEN') or os.getenv('TOKEN') or _read_env_file_value('DISCORD_TOKEN') or _read_env_file_value('TOKEN')
 PREFIX = '!'
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pokemon_game.db')
 OWNER_IDS = {
