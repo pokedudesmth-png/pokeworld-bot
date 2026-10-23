@@ -3091,15 +3091,30 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             async def challenge_timeout():
                 await cleanup(); await TimedView.on_timeout(challenge)
             challenge.on_timeout=challenge_timeout
+            async def challenge_on_error(interaction, error, item):
+                print(f'[BET VIEW ERROR] user={getattr(interaction.user, "id", "unknown")} item={getattr(item, "label", type(item).__name__)} error={error!r}')
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message(
+                            '❌ The bet button hit an error. Please tell a bot developer and check the bot console.',
+                            ephemeral=True
+                        )
+                except Exception:
+                    pass
+            challenge.on_error = challenge_on_error
             async def accept_cb(interaction):
                 nonlocal settled
                 if interaction.user.id != opponent.id:
                     return await interaction.response.send_message('Only the challenged player can accept this bet.', ephemeral=True)
                 if settled:
                     return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
-                settled = True
                 # Acknowledge the click immediately; Discord otherwise reports “application did not respond”.
-                await interaction.response.defer(thinking=False)
+                try:
+                    await interaction.response.defer(thinking=False)
+                except Exception as exc:
+                    print(f'[BET ACCEPT] Could not acknowledge interaction: {exc!r}')
+                    return
+                settled = True
                 # Debit both stakes atomically once the challenge is accepted.
                 try:
                     with db() as c:
@@ -3320,11 +3335,36 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 await settle_game(score_a, score_b, outcome)
             async def decline_cb(interaction):
                 nonlocal settled
-                if interaction.user.id!=opponent.id:
-                    return await interaction.response.send_message('Only the challenged player can decline this bet.',ephemeral=True)
-                if settled: return await interaction.response.send_message('This bet has already been settled.',ephemeral=True)
-                settled=True; await cleanup(); challenge.stop()
-                await interaction.response.edit_message(content='❌ Bet declined. No coins were taken.',embed=None,view=None)
+                if interaction.user.id != opponent.id:
+                    return await interaction.response.send_message(
+                        'Only the challenged player can decline this bet.', ephemeral=True
+                    )
+                if settled:
+                    return await interaction.response.send_message(
+                        'This bet has already been settled.', ephemeral=True
+                    )
+                # Acknowledge first so Discord never shows “Application did not respond”
+                # while the challenge is being cleaned up.
+                settled = True
+                try:
+                    await interaction.response.defer(thinking=False)
+                    await cleanup()
+                    challenge.stop()
+                    if challenge.message is not None:
+                        await challenge.message.edit(
+                            content='❌ Bet declined. No coins were taken.',
+                            embed=None, view=None
+                        )
+                except Exception as exc:
+                    print(f'[BET DECLINE] Could not complete decline interaction: {exc!r}')
+                    try:
+                        if challenge.message is not None:
+                            await challenge.message.edit(
+                                content='❌ Bet declined. No coins were taken.',
+                                embed=None, view=None
+                            )
+                    except Exception as edit_exc:
+                        print(f'[BET DECLINE] Could not update challenge message: {edit_exc!r}')
             accept.callback=accept_cb; decline.callback=decline_cb
             fee_rule = '\nThe winner receives 95% of the pot and the bot takes 5%. Ties refund both stakes.' if high_stakes else ''
             challenge.message = await ctx.send(
