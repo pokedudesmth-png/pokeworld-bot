@@ -2492,7 +2492,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(price,ctx.author.id))
                 new_box_id=transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
                 c.execute("UPDATE market_listings SET status='sold',buyer_id=?,proceeds=? WHERE listing_id=? AND status='active'",(ctx.author.id,price,lid)); c.commit()
-            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace('-', ' ').title()}** from <@{seller}>!',color=discord.Color.green())
+            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** from <@{seller}>!',color=discord.Color.green())
             e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{new_box_id}`',inline=True)
             e.set_footer(text=f'Listing #{lid} · Seller can claim proceeds with !market claim {lid}')
             return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
@@ -2503,7 +2503,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT pokemon_id,pokemon_name,shiny FROM market_listings WHERE listing_id=? AND seller_id=? AND status='active'",(lid,ctx.author.id)).fetchone()
                 if not row: c.rollback(); return await ctx.send('❌ No active listing with that ID belongs to you.')
                 pokemon_id,pname,listing_shiny=row; transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
-            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'{"✨ " if listing_shiny else ""}**{pname.replace('-', ' ').title()}** has been returned to your collection.',color=discord.Color.orange()))
+            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'{"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** has been returned to your collection.',color=discord.Color.orange()))
         if action=='claim':
             if details.lower()=='all':
                 with db() as c:
