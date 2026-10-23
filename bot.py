@@ -670,8 +670,8 @@ async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level
         e.set_footer(text=f'User ID: {user.id} • Shiny-only Pokémon log')
         try:
             await pokemon_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f'[POKEMON LOG DELIVERY ERROR] guild={guild.id} channel={pokemon_id}: {type(exc).__name__}: {exc}')
     # Public rare-spawn channel: intentionally concise, only shiny + who acquired it.
     rare_id = settings.get('rare_spawn_channel')
     rare_channel = guild.get_channel(int(rare_id)) if rare_id else None
@@ -683,8 +683,8 @@ async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level
             e.set_thumbnail(url=image_url)
         try:
             await rare_channel.send(embed=e, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f'[RARESPAWN DELIVERY ERROR] guild={guild.id} channel={rare_id}: {type(exc).__name__}: {exc}')
 
 
 class NPCBattleView(TimedView):
@@ -1368,8 +1368,29 @@ class Game(commands.Cog):
             await ctx.send('⚠️ You cannot start a raid battle while a hunt or legendary battle is active. Finish that encounter first.')
             return False
 
-        # No global lock for ordinary commands: inventory, healing, shop, dex, box,
-        # team management, and all unrelated commands remain available during encounters.
+        # Lock unrelated commands while a hunt, NPC battle, raid, legendary fight, or PvP challenge is active.
+        # Encounter controls remain available so the player can finish or cancel the activity.
+        active_view = ACTIVE_VIEWS.get(uid)
+        active_activity = bool(hunt_active or legendary_active or raid_active or active_view is not None)
+        encounter_controls = {
+            'hint','i','clue','catch','c','guess','cancel','stop','quit',
+            'battle','fight','b','pvp','duel','challenge','chall','legendarybattle','lbattle','lgbattle','bossfight',
+            'raid','tradeaccept'
+        }
+        # `!raid` is allowed only for its active encounter controls; starting another raid is blocked above.
+        if active_activity and name not in encounter_controls:
+            await ctx.send('⏳ Finish or cancel your current hunt/battle first. Other commands are temporarily locked while it is active.')
+            return False
+        # Prevent restarting the same activity while it is active.
+        if is_hunt and hunt_active:
+            await ctx.send('⚠️ You already have an active hunt. Finish it or use `!cancel` first.')
+            return False
+        if is_legendary and legendary_active:
+            await ctx.send('⚠️ You already have an active legendary battle. Finish it or use `!cancel` first.')
+            return False
+        if is_raid_battle and raid_active:
+            await ctx.send('⚠️ You already have an active raid battle. Finish it or use `!cancel` first.')
+            return False
         return True
     @commands.command(name='start',aliases=['begin','st'],description='Start your adventure.')
     async def start(self,ctx):
@@ -2386,6 +2407,33 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             self.challenges.pop(ctx.author.id,None);self.challenges.pop(opponent.id,None);ACTIVE_VIEWS.pop(ctx.author.id,None);ACTIVE_VIEWS.pop(opponent.id,None);await i.response.edit_message(content='❌ Challenge declined.',view=None)
         accept.callback=acc;decline.callback=dec
         view.message=await ctx.send(f'⚔️ <@{ctx.author.id}> challenged <@{opponent.id}> to a Pokémon battle!\n⏳ They have 30 seconds to accept or decline. After acceptance, the battle stays active until it ends or is cancelled.',view=view); ACTIVE_VIEWS[ctx.author.id]=view; ACTIVE_VIEWS[opponent.id]=view
+    @commands.command(name='iteminfo', aliases=['item-info'], description='Show detailed information about a shop item.')
+    async def iteminfo(self, ctx, *, name: str):
+        """Show information for an item by its name or catalogue key."""
+        query = name.strip().casefold().replace('_', ' ').replace('-', ' ')
+        found = None
+        for key, (slug, label, cost, description, short_id) in SHOP_ITEMS.items():
+            if query in {slug.casefold().replace('-', ' '), label.casefold(), str(key), short_id.casefold()}:
+                found = (key, slug, label, cost, description, short_id)
+                break
+        if not found:
+            # Allow a unique partial item name, but never guess if multiple match.
+            matches = [(key, slug, label, cost, description, short_id) for key, (slug, label, cost, description, short_id) in SHOP_ITEMS.items() if query in label.casefold() or query in slug.casefold().replace('-', ' ')]
+            if len(matches) == 1:
+                found = matches[0]
+            elif len(matches) > 1:
+                return await ctx.send('That matches multiple items. Please provide the full item name.')
+        if not found:
+            return await ctx.send(f'❌ Item **{discord.utils.escape_markdown(name)}** was not found. Use `!shop` to browse available items.')
+        key, slug, label, cost, description, short_id = found
+        e = discord.Embed(title=f'{item_emoji(slug)} {label}', description=description, color=discord.Color.blurple())
+        e.add_field(name='Shop Price', value=f'**{cost:,}** {get_vantacoin_emoji()} VantaCoins', inline=True)
+        e.add_field(name='Item ID', value=f'`{key}` · `{short_id}`', inline=True)
+        category = 'Held Item' if slug in TYPE_HELD_ITEMS or slug in {'leftovers','choice-band','choice-specs','choice-scarf','life-orb','expert-belt','focus-sash','assault-vest','rocky-helmet','muscle-band','wise-glasses','shell-bell','safety-goggles','heavy-duty-boots'} else ('TM' if 'tm' in slug else 'Consumable')
+        e.add_field(name='Category', value=category, inline=True)
+        e.set_footer(text='PokéVanta Item Guide')
+        await ctx.send(embed=e)
+
     @commands.command(name='shop',aliases=['store'],description='Browse the item shop or buy items by name, shortform, or ID.')
     async def shop(self,ctx,action:Optional[str]=None,*,product:Optional[str]=None):
         if action and action.lower()=='buy':
@@ -3050,7 +3098,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 if settled:
                     return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
                 settled = True
-                await interaction.response.defer()
+                # Acknowledge the click immediately; Discord otherwise reports “application did not respond”.
+                await interaction.response.defer(thinking=False)
                 # Debit both stakes atomically once the challenge is accepted.
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE')
@@ -3286,7 +3335,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                     mode_view.stop()
                     await begin_challenge(selected)
                 button.callback=mode_cb; mode_view.add_item(button)
-            await ctx.send(f'🎰 {ctx.author.mention}, which high-stakes game do you want to play against {opponent.mention}?',view=mode_view)
+            mode_view.message = await ctx.send(f'🎰 {ctx.author.mention}, which high-stakes game do you want to play against {opponent.mention}?',view=mode_view)
         else:
             await begin_challenge('roll')
 
@@ -4412,7 +4461,7 @@ class CarlStyleExtensions(commands.Cog):
         if not await self.require_permission(ctx, 'manage_guild', 'Manage Server'): return
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel', channel.id)
-        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Command and button logs will also use this channel whenever a category-specific log channel is not configured. Use `!setpokemonlog`, `!settradinglog`, `!setcoinslog`, or `!setcommandlog` to configure separate game-log channels.')
+        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Command and button logs will also use this channel whenever a category-specific log channel is not configured. Use `!setpokemonlog`, `!settradinglog`, or `!setcoinslog` to configure separate game-log channels.')
 
     @commands.hybrid_command(name='setpokemonlog')
     async def set_pokemon_log(self, ctx, channel: discord.TextChannel):
@@ -4436,24 +4485,19 @@ class CarlStyleExtensions(commands.Cog):
 
     @commands.hybrid_command(name='settradinglog')
     async def set_trading_log(self, ctx, channel: discord.TextChannel):
-        if not await self.require_dev(ctx): return
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ Only configured PokéVanta bot developers can use `!settradinglog`.')
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel_trading', channel.id)
         await ctx.send(f'✅ Trading logs will be sent to {channel.mention}.')
 
     @commands.hybrid_command(name='setcoinslog')
     async def set_coins_log(self, ctx, channel: discord.TextChannel):
-        if not await self.require_dev(ctx): return
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setcoinslog`.')
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel_coins', channel.id)
         await ctx.send(f'✅ Coin logs will be sent to {channel.mention}.')
-
-    @commands.hybrid_command(name='setcommandlog')
-    async def set_command_log(self, ctx, channel: discord.TextChannel):
-        if not await self.require_dev(ctx): return
-        if not ctx.guild: return
-        self.setting(ctx.guild.id, 'log_channel_commands', channel.id)
-        await ctx.send(f'✅ General command and component-interaction logs will be sent to {channel.mention}.')
 
     def resolve_role(self, guild, value):
         """Resolve a role from a mention, numeric ID, or exact name."""
@@ -5214,7 +5258,6 @@ class Bot(commands.Bot):
                     pass
                 return
         await self.process_commands(message)
-    @commands.Cog.listener()
     async def on_command_completion(self, ctx):
         """Record gameplay command activity for developers only; logs stay in the bot database."""
         if not getattr(ctx, 'command', None) or not ctx.guild:
@@ -5242,7 +5285,7 @@ class Bot(commands.Bot):
             pass
         # Mirror completed command activity into the server's configured log channel.
         try:
-            log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins', 'commands': 'log_channel_commands'}.get(category, 'log_channel_commands')
+            log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins'}.get(category, 'log_channel')
             log_id = self.setting(ctx.guild.id, log_key)
             log_channel = ctx.guild.get_channel(int(log_id)) if log_id else None
             # If a category-specific channel has not been configured (or was deleted),
@@ -5258,10 +5301,9 @@ class Bot(commands.Bot):
                 e.add_field(name='Channel', value=getattr(ctx.channel, 'mention', str(ctx.channel)), inline=True)
                 e.add_field(name='Input', value=discord.utils.escape_markdown(details.replace('`', "'") or '(no text)')[:1000], inline=False)
                 await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f'[LOG DELIVERY ERROR] command log guild={ctx.guild.id}: {type(exc).__name__}: {exc}')
 
-    @commands.Cog.listener()
     async def on_interaction(self, interaction):
         """Mirror button/select interactions (including bet games) to the configured log channel."""
         if not interaction.guild or not interaction.user or getattr(interaction.user, 'bot', False):
@@ -5280,7 +5322,7 @@ class Bot(commands.Bot):
             elif any(k in custom for k in ('bet', 'coin', 'roll', 'roulette', 'blackjack', 'hit', 'stand')):
                 log_key = 'log_channel_coins'
             else:
-                log_key = 'log_channel_commands'
+                log_key = 'log_channel'
             log_id = self.setting(interaction.guild.id, log_key)
             log_channel = interaction.guild.get_channel(int(log_id)) if log_id else None
             # Component interactions also fall back to the general log channel.
@@ -5301,8 +5343,8 @@ class Bot(commands.Bot):
             e.add_field(name='Action', value=discord.utils.escape_markdown(action)[:1000], inline=True)
             e.add_field(name='Channel', value=getattr(interaction.channel, 'mention', str(interaction.channel)), inline=True)
             await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f'[LOG DELIVERY ERROR] component log guild={interaction.guild.id}: {type(exc).__name__}: {exc}')
 
     @commands.command(name='gamelogs', aliases=['glogs'])
     async def game_logs_command(self, ctx, category: str = 'all', limit: int = 20):
