@@ -1461,7 +1461,7 @@ class Game(commands.Cog):
         if all(r[8]<=0 for r in party):return await ctx.send('💤 All three Pokémon have fainted. Use a potion with `!useitem Potion <pokemon_id>` or a status berry before starting the boss battle.')
         lead=next((r for r in party if r[8]>0),party[0])
         # Scale boss level to the strongest of all three selected Pokémon, not the active lead.
-        boss_level=max(r[4] for r in party)+random.randint(10,15)
+        boss_level=min(300, max(r[4] for r in party)+random.randint(18,25))
         with db() as c:c.execute('UPDATE boss_encounters SET level=? WHERE user_id=?',(boss_level,uid))
         d=await pokemon_data(boss[0]);d['_level']=boss_level
         self.active_boss_battles.add(uid)
@@ -1471,7 +1471,7 @@ class Game(commands.Cog):
         except Exception:
             self.active_boss_battles.discard(uid)
             raise
-        e=discord.Embed(title='🔥 LEGENDARY BOSS — 3 VS 1',description=f'**Boss:** {display_name(d)} Lv. **{boss_level}**\nHP {hp_bar(max_hp(d,boss_level),max_hp(d,boss_level))}\nStatus: **Healthy**\n**Your squad:**\n'+'\n'.join(f'• **{r[3].title()}** Lv.{r[4]}\n  HP {hp_bar(r[8],r[9])}\n  Status: **{status_label(r[11] or "")}**' for r in party)+'\n\nChoose a move using the move buttons below. If a Pokémon faints, only the Switch button remains; select a healthy teammate to continue. Boss level is 10–15 levels above your highest-level teammate. Shiny status and odds were determined when this boss appeared.')
+        e=discord.Embed(title='🔥 LEGENDARY BOSS — 3 VS 1',description=f'**Boss:** {display_name(d)} Lv. **{boss_level}**\nHP {hp_bar(max_hp(d,boss_level),max_hp(d,boss_level))}\nStatus: **Healthy**\n**Your squad:**\n'+'\n'.join(f'• **{r[3].title()}** Lv.{r[4]}\n  HP {hp_bar(r[8],r[9])}\n  Status: **{status_label(r[11] or "")}**' for r in party)+'\n\nChoose a move using the move buttons below. If a Pokémon faints, only the Switch button remains; select a healthy teammate to continue. Boss level is 18–25 levels above your highest-level teammate. Shiny status and odds were determined when this boss appeared.')
         e.color=discord.Color.dark_red()
         if sprite(d,shiny=bool(boss[3])):e.set_image(url=sprite(d,shiny=bool(boss[3])))
         v.message=await ctx.send(embed=e,view=v); ACTIVE_VIEWS[uid]=v
@@ -1688,13 +1688,13 @@ class Game(commands.Cog):
             'ccdelete'
         }
         categories = {
-            'start': 'Adventure', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
+            'start': 'Adventure', 'profile': 'Adventure', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
             'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
             'select': 'Teams & Battles', 'setteam': 'Teams & Battles', 'team': 'Teams & Battles', 'legendarybattle': 'Teams & Battles', 'battle': 'Teams & Battles', 'challenge': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies',
             'add': 'Developer Controls', 'remove': 'Developer Controls',
             'trade': 'Trading', 'tradeadd': 'Trading', 'traderemove': 'Trading', 'tradeconfirm': 'Trading',
-            'shop': 'Coins & Shop', 'daily': 'Coins & Shop', 'balance': 'Coins & Shop', 'leaderboard': 'Coins & Shop', 'bet': 'Coins & Shop',
+            'shop': 'Coins & Shop', 'market': 'Coins & Shop', 'give': 'Coins & Shop', 'daily': 'Coins & Shop', 'balance': 'Coins & Shop', 'bal': 'Coins & Shop', 'leaderboard': 'Coins & Shop', 'bet': 'Coins & Shop', 'speak': 'Server Setup',
             'inventory': 'Inventory & Items', 'giveitem': 'Inventory & Items', 'takeitem': 'Inventory & Items', 'useitem': 'Inventory & Items', 'usetm': 'Inventory & Items',
             'roll': 'Utilities', 'choose': 'Utilities', 'poll': 'Utilities', 'serverinfo': 'Utilities', 'userinfo': 'Utilities', 'remind': 'Utilities',
             'tag': 'Tags & Custom Commands', 'tags': 'Tags & Custom Commands', 'tagset': 'Tags & Custom Commands', 'tagdelete': 'Tags & Custom Commands', 'ccset': 'Tags & Custom Commands', 'ccdelete': 'Tags & Custom Commands',
@@ -1706,7 +1706,7 @@ class Game(commands.Cog):
         category_aliases = {
             'box': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'pokedex': 'Box & Pokédex', 'pokemon': 'Box & Pokédex',
             'adventure': 'Adventure', 'hunt': 'Adventure', 'battle': 'Teams & Battles', 'teams': 'Teams & Battles',
-            'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'trade': 'Trading', 'shop': 'Coins & Shop', 'coins': 'Coins & Shop',
+            'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'trade': 'Trading', 'shop': 'Coins & Shop', 'market': 'Coins & Shop', 'm': 'Coins & Shop', 'coins': 'Coins & Shop',
             'items': 'Inventory & Items', 'inventory': 'Inventory & Items', 'utility': 'Utilities', 'utilities': 'Utilities', 'fun': 'Utilities',
             'tags': 'Tags & Custom Commands', 'custom': 'Tags & Custom Commands', 'mod': 'Moderation', 'moderation': 'Moderation',
             'config': 'Server Setup', 'setup': 'Server Setup', 'server': 'Server Setup', 'dev': 'Developer Controls', 'developer': 'Developer Controls',
@@ -1772,6 +1772,10 @@ class Game(commands.Cog):
                     'traderemove': 'Remove an offer from the active trade.',
                     'tradeconfirm': 'Confirm the active trade when both trainers are ready.',
                     'shop': 'Browse the shop and purchase available items.',
+                    'market': 'Browse the player-to-player Pokémon market. Use !m as a short alias; supports view, offer, buy, listings, remove, and claim.',
+                    'give': 'Transfer VantaCoins to another trainer from your balance.',
+                    'profile': 'View your adventure stats, trainer progress, coins, and Pokémon collection.',
+                    'speak': 'Post an announcement embed with text and optional attached GIF, image, or video to a chosen channel.',
                     'daily': 'Claim your daily rewards.',
                     'balance': 'View your VantaCoin balance and trainer progress.',
                     'inventory': 'View items in your inventory.',
@@ -1810,7 +1814,7 @@ class Game(commands.Cog):
         if not requested:
             embed.title = '📘 PokéVanta Help'
             embed.description = ('Choose a category below. Run the matching command to see every command in that category, all in one embed.\n'
-                                 'Example: `!help box`\n\n'
+                                 'Example: `!help box` · `!help coins`\nMarket shortcut: `!m view recent`, `!m offer <Pokémon ID> <price>`, `!m buy <listing ID>`, `!m claim <listing ID>`.\n\n'
                                  '**Developer-only commands are marked clearly and can only be used by configured PokéVanta bot developers.**')
             all_categories = sorted({cat for cat, _ in command_rows}, key=lambda x: x.lower())
             for cat in all_categories:
@@ -2270,7 +2274,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             self.challenges.pop(ctx.author.id,None);self.challenges.pop(opponent.id,None);ACTIVE_VIEWS.pop(ctx.author.id,None);ACTIVE_VIEWS.pop(opponent.id,None);await i.response.edit_message(content='❌ Challenge declined.',view=None)
         accept.callback=acc;decline.callback=dec
         view.message=await ctx.send(f'⚔️ <@{ctx.author.id}> challenged <@{opponent.id}> to a Pokémon battle!\n⏳ They have 30 seconds to accept or decline. After acceptance, the battle stays active until it ends or is cancelled.',view=view); ACTIVE_VIEWS[ctx.author.id]=view; ACTIVE_VIEWS[opponent.id]=view
-    @commands.command(name='shop',aliases=['market','store'],description='Browse the market or buy items by name, shortform, or ID.')
+    @commands.command(name='shop',aliases=['store'],description='Browse the item shop or buy items by name, shortform, or ID.')
     async def shop(self,ctx,action:Optional[str]=None,*,product:Optional[str]=None):
         if action and action.lower()=='buy':
             if not product:
@@ -2301,6 +2305,38 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             consumable = ('berry' in key) or key in {'potion','super-potion','hyper-potion','max-potion','full-restore'}
             howto = f'Use `!useitem {shortform} <pokemon_id>`' if consumable else f'Equip with `!giveitem {shortform} <pokemon_id>`'
             return await ctx.send(f'🛒 **Purchase successful!**\nBought {item_emoji(key)} **{label} ×{quantity}** for **{total:,} {get_vantacoin_emoji()} VantaCoins**.\n🎒 Added to your inventory. Shortform: `{shortform}`.\n💰 Remaining balance: **{balance:,} {get_vantacoin_emoji()} VantaCoins**.\n{howto}.')
+        if action and action.lower() in ('sell','sellback'):
+            if not product:
+                return await ctx.send('Usage: `!market sell <item name|shortform|id> [quantity]`')
+            quantity=1
+            bits=product.rsplit(maxsplit=1)
+            if len(bits)==2 and bits[1].isdigit(): product,quantity=bits[0],int(bits[1])
+            if quantity<1 or quantity>1000:
+                return await ctx.send('❌ Quantity must be between 1 and 1000.')
+            product_id=resolve_shop_product(product)
+            if product_id is None:
+                return await ctx.send(f'❌ I could not find **{product}**. Use `!market` to browse the market.')
+            key,label,cost,desc,shortform=SHOP_ITEMS[product_id]
+            payout=max(1, cost//2)*quantity
+            try:
+                with db() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    row=c.execute('SELECT amount FROM inventory WHERE user_id=? AND item=?',(ctx.author.id,key)).fetchone()
+                    owned=int(row[0]) if row else 0
+                    if owned < quantity:
+                        c.rollback()
+                        return await ctx.send(f'❌ You only have **{owned}× {label}** to sell.')
+                    if owned == quantity:
+                        c.execute('DELETE FROM inventory WHERE user_id=? AND item=?',(ctx.author.id,key))
+                    else:
+                        c.execute('UPDATE inventory SET amount=amount-? WHERE user_id=? AND item=?',(quantity,ctx.author.id,key))
+                    c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,ctx.author.id))
+                    c.commit()
+            except sqlite3.Error:
+                return await ctx.send('❌ Sale failed. Please try again.')
+            e=discord.Embed(title='💎 Vanta Market — Sale Complete', description=f'Sold {item_emoji(key)} **{label} ×{quantity}** for **{payout:,} {get_vantacoin_emoji()} VantaCoins**.', color=discord.Color.green())
+            e.set_footer(text='Market resale value: 50% of the listed purchase price.')
+            return await ctx.send(embed=e)
         category = 'all'
         if action and action.lower() == 'view':
             requested = (product or 'all').strip().lower().replace('-', ' ').replace('_', ' ')
@@ -2315,6 +2351,104 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 return await ctx.send('❌ Category not found. Use `!shop view berries`, `!shop view potions`, `!shop view held`, or `!shop view all`.')
         view=ShopView(ctx.author.id, category, guild=ctx.guild)
         view.message=await ctx.send(embed=view.make_embed(),view=view)
+
+    @commands.command(name='market', aliases=['m','trademarket','globaltrade'], description='List, browse, buy, or sell Pokémon on the Vanta global market.')
+    async def market(self, ctx, action: Optional[str] = None, *, details: Optional[str] = None):
+        """PokéMeow-inspired player-to-player Pokémon listings market."""
+        with db() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS market_listings (listing_id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER NOT NULL, pokemon_id INTEGER NOT NULL, pokemon_name TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', buyer_id INTEGER, proceeds INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)")
+        action = (action or '').lower().strip()
+        details = (details or '').strip()
+        if not action:
+            e=discord.Embed(title='🌐 Vanta Global Market',description='Trade Pokémon with other trainers using VantaCoins.',color=discord.Color.blurple())
+            e.add_field(name='🔎 Browse',value='`!market view recent`\n`!market view <Pokémon name>`\n`!market view user @user`',inline=False)
+            e.add_field(name='💰 List a Pokémon',value='`!market offer <Pokémon ID> <price>`\nExample: `!market offer 12 2500`',inline=False)
+            e.add_field(name='🛒 Buy / your listings',value='`!market buy <listing ID>`\n`!market listings`',inline=True)
+            e.add_field(name='↩️ Remove / claim',value='`!market remove <listing ID>`\n`!market claim <listing ID>`',inline=True)
+            e.set_footer(text='5% market fee applies when claiming sold listings. Use !shop for items.')
+            return await ctx.send(embed=e)
+        if action == 'offer':
+            bits=details.split()
+            if len(bits)!=2 or not all(x.isdigit() for x in bits): return await ctx.send('Usage: `!market offer <Pokémon ID> <price>`')
+            pokemon_id,price=map(int,bits)
+            if price<1 or price>2_000_000_000: return await ctx.send('❌ Price must be between 1 and 2,000,000,000 VantaCoins.')
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                mon=c.execute('SELECT instance_id,name,level,shiny,nickname,held_item FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
+                if not mon: c.rollback(); return await ctx.send('❌ That Pokémon ID is not yours. Use `!box` to find its ID.')
+                if mon[5]: c.rollback(); return await ctx.send('❌ Remove its held item before listing this Pokémon.')
+                for table in ('team','boss_party','raid_party'): c.execute(f'DELETE FROM {table} WHERE instance_id=?',(pokemon_id,))
+                c.execute('UPDATE pokemon SET user_id=0 WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id))
+                cur=c.execute("INSERT INTO market_listings(seller_id,pokemon_id,pokemon_name,price,status,created_at) VALUES(?,?,?,?,'active',?)",(ctx.author.id,pokemon_id,mon[1],price,int(time.time())))
+                lid=cur.lastrowid; c.commit()
+            shiny='✨ Shiny ' if mon[3] else ''
+            e=discord.Embed(title='📦 Pokémon listed successfully!',description=f'{shiny}**{mon[1].title()}** (Lv. {mon[2]}) is now on the global market.',color=discord.Color.green())
+            e.add_field(name='Listing ID',value=f'`{lid}`',inline=True); e.add_field(name='Asking price',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True)
+            e.set_footer(text='The Pokémon is held safely by the market until purchased or removed.')
+            return await ctx.send(embed=e)
+        if action in ('view','browse','search'):
+            if not details or details.lower()=='recent':
+                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price FROM market_listings WHERE status='active' ORDER BY listing_id DESC LIMIT 10").fetchall()
+                title='🆕 Recent Pokémon Listings'
+            elif details.lower().startswith('user '):
+                target=ctx.message.mentions[0].id if ctx.message.mentions else None
+                if target is None:
+                    val=details[5:].strip().strip('<@!>')
+                    if val.isdigit(): target=int(val)
+                if target is None: return await ctx.send('Usage: `!market view user @user`')
+                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price FROM market_listings WHERE status='active' AND seller_id=? ORDER BY listing_id DESC LIMIT 10",(target,)).fetchall()
+                title=f'🧑‍💼 Active listings by <@{target}>'
+            else:
+                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price FROM market_listings WHERE status='active' AND lower(pokemon_name) LIKE ? ORDER BY listing_id DESC LIMIT 10",(f'%{details.lower()}%',)).fetchall()
+                title=f'🔎 Market search: {details[:80]}'
+            e=discord.Embed(title=title,color=discord.Color.blurple())
+            e.description='\n\n'.join(f'**#{lid} · {name.title()}** — **{price:,}** {get_vantacoin_emoji()}\nSeller: <@{seller}> · `!market buy {lid}`' for lid,seller,name,price in rows) if rows else 'No active listings found. Try `!market view recent`.'
+            e.set_footer(text='Showing up to 10 active listings.')
+            return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
+        if action in ('listings','offers'):
+            with db() as c: rows=c.execute("SELECT listing_id,pokemon_name,price,status FROM market_listings WHERE seller_id=? AND status IN ('active','sold') ORDER BY listing_id DESC LIMIT 15",(ctx.author.id,)).fetchall()
+            e=discord.Embed(title=f'📋 {ctx.author.display_name}’s Market Listings',color=discord.Color.blurple())
+            e.description='\n\n'.join((f'**#{lid} · {name.title()}** — {price:,} coins · Active\nRemove: `!market remove {lid}`' if status=='active' else f'**#{lid} · {name.title()}** — Sold · Claim: `!market claim {lid}`') for lid,name,price,status in rows) if rows else 'You have no active or unclaimed sold listings.'
+            return await ctx.send(embed=e)
+        if action=='buy':
+            if not details.isdigit() or int(details)<1: return await ctx.send('Usage: `!market buy <listing ID>`')
+            lid=int(details)
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                listing=c.execute("SELECT seller_id,pokemon_id,pokemon_name,price FROM market_listings WHERE listing_id=? AND status='active'",(lid,)).fetchone()
+                if not listing: c.rollback(); return await ctx.send('❌ That listing is no longer available.')
+                seller,pokemon_id,pname,price=listing
+                if seller==ctx.author.id: c.rollback(); return await ctx.send('❌ You cannot buy your own listing. Use `!market remove {lid}`.')
+                row=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone(); balance=int(row[0]) if row else 0
+                if balance<price: c.rollback(); return await ctx.send(f'❌ Not enough balance. Price: **{price:,}** coins; your balance: **{balance:,}**.')
+                if not c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=0',(pokemon_id,)).fetchone(): c.rollback(); return await ctx.send('❌ Listing could not be verified. Please contact an administrator.')
+                c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(price,ctx.author.id))
+                c.execute('UPDATE pokemon SET user_id=? WHERE instance_id=? AND user_id=0',(ctx.author.id,pokemon_id))
+                c.execute("UPDATE market_listings SET status='sold',buyer_id=?,proceeds=? WHERE listing_id=? AND status='active'",(ctx.author.id,price,lid)); c.commit()
+            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought **{pname.title()}** from <@{seller}>!',color=discord.Color.green())
+            e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{pokemon_id}`',inline=True)
+            e.set_footer(text=f'Listing #{lid} · Seller can claim proceeds with !market claim {lid}')
+            return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
+        if action=='remove':
+            if not details.isdigit(): return await ctx.send('Usage: `!market remove <listing ID>`')
+            lid=int(details)
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT pokemon_id,pokemon_name FROM market_listings WHERE listing_id=? AND seller_id=? AND status='active'",(lid,ctx.author.id)).fetchone()
+                if not row: c.rollback(); return await ctx.send('❌ No active listing with that ID belongs to you.')
+                pokemon_id,pname=row; c.execute('UPDATE pokemon SET user_id=? WHERE instance_id=? AND user_id=0',(ctx.author.id,pokemon_id)); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
+            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'**{pname.title()}** has been returned to your collection.',color=discord.Color.orange()))
+        if action=='claim':
+            if not details.isdigit(): return await ctx.send('Usage: `!market claim <listing ID>`')
+            lid=int(details)
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT proceeds,pokemon_name FROM market_listings WHERE listing_id=? AND seller_id=? AND status='sold'",(lid,ctx.author.id)).fetchone()
+                if not row: c.rollback(); return await ctx.send('❌ No unclaimed sold listing with that ID belongs to you.')
+                gross,pname=row; fee=(gross*5)//100; payout=gross-fee
+                c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,ctx.author.id)); c.execute("UPDATE market_listings SET status='claimed',proceeds=0 WHERE listing_id=?",(lid,)); c.commit()
+            e=discord.Embed(title='💰 Market proceeds claimed!',description=f'Your **{pname.title()}** listing sold successfully.',color=discord.Color.green())
+            e.add_field(name='Sale price',value=f'{gross:,} coins',inline=True); e.add_field(name='Market fee (5%)',value=f'{fee:,} coins',inline=True); e.add_field(name='You received',value=f'**{payout:,}** {get_vantacoin_emoji()} VantaCoins',inline=True)
+            return await ctx.send(embed=e)
+        return await ctx.send('Unknown market action. Use `!market` to see all market commands.')
 
     @commands.command(name='giveitem',aliases=['equip','holditem'])
     async def giveitem(self,ctx,*,args:str):
@@ -2679,6 +2813,33 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.add_field(name='XP Progress',value=f'**{xp:,} / {level*100:,}**',inline=True)
         e.set_footer(text='Earn coins from catching Pokémon, battles and daily rewards.')
         await ctx.send(embed=e)
+
+    @commands.command(name='give', description='Give VantaCoins to another player.')
+    async def give_coins(self, ctx, member: discord.Member = None, amount: int = None):
+        if member is None or amount is None:
+            return await ctx.send('Usage: `!give @user <coins>`')
+        if member.bot or member.id == ctx.author.id:
+            return await ctx.send('❌ You can give coins to another human player, not yourself or a bot.')
+        if amount < 1 or amount > 1_000_000_000:
+            return await ctx.send('❌ Enter an amount between 1 and 1,000,000,000 VantaCoins.')
+        ensure_player(ctx.author.id); ensure_player(member.id)
+        try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                sender=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
+                balance=int(sender[0]) if sender else 0
+                if balance < amount:
+                    c.rollback()
+                    return await ctx.send(f'❌ **Not enough balance!** Your `!bal` balance is **{balance:,} {get_vantacoin_emoji()} VantaCoins**, but you tried to give **{amount:,}**.')
+                c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(amount,ctx.author.id))
+                c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(amount,member.id))
+                c.commit()
+        except sqlite3.Error:
+            return await ctx.send('❌ The transfer failed. Please try again.')
+        e=discord.Embed(title='💸 VantaCoin Transfer Successful', description=f'{ctx.author.mention} gave **{amount:,} {get_vantacoin_emoji()} VantaCoins** to {member.mention}.', color=discord.Color.green())
+        e.add_field(name='Sender balance',value=f'Use `!bal` to check your remaining coins.',inline=True)
+        e.add_field(name='Recipient',value=f'{member.mention} received **{amount:,}** coins.',inline=True)
+        await ctx.send(embed=e, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
 
     @commands.command(name='bet', description='Challenge another player to a VantaCoin wager.')
     async def bet(self, ctx, opponent: discord.Member, amount: int):
@@ -3621,7 +3782,7 @@ async def trade_embed(trade):
             member = trade['guild'].get_member(uid) if trade.get('guild') else None
             user_label = member.mention if member else f'<@{uid}>'
             confirmed_mark = '✅' if uid in trade['confirmed'] else '⬜'
-            e.add_field(name=f"{confirmed_mark} {user_label}'s offer", value='\n'.join(lines) if lines else '*(Nothing offered yet)*', inline=True)
+            e.add_field(name=f"{confirmed_mark} {member.display_name if member else 'Trainer'}'s offer", value=f'{user_label}\n' + ('\n'.join(lines) if lines else '*(Nothing offered yet)*'), inline=True)
     if trade['confirmed']:
         confirmation_lines = []
         for uid in (trade['starter'], trade['target']):
@@ -3829,12 +3990,22 @@ class CarlStyleExtensions(commands.Cog):
         if not await self.require_dev(ctx): return
         if not ctx.guild: return
         if len(message)>1500: return await ctx.send('Welcome template is too long.')
-        self.setting(ctx.guild.id,'welcome_channel',channel.id); self.setting(ctx.guild.id,'welcome_message',message)
-        # Attach a GIF/image to the !setwelcome command to save it as the welcome artwork.
+        # If a URL was pasted into the template, keep it out of the welcome text and
+        # use it as artwork only when it is a direct image/GIF URL. Uploaded media is preferred.
         media = next((a for a in getattr(ctx.message, 'attachments', []) if (a.content_type or '').startswith('image/')), None)
-        if media:
-            self.setting(ctx.guild.id,'welcome_gif',media.url)
-        await ctx.send(f'✅ Welcome messages configured for {channel.mention}.' + (' Welcome GIF/image saved!' if media else ' Attach a GIF/image to `!setwelcome` to set the welcome artwork.') + ' Placeholders: `{user}`, `{server}`, `{member_count}`.')
+        urls = re.findall(r'https?://\S+', message)
+        art_url = media.url if media else None
+        if urls:
+            candidate = urls[0].rstrip('.,)>')
+            if candidate.lower().split('?', 1)[0].endswith(('.gif','.png','.jpg','.jpeg','.webp')):
+                art_url = art_url or candidate
+            message = message.replace(urls[0], '').strip()
+            if not message:
+                message = 'Welcome {user} to {server}! Make yourself at home!'
+        self.setting(ctx.guild.id,'welcome_channel',channel.id); self.setting(ctx.guild.id,'welcome_message',message)
+        if art_url:
+            self.setting(ctx.guild.id,'welcome_gif',art_url)
+        await ctx.send(f'✅ Welcome messages configured for {channel.mention}.' + (' Welcome GIF/image saved!' if art_url else ' Attach the actual GIF/image file, or provide a direct .gif/.png/.jpg/.webp URL, to set the welcome artwork.') + ' Placeholders: `{user}`, `{server}`, `{member_count}`.')
 
     @commands.hybrid_command(name='setgoodbye')
     async def setgoodbye(self, ctx, channel: discord.TextChannel, *, message='Goodbye {user}!'):
@@ -4351,6 +4522,8 @@ class CarlStyleExtensions(commands.Cog):
         if channel:
             template=settings.get('welcome_message','Welcome {user} to {server}!')
             text=template.replace('{user}',member.mention).replace('{server}',member.guild.name).replace('{member_count}',str(member.guild.member_count))
+            # Never print a raw GIF hosting URL in the welcome embed; artwork belongs in the image slot.
+            text=re.sub(r'https?://\S+', '', text).strip()
             welcome = discord.Embed(title=f'🎉 Welcome to {member.guild.name}!', description=f'{text[:3500]}\n\nYou are our **{member.guild.member_count:,}th** member. Make yourself at home!', color=discord.Color.from_rgb(88, 101, 242), timestamp=discord.utils.utcnow())
             welcome.set_thumbnail(url=member.display_avatar.url)
             welcome.set_footer(text='We’re glad you’re here!')
