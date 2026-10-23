@@ -1216,7 +1216,7 @@ class DexView(TimedView):
 
 
 class Game(commands.Cog):
-    def __init__(self,bot):self.bot=bot;self.challenges={};self.active_boss_battles=set()
+    def __init__(self,bot):self.bot=bot;self.challenges={};self.coin_bets={};self.active_boss_battles=set()
 
     async def cog_check(self, ctx):
         """Only hunt, legendary battle, and raid battle exclude one another; all other commands stay usable."""
@@ -1636,7 +1636,7 @@ class Game(commands.Cog):
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies',
             'add': 'Developer Controls', 'remove': 'Developer Controls',
             'trade': 'Trading', 'tradeadd': 'Trading', 'traderemove': 'Trading', 'tradeconfirm': 'Trading',
-            'shop': 'Coins & Shop', 'daily': 'Coins & Shop', 'balance': 'Coins & Shop', 'leaderboard': 'Coins & Shop',
+            'shop': 'Coins & Shop', 'daily': 'Coins & Shop', 'balance': 'Coins & Shop', 'leaderboard': 'Coins & Shop', 'bet': 'Coins & Shop',
             'inventory': 'Inventory & Items', 'giveitem': 'Inventory & Items', 'takeitem': 'Inventory & Items', 'useitem': 'Inventory & Items', 'usetm': 'Inventory & Items',
             'roll': 'Utilities', 'choose': 'Utilities', 'poll': 'Utilities', 'serverinfo': 'Utilities', 'userinfo': 'Utilities', 'remind': 'Utilities',
             'tag': 'Tags & Custom Commands', 'tags': 'Tags & Custom Commands', 'tagset': 'Tags & Custom Commands', 'tagdelete': 'Tags & Custom Commands', 'ccset': 'Tags & Custom Commands', 'ccdelete': 'Tags & Custom Commands',
@@ -2622,6 +2622,114 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.set_footer(text='Earn coins from catching Pokémon, battles and daily rewards.')
         await ctx.send(embed=e)
 
+    @commands.command(name='bet', description='Challenge another player to a VantaCoin wager.')
+    async def bet(self, ctx, opponent: discord.Member, amount: int):
+        """Challenge a player: !bet @user <amount>. Winner takes both stakes."""
+        if ctx.guild is None:
+            return await ctx.send('❌ Use `!bet` in a server.')
+        if opponent.bot or opponent.id == ctx.author.id:
+            return await ctx.send('❌ You must challenge another human player.')
+        if amount < 1 or amount > 1_000_000:
+            return await ctx.send('❌ Bet between **1 and 1,000,000 VantaCoins** per player.')
+        if ctx.author.id in self.coin_bets or opponent.id in self.coin_bets:
+            return await ctx.send('❌ One of you already has a pending or active coin bet.')
+
+        ensure_player(ctx.author.id)
+        ensure_player(opponent.id)
+        with db() as c:
+            challenger_row = c.execute('SELECT coins FROM players WHERE user_id=?', (ctx.author.id,)).fetchone()
+            opponent_row = c.execute('SELECT coins FROM players WHERE user_id=?', (opponent.id,)).fetchone()
+        challenger_coins = int(challenger_row[0]) if challenger_row else 0
+        opponent_coins = int(opponent_row[0]) if opponent_row else 0
+        if challenger_coins < amount:
+            return await ctx.send(f'❌ You only have **{challenger_coins:,} {get_vantacoin_emoji()} VantaCoins**.')
+        if opponent_coins < amount:
+            return await ctx.send(f'❌ {opponent.mention} only has **{opponent_coins:,} {get_vantacoin_emoji()} VantaCoins**, not enough to match that bet.')
+
+        self.coin_bets[ctx.author.id] = opponent.id
+        self.coin_bets[opponent.id] = ctx.author.id
+        view = TimedView(timeout=60, timeout_text='⏰ Bet challenge expired. No coins were taken.')
+        accept = discord.ui.Button(label='Accept Bet', style=discord.ButtonStyle.success, emoji='🤝')
+        decline = discord.ui.Button(label='Decline', style=discord.ButtonStyle.danger, emoji='✖️')
+        view.add_item(accept)
+        view.add_item(decline)
+        settled = False
+
+        async def cleanup():
+            self.coin_bets.pop(ctx.author.id, None)
+            self.coin_bets.pop(opponent.id, None)
+
+        async def timeout_callback():
+            await cleanup()
+            await TimedView.on_timeout(view)
+        view.on_timeout = timeout_callback
+
+        async def accept_callback(interaction):
+            nonlocal settled
+            if interaction.user.id != opponent.id:
+                return await interaction.response.send_message('Only the challenged player can accept this bet.', ephemeral=True)
+            if settled:
+                return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
+            settled = True
+            await interaction.response.defer()
+            # Re-check and debit both stakes together to prevent overspending if balances changed.
+            with db() as c:
+                rows = c.execute('SELECT user_id, coins FROM players WHERE user_id IN (?, ?)', (ctx.author.id, opponent.id)).fetchall()
+                balances = {int(uid): int(coins) for uid, coins in rows}
+                if balances.get(ctx.author.id, 0) < amount or balances.get(opponent.id, 0) < amount:
+                    await cleanup()
+                    view.stop()
+                    try:
+                        await interaction.edit_original_response(content='❌ Bet cancelled: one player no longer has enough VantaCoins. No coins were taken.', embed=None, view=None)
+                    except Exception:
+                        pass
+                    return
+                c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?, ?)', (amount, ctx.author.id, opponent.id))
+                winner_id = random.choice((ctx.author.id, opponent.id))
+                pot = amount * 2
+                c.execute('UPDATE players SET coins=coins+? WHERE user_id=?', (pot, winner_id))
+                winner_balance_row = c.execute('SELECT coins FROM players WHERE user_id=?', (winner_id,)).fetchone()
+                winner_balance = int(winner_balance_row[0]) if winner_balance_row else 0
+            await cleanup()
+            view.stop()
+            winner_mention = f'<@{winner_id}>'
+            loser_id = opponent.id if winner_id == ctx.author.id else ctx.author.id
+            embed = discord.Embed(title='🪙 VantaCoin Head-to-Head Bet', color=discord.Color.gold())
+            embed.description = (f'**{ctx.author.mention}** challenged **{opponent.mention}**.\n'
+                                f'Each player wagered **{amount:,} {get_vantacoin_emoji()} VantaCoins**.\n'
+                                f'🏆 {winner_mention} wins the **{pot:,} {get_vantacoin_emoji()} VantaCoin pot**!\n'
+                                f'💸 <@{loser_id}> lost **{amount:,}**; winner netted **+{amount:,}**.')
+            embed.add_field(name='Winner Balance', value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
+            embed.set_footer(text='Winner is chosen randomly • Both stakes are debited only after acceptance.')
+            try:
+                await interaction.edit_original_response(content=None, embed=embed, view=None)
+            except Exception:
+                await ctx.send(embed=embed)
+
+        async def decline_callback(interaction):
+            nonlocal settled
+            if interaction.user.id != opponent.id:
+                return await interaction.response.send_message('Only the challenged player can decline this bet.', ephemeral=True)
+            if settled:
+                return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
+            settled = True
+            await cleanup()
+            view.stop()
+            await interaction.response.edit_message(content='❌ Bet declined. No coins were taken.', embed=None, view=None)
+
+        accept.callback = accept_callback
+        decline.callback = decline_callback
+        try:
+            await ctx.send(
+                f'🪙 **VantaCoin Bet Challenge!**\n{ctx.author.mention} challenges {opponent.mention} to wager **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\n'
+                f'Both stakes make a **{amount * 2:,} coin pot**. Accept to enter a random head-to-head toss; the winner takes the pot (**+{amount:,} net**).\n'
+                f'{opponent.mention}, you have 60 seconds to accept or decline. No coins are taken unless you accept.',
+                view=view
+            )
+        except Exception:
+            await cleanup()
+            raise
+
     async def dev_confirmation(self, ctx, title, description, action):
         # Developer confirmations do not expire; avoid stale timeout messages after a completed action.
         view=TimedView(timeout=None, timeout_text='')
@@ -2737,6 +2845,51 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         if len(choices) > 50:
             return await ctx.send('❌ Please provide no more than 50 choices.')
         await ctx.send(f'🎯 **I choose:** {discord.utils.escape_mentions(random.choice(choices))}')
+
+    @commands.command(name='speak', description='Send an announcement message or attached media to a chosen channel.')
+    async def speak(self, ctx, channel: discord.TextChannel, *, message: str = ''):
+        """Post text and/or attached images, GIFs, or videos in another channel."""
+        if not await self.require_permission(ctx, 'manage_messages', 'Manage Messages'):
+            return
+        if channel.guild.id != ctx.guild.id:
+            return await ctx.send('❌ Please choose a text channel in this server.')
+
+        attachments = list(ctx.message.attachments)
+        if not message.strip() and not attachments:
+            return await ctx.send(
+                'Usage: `!speak #channel <message>` — you can also attach a photo, GIF, or video to the command.'
+            )
+        if len(attachments) > 10:
+            return await ctx.send('❌ Discord allows at most 10 attachments in one message.')
+
+        # Check the bot can actually post in the destination before attempting the send.
+        me = ctx.guild.me
+        perms = channel.permissions_for(me) if me else None
+        if not perms or not perms.send_messages:
+            return await ctx.send(f'❌ I do not have **Send Messages** permission in {channel.mention}.')
+        if attachments and not perms.attach_files:
+            return await ctx.send(f'❌ I need **Attach Files** permission in {channel.mention} to send that media.')
+
+        files = []
+        try:
+            for attachment in attachments:
+                files.append(await attachment.to_file())
+            await channel.send(content=message.strip() or None, files=files or None)
+        except discord.Forbidden:
+            return await ctx.send(f'❌ Discord denied my access to {channel.mention}. Check my channel permissions.')
+        except discord.HTTPException as exc:
+            return await ctx.send(f'❌ I could not post that announcement. The media may be too large or invalid. ({exc})')
+        finally:
+            for file in files:
+                try:
+                    file.close()
+                except Exception:
+                    pass
+
+        try:
+            await ctx.message.add_reaction('✅')
+        except discord.HTTPException:
+            pass
 
     @commands.command(name='poll')
     async def utility_poll(self, ctx, *, question: str):
