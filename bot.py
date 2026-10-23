@@ -1,5 +1,5 @@
 import os, random, sqlite3, asyncio, time, re, json, base64, inspect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 import aiohttp
@@ -201,6 +201,7 @@ def db(): return sqlite3.connect(DB)
 def setup():
     with db() as c:
         c.execute('CREATE TABLE IF NOT EXISTS players(user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 500, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, daily INTEGER DEFAULT 0, daily_streak INTEGER DEFAULT 0, started INTEGER DEFAULT 0)')
+        c.execute('CREATE TABLE IF NOT EXISTS game_logs(log_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, category TEXT NOT NULL, user_id INTEGER, guild_id INTEGER, command TEXT NOT NULL, details TEXT NOT NULL)')
         c.execute("CREATE TABLE IF NOT EXISTS bot_bans(user_id INTEGER PRIMARY KEY, reason TEXT NOT NULL DEFAULT 'Violation of game rules', banned_by INTEGER NOT NULL, banned_at INTEGER NOT NULL)")
         c.execute('CREATE TABLE IF NOT EXISTS nick_freezes(guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, freezer_id INTEGER NOT NULL, original_nick TEXT, locked_nick TEXT, PRIMARY KEY(guild_id,user_id))')
         freeze_cols=[r[1] for r in c.execute('PRAGMA table_info(nick_freezes)').fetchall()]
@@ -2081,7 +2082,7 @@ class Game(commands.Cog):
             base={}; types='Unknown'; abilities='Unknown'; d=None
         hp=max(0,min(hp,maxhp)); maxhp=max(1,maxhp); ratio=hp/maxhp
         filled=max(0,min(10,round(ratio*10))); bar='▰'*filled+'▱'*(10-filled)
-        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
+        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID:** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
         held_label=(ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()) if held else 'None'
         e.add_field(name='Condition',value=f'**Status:** {(status or "healthy").replace("-"," ").title()}\n**Held item:** {item_emoji(held) + " " if held else ""}{held_label}\n**Ability:** {abilities}',inline=True)
@@ -2954,8 +2955,12 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if len(parts)!=1 or not parts[0].isdigit():
                 return await ctx.send('Usage: `!bet @user <amount>` or `!bet @user high-stakes <amount>`')
             amount=int(parts[0])
-        if amount < 1 or amount > 2_000_000_000:
-            return await ctx.send('❌ Bet an amount from **1 to 2,000,000,000 VantaCoins** per player.')
+        if amount < 1:
+            return await ctx.send('❌ Bet amount must be at least **1 VantaCoin**.')
+        if not high_stakes and amount > 500_000:
+            return await ctx.send('❌ Normal bets are limited to **500,000 VantaCoins** per player. Use `!bet @user high-stakes <amount>` for high-stakes bets.')
+        if high_stakes and amount > 4_000_000_000_000_000_000:
+            return await ctx.send('❌ That amount exceeds the database-safe maximum for a single stake.')
         if ctx.author.id in self.coin_bets or opponent.id in self.coin_bets:
             return await ctx.send('❌ One of you already has a pending or active coin bet.')
         ensure_player(ctx.author.id); ensure_player(opponent.id)
@@ -3006,9 +3011,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         c.rollback()
                         await cleanup()
                         challenge.stop()
-                        return await interaction.edit_original_response(
-                            content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.',
-                            embed=None, view=None)
+                        return await challenge.message.edit(content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.', embed=None, view=None)
                     c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?,?)',
                               (amount, ctx.author.id, opponent.id))
                     c.commit()
@@ -3047,7 +3050,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         e.add_field(name='Winner Balance', value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
                     e.set_footer(text='Stakes are debited after acceptance. High-stakes games charge 5% of the pot after a winner is determined.')
                     try:
-                        await interaction.edit_original_response(content=None, embed=e, view=None)
+                        await challenge.message.edit(content=None, embed=e, view=None)
                     except Exception:
                         await ctx.send(embed=e)
 
@@ -3100,7 +3103,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                             await interaction.response.send_message(f'Your roulette choice: **{lab}**.', ephemeral=True)
                             await maybe_spin()
                             if len(choices) < 2:
-                                await interaction.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                                try:
+                                    await roulette_view.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                                except (discord.HTTPException, AttributeError):
+                                    pass
                         btn.callback = pick_cb
                         roulette_view.add_item(btn)
                     number_select = discord.ui.Select(
@@ -3116,10 +3122,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         await interaction.response.send_message(f'Your roulette choice: exact number **{n}**.', ephemeral=True)
                         await maybe_spin()
                         if len(choices) < 2:
-                            await interaction.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                            try:
+                                await roulette_view.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                            except (discord.HTTPException, AttributeError):
+                                pass
                     number_select.callback = number_cb
                     roulette_view.add_item(number_select)
-                    await interaction.edit_original_response(content=f'🎡 **Roulette choices** — {ctx.author.mention} and {opponent.mention}, choose your own bet separately. Exact number pays only if the ball lands on that number.', embed=None, view=roulette_view)
+                    roulette_view.message = await challenge.message.edit(content=f'🎡 **Roulette choices** — {ctx.author.mention} and {opponent.mention}, choose your own bet separately. Exact number pays only if the ball lands on that number.', embed=None, view=roulette_view)
                     return
 
                 if mode == 'blackjack':
@@ -3170,7 +3179,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                                 f'It is <@{active_id}>’s turn. Only that player can Hit or Stand.')
                         for item in blackjack_view.children:
                             item.disabled = False
-                        await interaction.edit_original_response(content=text, embed=None, view=blackjack_view)
+                        await blackjack_view.message.edit(content=text, embed=None, view=blackjack_view)
                     hit = discord.ui.Button(label='Hit', style=discord.ButtonStyle.success, emoji='🃏')
                     stand = discord.ui.Button(label='Stand', style=discord.ButtonStyle.secondary, emoji='✋')
                     async def hit_cb(interaction):
@@ -3189,7 +3198,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         await update_blackjack(interaction)
                     hit.callback = hit_cb; stand.callback = stand_cb
                     blackjack_view.add_item(hit); blackjack_view.add_item(stand)
-                    await interaction.edit_original_response(content=f'🃏 **Blackjack — separate hands**\\n{ctx.author.mention}: **{hands[ctx.author.id]}** (total {hand_total(hands[ctx.author.id])})\\n{opponent.mention}: **{hands[opponent.id]}** (total {hand_total(hands[opponent.id])})\\n\\nIt is {ctx.author.mention}’s turn. Use Hit or Stand.', embed=None, view=blackjack_view)
+                    blackjack_view.message = await challenge.message.edit(content=f'🃏 **Blackjack — separate hands**\\n{ctx.author.mention}: **{hands[ctx.author.id]}** (total {hand_total(hands[ctx.author.id])})\\n{opponent.mention}: **{hands[opponent.id]}** (total {hand_total(hands[opponent.id])})\\n\\nIt is {ctx.author.mention}’s turn. Use Hit or Stand.', embed=None, view=blackjack_view)
                     return
 
                 # Roll mode remains a quick simultaneous roll.
@@ -3205,7 +3214,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 settled=True; await cleanup(); challenge.stop()
                 await interaction.response.edit_message(content='❌ Bet declined. No coins were taken.',embed=None,view=None)
             accept.callback=accept_cb; decline.callback=decline_cb
-            await ctx.send(f'🎰 **{"High-Stakes " if high_stakes else ""}VantaCoin Bet!**\n{ctx.author.mention} challenges {opponent.mention} to **{mode.title()}** for **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\nThe pot is **{amount*2:,}**; the winner receives 95% and the bot takes 5%. Ties refund both stakes.\n{opponent.mention}, accept or decline within 60 seconds.',view=challenge,allowed_mentions=discord.AllowedMentions(users=True))
+            challenge.message = await ctx.send(f'🎰 **{"High-Stakes " if high_stakes else ""}VantaCoin Bet!**\n{ctx.author.mention} challenges {opponent.mention} to **{mode.title()}** for **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\nThe pot is **{amount*2:,}**; the winner receives 95% and the bot takes 5%. Ties refund both stakes.\n{opponent.mention}, accept or decline within 60 seconds.',view=challenge,allowed_mentions=discord.AllowedMentions(users=True))
 
         if high_stakes:
             for label,mode,emoji in [('Roll','roll','🎲'),('Roulette','roulette','🎡'),('Blackjack','blackjack','🃏')]:
@@ -4344,8 +4353,36 @@ class CarlStyleExtensions(commands.Cog):
     async def setlog(self, ctx, channel: discord.TextChannel):
         if not await self.require_dev(ctx): return
         if not ctx.guild: return
-        self.setting(ctx.guild.id,'log_channel',channel.id)
-        await ctx.send(f'✅ Basic moderation/member log channel set to {channel.mention}.')
+        self.setting(ctx.guild.id, 'log_channel', channel.id)
+        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Use `!setpokemonlog`, `!settradinglog`, `!setcoinslog`, or `!setcommandlog` to configure game-log categories separately.')
+
+    @commands.hybrid_command(name='setpokemonlog')
+    async def set_pokemon_log(self, ctx, channel: discord.TextChannel):
+        if not await self.require_dev(ctx): return
+        if not ctx.guild: return
+        self.setting(ctx.guild.id, 'log_channel_pokemon', channel.id)
+        await ctx.send(f'✅ Pokémon logs will be sent to {channel.mention}.')
+
+    @commands.hybrid_command(name='settradinglog')
+    async def set_trading_log(self, ctx, channel: discord.TextChannel):
+        if not await self.require_dev(ctx): return
+        if not ctx.guild: return
+        self.setting(ctx.guild.id, 'log_channel_trading', channel.id)
+        await ctx.send(f'✅ Trading logs will be sent to {channel.mention}.')
+
+    @commands.hybrid_command(name='setcoinslog')
+    async def set_coins_log(self, ctx, channel: discord.TextChannel):
+        if not await self.require_dev(ctx): return
+        if not ctx.guild: return
+        self.setting(ctx.guild.id, 'log_channel_coins', channel.id)
+        await ctx.send(f'✅ Coin logs will be sent to {channel.mention}.')
+
+    @commands.hybrid_command(name='setcommandlog')
+    async def set_command_log(self, ctx, channel: discord.TextChannel):
+        if not await self.require_dev(ctx): return
+        if not ctx.guild: return
+        self.setting(ctx.guild.id, 'log_channel_commands', channel.id)
+        await ctx.send(f'✅ General command and component-interaction logs will be sent to {channel.mention}.')
 
     def resolve_role(self, guild, value):
         """Resolve a role from a mention, numeric ID, or exact name."""
@@ -5104,6 +5141,106 @@ class Bot(commands.Bot):
                     pass
                 return
         await self.process_commands(message)
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx):
+        """Record gameplay command activity for developers only; logs stay in the bot database."""
+        if not getattr(ctx, 'command', None) or not ctx.guild:
+            return
+        name = ctx.command.qualified_name.lower()
+        if any(x in name for x in ('trade', 'market', 'gift', 'giveitem')):
+            category = 'trading'
+        elif any(x in name for x in ('coin', 'bet', 'bal', 'daily', 'pay', 'give')):
+            category = 'coins'
+        elif any(x in name for x in ('pokemon', 'hunt', 'catch', 'box', 'info', 'team', 'select', 'evolve', 'release', 'useitem')):
+            category = 'pokemon'
+        else:
+            category = 'commands'
+        details = (ctx.message.content or '')[:500]
+        try:
+            with db() as c:
+                c.execute('INSERT INTO game_logs(created_at,category,user_id,guild_id,command,details) VALUES(?,?,?,?,?,?)',
+                          (datetime.now(timezone.utc).isoformat(), category, ctx.author.id, ctx.guild.id, name, details))
+        except Exception:
+            pass
+        # Mirror completed command activity into the server's configured log channel.
+        try:
+            log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins', 'commands': 'log_channel_commands'}.get(category, 'log_channel_commands')
+            log_id = self.setting(ctx.guild.id, log_key)
+            log_channel = ctx.guild.get_channel(int(log_id)) if log_id else None
+            if log_channel:
+                e = discord.Embed(title=f'📋 Game Command · {category.title()}', color=discord.Color.blurple(),
+                                  timestamp=datetime.now(timezone.utc))
+                e.add_field(name='User', value=f'{ctx.author} (`{ctx.author.id}`)', inline=True)
+                e.add_field(name='Command', value=f'`{name}`', inline=True)
+                e.add_field(name='Channel', value=getattr(ctx.channel, 'mention', str(ctx.channel)), inline=True)
+                e.add_field(name='Input', value=discord.utils.escape_markdown(details.replace('`', "'") or '(no text)')[:1000], inline=False)
+                await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction):
+        """Mirror button/select interactions (including bet games) to the configured log channel."""
+        if not interaction.guild or not interaction.user or getattr(interaction.user, 'bot', False):
+            return
+        # Command interactions are recorded by on_command_completion; avoid duplicates.
+        if interaction.type != discord.InteractionType.component:
+            return
+        try:
+            custom = str((interaction.data or {}).get('custom_id', '')).lower()
+            if any(k in custom for k in ('trade', 'market', 'offer', 'accept')):
+                log_key = 'log_channel_trading'
+            elif any(k in custom for k in ('bet', 'coin', 'roll', 'roulette', 'blackjack', 'hit', 'stand')):
+                log_key = 'log_channel_coins'
+            elif any(k in custom for k in ('pokemon', 'hunt', 'catch', 'team', 'box')):
+                log_key = 'log_channel_pokemon'
+            else:
+                log_key = 'log_channel_commands'
+            log_id = self.setting(interaction.guild.id, log_key)
+            log_channel = interaction.guild.get_channel(int(log_id)) if log_id else None
+            if not log_channel:
+                return
+            data = interaction.data or {}
+            custom_id = str(data.get('custom_id', 'component'))[:150]
+            values = data.get('values') or []
+            action = custom_id
+            if values:
+                action += ' · selected: ' + ', '.join(str(v)[:60] for v in values[:10])
+            e = discord.Embed(title='🖱️ Game Interaction', color=discord.Color.blurple(),
+                              timestamp=datetime.now(timezone.utc))
+            e.add_field(name='User', value=f'{interaction.user} (`{interaction.user.id}`)', inline=True)
+            e.add_field(name='Action', value=discord.utils.escape_markdown(action)[:1000], inline=True)
+            e.add_field(name='Channel', value=getattr(interaction.channel, 'mention', str(interaction.channel)), inline=True)
+            await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+
+    @commands.command(name='gamelogs', aliases=['glogs'])
+    async def game_logs_command(self, ctx, category: str = 'all', limit: int = 20):
+        """Developer-only view of Pokémon, trading, coins and command logs."""
+        if ctx.author.id not in OWNER_IDS:
+            return await ctx.send('❌ This command is restricted to the bot developers.')
+        allowed = {'all', 'pokemon', 'trading', 'coins', 'commands'}
+        category = category.lower()
+        if category not in allowed:
+            return await ctx.send('Use `!gamelogs [all|pokemon|trading|coins|commands] [limit]`.')
+        limit = max(1, min(int(limit), 50))
+        with db() as c:
+            if category == 'all':
+                rows = c.execute('SELECT created_at,category,user_id,guild_id,command,details FROM game_logs ORDER BY log_id DESC LIMIT ?', (limit,)).fetchall()
+            else:
+                rows = c.execute('SELECT created_at,category,user_id,guild_id,command,details FROM game_logs WHERE category=? ORDER BY log_id DESC LIMIT ?', (category, limit)).fetchall()
+        if not rows:
+            return await ctx.send('No game logs found for that filter yet.')
+        lines = []
+        for created, cat, uid, gid, command, details in rows:
+            stamp = created.replace('T', ' ')[:19]
+            safe = discord.utils.escape_markdown(details.replace('`', "'").replace('\n', ' '))
+            lines.append(f'`{stamp} UTC` **{cat}** · <@{uid}> · `{command}` · `{safe[:180]}`')
+        embed = discord.Embed(title=f'🔒 Developer Game Logs · {category.title()}', description='\n'.join(lines)[:4000], color=discord.Color.dark_grey())
+        embed.set_footer(text='Visible only to configured developers. Logs contain command text and user/server IDs.')
+        await ctx.send(embed=embed)
+
     async def on_command_error(self, ctx, error):
         # Handle expected command/input problems separately. Unexpected exceptions
         # are logged with their full traceback so they can be fixed accurately.
