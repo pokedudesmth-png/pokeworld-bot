@@ -219,6 +219,17 @@ def setup():
         if 'status_condition' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN status_condition TEXT DEFAULT ""')
         if 'fast_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN fast_move TEXT DEFAULT ""')
         if 'charged_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN charged_move TEXT DEFAULT ""')
+        if 'box_id' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN box_id INTEGER')
+        # Backfill stable, per-owner collection IDs. Listed Pokémon are unowned and receive an ID on return/purchase.
+        owners=c.execute('SELECT DISTINCT user_id FROM pokemon WHERE user_id IS NOT NULL AND user_id<>0').fetchall()
+        for (owner_id,) in owners:
+            existing={int(r[0]) for r in c.execute('SELECT box_id FROM pokemon WHERE user_id=? AND box_id IS NOT NULL',(owner_id,)).fetchall()}
+            next_id=max(existing,default=0)+1
+            missing=c.execute('SELECT instance_id FROM pokemon WHERE user_id=? AND box_id IS NULL ORDER BY instance_id',(owner_id,)).fetchall()
+            for (global_id,) in missing:
+                while next_id in existing: next_id+=1
+                c.execute('UPDATE pokemon SET box_id=? WHERE instance_id=?',(next_id,global_id)); existing.add(next_id); next_id+=1
+        c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_pokemon_owner_box_id ON pokemon(user_id,box_id) WHERE user_id IS NOT NULL AND user_id<>0 AND box_id IS NOT NULL')
         c.execute('CREATE TABLE IF NOT EXISTS hunt_counts(user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS boss_encounters(user_id INTEGER PRIMARY KEY,dex_id INTEGER,name TEXT,level INTEGER,shiny INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS boss_party(user_id INTEGER,slot INTEGER,instance_id INTEGER,PRIMARY KEY(user_id,slot),UNIQUE(user_id,instance_id))')
@@ -232,6 +243,36 @@ def setup():
         c.execute('CREATE TABLE IF NOT EXISTS global_encounter(id INTEGER PRIMARY KEY CHECK(id=1),dex_id INTEGER,name TEXT,shiny INTEGER DEFAULT 1,level INTEGER DEFAULT 5,spawned_by INTEGER)')
         cols=[r[1] for r in c.execute('PRAGMA table_info(encounters)').fetchall()]
         if 'hints_used' not in cols: c.execute('ALTER TABLE encounters ADD COLUMN hints_used INTEGER DEFAULT 0')
+
+def resolve_box_id(conn, uid, box_id):
+    """Translate a trainer-visible collection ID into the internal global instance_id."""
+    if box_id is None: return None
+    row=conn.execute('SELECT instance_id FROM pokemon WHERE user_id=? AND box_id=?',(uid,int(box_id))).fetchone()
+    return int(row[0]) if row else None
+
+def get_box_id(conn, uid, instance_id):
+    row=conn.execute('SELECT box_id FROM pokemon WHERE user_id=? AND instance_id=?',(uid,instance_id)).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+def assign_box_id(conn, uid, instance_id):
+    if uid is None or int(uid)==0: return None
+    current=get_box_id(conn,uid,instance_id)
+    if current is not None: return current
+    row=conn.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=?',(uid,)).fetchone()
+    new_id=int(row[0] or 1)
+    conn.execute('UPDATE pokemon SET box_id=? WHERE instance_id=? AND user_id=?',(new_id,instance_id,uid))
+    return new_id
+
+def transfer_pokemon_owner(conn, instance_id, old_uid, new_uid):
+    """Transfer internal Pokémon identity while assigning a fresh ID in the recipient's box."""
+    if new_uid and int(new_uid)!=0:
+        row=conn.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=?',(new_uid,)).fetchone()
+        new_box_id=int(row[0] or 1)
+    else: new_box_id=None
+    for table in ('team','boss_party','raid_party'):
+        conn.execute(f'DELETE FROM {table} WHERE instance_id=?',(instance_id,))
+    conn.execute('UPDATE pokemon SET user_id=?,box_id=? WHERE instance_id=? AND user_id=?',(new_uid,new_box_id,instance_id,old_uid))
+    return new_box_id
 
 def ensure_player(uid):
     with db() as c:
@@ -757,15 +798,15 @@ class NPCBattleView(TimedView):
             if self.raid:
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid; assign_box_id(c,self.uid,iid)
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{iid}` (raid boss was Lv.{boss_level})!\n🍬 **+50 Rare Candies** added to your inventory.\nUse `!candy {iid} <amount>` to level it or another Pokémon (max Lv. 300).',view=None)
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}` (raid boss was Lv.{boss_level})!\n🍬 **+50 Rare Candies** added to your inventory.\nUse `!candy {get_box_id(c,self.uid,iid)} <amount>` to level it or another Pokémon (max Lv. 300).',view=None)
             if self.boss:
                 mh=self.enemy_max_hp
                 with db() as c:
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],self.enemy['_level'],int(self.boss_shiny),mh,mh)); iid=cur.lastrowid
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],self.enemy['_level'],int(self.boss_shiny),mh,mh)); iid=cur.lastrowid; assign_box_id(c,self.uid,iid)
                     if not c.execute('SELECT 1 FROM team WHERE user_id=?',(self.uid,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(self.uid,1,iid))
                     c.execute('DELETE FROM boss_encounters WHERE user_id=?',(self.uid,))
                     c.execute('DELETE FROM boss_party WHERE user_id=?',(self.uid,))
@@ -773,7 +814,7 @@ class NPCBattleView(TimedView):
                 jackpot=1_000_000 if self.boss_shiny else 0
                 if jackpot: add_progress(self.uid,coins=jackpot)
                 jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **1,000,000 {get_vantacoin_emoji()} VantaCoins (1 million)** have been credited to your balance! 💰' if jackpot else ''
-                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]} — ID `{iid}`!\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP{jackpot_text}',view=None)
+                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]} — ID `{get_box_id(c,self.uid,iid)}`!\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP{jackpot_text}',view=None)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP',view=None)
         self.enemy_hp, tickmsg=status_tick(self.enemy_status,self.enemy_hp,self.enemy_max_hp)
         if tickmsg: msg+='\n'+tickmsg
@@ -782,11 +823,11 @@ class NPCBattleView(TimedView):
             if self.raid:
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid; assign_box_id(c,self.uid,iid)
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{iid}`!\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}`!\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP',view=None)
         em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'])
@@ -1352,19 +1393,22 @@ class Game(commands.Cog):
             if not raid and not boss:return await ctx.send('❌ Spawn a raid with `!raid spawn` or unlock a legendary boss first.')
             table='raid_party' if raid else 'boss_party'; limit=6 if raid else 3
             added=[]; errors=[]
-            for pokemon_id in pokemon_ids:
+            for requested_id in pokemon_ids:
+                pokemon_id=resolve_box_id(c,uid,requested_id)
+                if pokemon_id is None:
+                    errors.append(f'ID `{requested_id}` is not yours (check `!box`)'); continue
                 existing_rows=c.execute(f'SELECT slot,instance_id FROM {table} WHERE user_id=? ORDER BY slot',(uid,)).fetchall()
                 if any(r[1]==pokemon_id for r in existing_rows):
-                    errors.append(f'ID `{pokemon_id}` is already on the team'); continue
+                    errors.append(f'ID `{requested_id}` is already on the team'); continue
                 if len(existing_rows)>=limit:
-                    errors.append(f'ID `{pokemon_id}` not added: team is full'); continue
+                    errors.append(f'ID `{requested_id}` not added: team is full'); continue
                 row=c.execute('SELECT instance_id,name,level FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,uid)).fetchone()
                 if not row:
-                    errors.append(f'ID `{pokemon_id}` is not yours (check `!box`)'); continue
+                    errors.append(f'ID `{requested_id}` is not yours (check `!box`)'); continue
                 used={r[0] for r in existing_rows}
                 slot=next(i for i in range(1,limit+1) if i not in used)
                 c.execute(f'INSERT INTO {table}(user_id,slot,instance_id) VALUES(?,?,?)',(uid,slot,pokemon_id))
-                added.append(f'**{row[1].title()}** Lv.{row[2]} (ID `{pokemon_id}`)')
+                added.append(f'**{row[1].title()}** Lv.{row[2]} (ID `{requested_id}`)')
             count=c.execute(f'SELECT COUNT(*) FROM {table} WHERE user_id=?',(uid,)).fetchone()[0]
         lines=[]
         if added:
@@ -1409,12 +1453,15 @@ class Game(commands.Cog):
             if not raid and not boss:return await ctx.send('❌ You do not have an active raid or legendary encounter team to edit.')
             table='raid_party' if raid else 'boss_party'; limit=6 if raid else 3; label='Raid team' if raid else 'Boss team'
             removed=[]; missing=[]
-            for pokemon_id in pokemon_ids:
+            for requested_id in pokemon_ids:
+                pokemon_id=resolve_box_id(c,uid,requested_id)
+                if pokemon_id is None:
+                    missing.append(str(requested_id)); continue
                 row=c.execute(f'SELECT bp.slot,p.name FROM {table} bp JOIN pokemon p ON p.instance_id=bp.instance_id WHERE bp.user_id=? AND bp.instance_id=?',(uid,pokemon_id)).fetchone()
                 if not row:
-                    missing.append(str(pokemon_id)); continue
+                    missing.append(str(requested_id)); continue
                 c.execute(f'DELETE FROM {table} WHERE user_id=? AND instance_id=?',(uid,pokemon_id))
-                removed.append(f'**{row[1].title()}** (ID `{pokemon_id}`)')
+                removed.append(f'**{row[1].title()}** (ID `{requested_id}`)')
             # Re-pack slots so new additions fill the first available slots.
             remaining=c.execute(f'SELECT instance_id FROM {table} WHERE user_id=? ORDER BY slot',(uid,)).fetchall()
             c.execute(f'DELETE FROM {table} WHERE user_id=?',(uid,))
@@ -1547,7 +1594,7 @@ class Game(commands.Cog):
             print(f'Catch data lookup failed for user {uid}, dex_id={enc[0]!r}: {type(exc).__name__}: {exc}')
             return await ctx.send('⚠️ I could not load this Pokémon from PokéAPI right now. Your encounter is still saved—please try `!catch <name>` again in a moment.')
         with db() as c:
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh)); iid=cur.lastrowid
+            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh)); iid=cur.lastrowid; box_id=assign_box_id(c,uid,iid)
             # Register only the first catch of this species + variant; repeats do not change the Dex.
             c.execute('INSERT OR IGNORE INTO pokedex_entries(user_id,dex_id,name,shiny) VALUES(?,?,?,?)',(uid,int(enc[0]),d['name'],int(bool(enc[2]))))
             if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
@@ -1569,7 +1616,7 @@ class Game(commands.Cog):
                 is_fiftieth_catch = (progressed == 50)
                 c.execute('UPDATE hunt_counts SET count=? WHERE user_id=?',(catch_progress,uid))
         note=' **You were the first to guess it!**' if is_global else ''
-        response=f'🎉 {ctx.author.mention} caught {"✨ SHINY " if enc[2] else ""}{display_name(d)}!{note} ID: `{iid}`\n💰 +50 coins! Check `!box`.'
+        response=f'🎉 {ctx.author.mention} caught {"✨ SHINY " if enc[2] else ""}{display_name(d)}!{note} ID: `{box_id}`\n💰 +50 coins! Check `!box`.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -1986,7 +2033,7 @@ class Game(commands.Cog):
         if category not in allowed:
             return await ctx.send('❌ Unknown box category. Try: `!box all`, `!box hp`, `!box status`, `!box legendary`, `!box shiny`, `!box mythical`, `!box ultrabeast`, or `!box damaged`, or `!box items`, `!box highlevel` / `!box hl` (level above 50), or `!box name <pokemon>`.')
         with db() as c:
-            rows=c.execute('SELECT instance_id,dex_id,name,level,shiny,held_item,hp,max_hp,status_condition FROM pokemon WHERE user_id=?',(ctx.author.id,)).fetchall()
+            rows=c.execute('SELECT box_id,dex_id,name,level,shiny,held_item,hp,max_hp,status_condition FROM pokemon WHERE user_id=? ORDER BY box_id',(ctx.author.id,)).fetchall()
         if not rows:return await ctx.send('📦 Your box is empty. Use `!hunt` to find Pokémon!')
         if category == 'name':
             wanted=pokemon_name.strip().lower().replace('-', ' ')
@@ -2022,17 +2069,19 @@ class Game(commands.Cog):
             if pokemon_id is None:
                 row=c.execute('SELECT p.instance_id,p.dex_id,p.name,p.level,p.shiny,p.hp,p.max_hp,p.held_item,p.status_condition FROM pokemon p JOIN team t ON t.instance_id=p.instance_id WHERE p.user_id=? ORDER BY CASE WHEN t.slot=1 THEN 0 ELSE 1 END,t.slot LIMIT 1',(ctx.author.id,)).fetchone()
             else:
-                row=c.execute('SELECT instance_id,dex_id,name,level,shiny,hp,max_hp,held_item,status_condition FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
+                internal_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+                row=c.execute('SELECT instance_id,dex_id,name,level,shiny,hp,max_hp,held_item,status_condition FROM pokemon WHERE instance_id=? AND user_id=?',(internal_id,ctx.author.id)).fetchone() if internal_id else None
         if not row:
             return await ctx.send('❌ No Pokémon selected/found. Use `!select <ID>` first, or `!info <ID>`.')
         iid,dex_id,name,level,shiny,hp,maxhp,held,status=row
+        with db() as c: display_iid=get_box_id(c,ctx.author.id,iid) or iid
         try:
             d=await pokemon_data(str(dex_id)); base=stats(d); types=type_text(d); abilities=', '.join(a['ability']['name'].replace('-',' ').title() for a in d.get('abilities',[])) or 'Unknown'
         except Exception:
             base={}; types='Unknown'; abilities='Unknown'; d=None
         hp=max(0,min(hp,maxhp)); maxhp=max(1,maxhp); ratio=hp/maxhp
         filled=max(0,min(10,round(ratio*10))); bar='▰'*filled+'▱'*(10-filled)
-        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
+        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
         held_label=(ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()) if held else 'None'
         e.add_field(name='Condition',value=f'**Status:** {(status or "healthy").replace("-"," ").title()}\n**Held item:** {item_emoji(held) + " " if held else ""}{held_label}\n**Ability:** {abilities}',inline=True)
@@ -2041,7 +2090,7 @@ class Game(commands.Cog):
             art = sprite(d, shiny=bool(shiny))
             if art:
                 e.set_image(url=art)
-        e.set_footer(text='Live collection data • !info defaults to your selected Pokémon')
+        e.set_footer(text=f'Pokémon species / Pokédex ID: {dex_id} • Live collection data • !info defaults to your selected Pokémon')
         await ctx.send(embed=e)
 
     @commands.command(name='moves', aliases=['pmoves'], description="Show a Pokémon's saved Fast and Charged Moves.")
@@ -2050,7 +2099,8 @@ class Game(commands.Cog):
             if pokemon_id is None:
                 row = c.execute('SELECT * FROM pokemon WHERE user_id=? AND instance_id IN (SELECT instance_id FROM team WHERE user_id=? ORDER BY slot LIMIT 1)', (ctx.author.id, ctx.author.id)).fetchone()
             else:
-                row = c.execute('SELECT * FROM pokemon WHERE instance_id=? AND user_id=?', (pokemon_id, ctx.author.id)).fetchone()
+                internal_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+                row = c.execute('SELECT * FROM pokemon WHERE instance_id=? AND user_id=?', (internal_id, ctx.author.id)).fetchone() if internal_id else None
         if not row:
             return await ctx.send('❌ Pokémon not found. Use `!moves <pokemon_id>` or add a Pokémon to your team first.')
         try:
@@ -2063,9 +2113,10 @@ class Game(commands.Cog):
         except Exception:
             return await ctx.send('❌ Could not load this Pokémon’s saved moves. Try again in a moment.')
         shiny = '✨ Shiny ' if row[6] else ''
+        with db() as c: display_iid=get_box_id(c,ctx.author.id,row[0]) or row[0]
         name = str(row[3]).replace('-', ' ').title()
         description = (
-            f"**Pokémon ID:** `{row[0]}`  •  **Level:** {row[4]}\n\n"
+            f"**Pokémon ID:** `{display_iid}`  •  **Level:** {row[4]}\n\n"
             f"⚡ **FAST MOVE**\n{fast_display}\n"
             f"{fast.get('power') if fast.get('power') is not None else '—'} base power  •  {fast.get('accuracy') or '—'}% accuracy\n\n"
             f"🔋 **CHARGED MOVE**\n{charged_display}\n"
@@ -2106,15 +2157,15 @@ class Game(commands.Cog):
             if interaction.data.get('custom_id') == 'pokemonadd_cancel':
                 await interaction.response.edit_message(content='❎ Addition cancelled.',embed=None,view=None); return
             with db() as c:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh)); iid=cur.lastrowid
+                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh)); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
                 if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-            await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{iid}`).',embed=None,view=None)
+            await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{get_box_id(c,member.id,iid)}`).',embed=None,view=None)
         async def yes_cb(interaction):
             if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Only the command user can confirm this.',ephemeral=True)
             with db() as c:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh)); iid=cur.lastrowid
+                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh)); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
                 if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-            await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{iid}`).',embed=None,view=None)
+            await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{get_box_id(c,member.id,iid)}`).',embed=None,view=None)
         async def no_cb(interaction):
             if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Only the command user can cancel this.',ephemeral=True)
             await interaction.response.edit_message(content='❎ Addition cancelled.',embed=None,view=None)
@@ -2156,6 +2207,8 @@ class Game(commands.Cog):
     @commands.command(name='setteam',aliases=['teamset','slotteam'],description='Set a Pokémon into team slot 1-6.')
     async def setteam(self,ctx,pokemon_id:int,slot:int):
         if slot not in range(1,7):return await ctx.send('❌ Slot must be 1-6.')
+        with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+        if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Use `!box` to check your personal IDs.')
         with db() as c:r=c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
         if not r:return await ctx.send('❌ That Pokémon ID is not yours.')
         with db() as c:c.execute('INSERT OR REPLACE INTO team VALUES(?,?,?)',(ctx.author.id,slot,pokemon_id))
@@ -2163,6 +2216,8 @@ class Game(commands.Cog):
     @commands.command(name='select',aliases=['s','sel'],description='Select one of your Pokémon as your active battle Pokémon.')
     async def select(self,ctx,pokemon_id:Optional[int]=None):
         if pokemon_id is None:return await ctx.send('Usage: `!select <id>` — use `!box` to see your Pokémon IDs.')
+        with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+        if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not in your collection. Check `!box`.')
         with db() as c: row=c.execute('SELECT instance_id,name,level,hp,max_hp,shiny FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
         if not row:return await ctx.send('❌ That Pokémon ID is not in your collection. Check `!box`.')
         with db() as c:c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(ctx.author.id,1,pokemon_id))
@@ -2172,6 +2227,9 @@ class Game(commands.Cog):
     @commands.command(name='team',aliases=['myteam','tm'],description='Show or edit your team.')
     async def team(self,ctx,action:Optional[str]=None,pokemon_id:Optional[int]=None,slot:Optional[int]=None):
         action=(action or 'show').lower()
+        if action in ('add','remove') and pokemon_id is not None:
+            with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+            if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Check `!box`.')
         if action=='add':
             if pokemon_id is None or slot is None:return await ctx.send('Usage: `!team add <pokemon_id> <slot>`')
             if slot not in range(1,7):return await ctx.send('❌ Slot must be 1-6.')
@@ -2186,14 +2244,17 @@ class Game(commands.Cog):
             with db() as c: cur=c.execute('DELETE FROM team WHERE user_id=? AND instance_id=?',(ctx.author.id,pokemon_id))
             return await ctx.send('✅ Pokémon removed from your team.' if cur.rowcount else '❌ That Pokémon is not in your team.')
         if action not in ('show','list','view'):return await ctx.send('Use `!team`, `!team add <pokemon_id> <slot>`, or `!team remove <pokemon_id>`.')
-        with db() as c:r=c.execute('SELECT t.slot,p.instance_id,p.name,p.level,p.shiny,p.hp,p.max_hp FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? ORDER BY t.slot',(ctx.author.id,)).fetchall()
+        with db() as c:r=c.execute('SELECT t.slot,p.box_id,p.name,p.level,p.shiny,p.hp,p.max_hp FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? ORDER BY t.slot',(ctx.author.id,)).fetchall()
         embed=discord.Embed(title=f'🎒 {ctx.author.display_name}’s Team',description=('\n'.join(f'**Slot {x[0]}** · ID `{x[1]}` · {"✨ " if x[4] else ""}**{x[2].title()}** Lv.{x[3]}\n{hp_bar(x[5],x[6])}' for x in r) if r else 'Your team is empty. Use `!setteam <pokemon_id> <slot>` to add Pokémon.'),color=discord.Color.blurple())
         embed.set_footer(text=f'{len(r)}/6 slots filled • Pokémon level cap: 300')
         await ctx.send(embed=embed)
 
     @commands.command(name='usetm',aliases=['tmuse'])
     async def usetm(self,ctx,tm:str,pokemon_id:int,*,chosen_move:Optional[str]=None):
+        public_box_id=pokemon_id
         pid=resolve_shop_product(tm)
+        with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+        if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Check `!box`.')
         if pid not in (52,53,54):return await ctx.send('Usage: `!usetm fast-tm|charged-tm|elite-charged-tm <pokemon_id> [move name]`')
         item=SHOP_ITEMS[pid][0]
         with db() as c:
@@ -2357,6 +2418,9 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         """PokéMeow-inspired player-to-player Pokémon listings market."""
         with db() as c:
             c.execute("CREATE TABLE IF NOT EXISTS market_listings (listing_id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER NOT NULL, pokemon_id INTEGER NOT NULL, pokemon_name TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', buyer_id INTEGER, proceeds INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)")
+            cols={r[1] for r in c.execute('PRAGMA table_info(market_listings)').fetchall()}
+            if 'shiny' not in cols: c.execute('ALTER TABLE market_listings ADD COLUMN shiny INTEGER NOT NULL DEFAULT 0')
+            if 'level' not in cols: c.execute('ALTER TABLE market_listings ADD COLUMN level INTEGER NOT NULL DEFAULT 1')
         action = (action or '').lower().strip()
         details = (details or '').strip()
         if not action:
@@ -2374,12 +2438,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if price<1 or price>2_000_000_000: return await ctx.send('❌ Price must be between 1 and 2,000,000,000 VantaCoins.')
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
-                mon=c.execute('SELECT instance_id,name,level,shiny,nickname,held_item FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
+                requested_id=pokemon_id; pokemon_id=resolve_box_id(c,ctx.author.id,requested_id)
+                mon=c.execute('SELECT instance_id,name,level,shiny,nickname,held_item FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone() if pokemon_id else None
                 if not mon: c.rollback(); return await ctx.send('❌ That Pokémon ID is not yours. Use `!box` to find its ID.')
                 if mon[5]: c.rollback(); return await ctx.send('❌ Remove its held item before listing this Pokémon.')
                 for table in ('team','boss_party','raid_party'): c.execute(f'DELETE FROM {table} WHERE instance_id=?',(pokemon_id,))
-                c.execute('UPDATE pokemon SET user_id=0 WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id))
-                cur=c.execute("INSERT INTO market_listings(seller_id,pokemon_id,pokemon_name,price,status,created_at) VALUES(?,?,?,?,'active',?)",(ctx.author.id,pokemon_id,mon[1],price,int(time.time())))
+                transfer_pokemon_owner(c,pokemon_id,ctx.author.id,0)
+                cur=c.execute("INSERT INTO market_listings(seller_id,pokemon_id,pokemon_name,price,status,created_at,shiny,level) VALUES(?,?,?,?,'active',?,?,?)",(ctx.author.id,pokemon_id,mon[1],price,int(time.time()),int(mon[3]),int(mon[2])))
                 lid=cur.lastrowid; c.commit()
             shiny='✨ Shiny ' if mon[3] else ''
             e=discord.Embed(title='📦 Pokémon listed successfully!',description=f'{shiny}**{mon[1].title()}** (Lv. {mon[2]}) is now on the global market.',color=discord.Color.green())
@@ -2388,7 +2453,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             return await ctx.send(embed=e)
         if action in ('view','browse','search'):
             if not details or details.lower()=='recent':
-                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price FROM market_listings WHERE status='active' ORDER BY listing_id DESC LIMIT 10").fetchall()
+                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price,shiny,level FROM market_listings WHERE status='active' ORDER BY listing_id DESC LIMIT 10").fetchall()
                 title='🆕 Recent Pokémon Listings'
             elif details.lower().startswith('user '):
                 target=ctx.message.mentions[0].id if ctx.message.mentions else None
@@ -2396,13 +2461,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                     val=details[5:].strip().strip('<@!>')
                     if val.isdigit(): target=int(val)
                 if target is None: return await ctx.send('Usage: `!market view user @user`')
-                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price FROM market_listings WHERE status='active' AND seller_id=? ORDER BY listing_id DESC LIMIT 10",(target,)).fetchall()
+                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price,shiny,level FROM market_listings WHERE status='active' AND seller_id=? ORDER BY listing_id DESC LIMIT 10",(target,)).fetchall()
                 title=f'🧑‍💼 Active listings by <@{target}>'
             else:
-                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price FROM market_listings WHERE status='active' AND lower(pokemon_name) LIKE ? ORDER BY listing_id DESC LIMIT 10",(f'%{details.lower()}%',)).fetchall()
+                with db() as c: rows=c.execute("SELECT listing_id,seller_id,pokemon_name,price,shiny,level FROM market_listings WHERE status='active' AND lower(pokemon_name) LIKE ? ORDER BY listing_id DESC LIMIT 10",(f'%{details.lower()}%',)).fetchall()
                 title=f'🔎 Market search: {details[:80]}'
             e=discord.Embed(title=title,color=discord.Color.blurple())
-            e.description='\n\n'.join(f'**#{lid} · {name.title()}** — **{price:,}** {get_vantacoin_emoji()}\nSeller: <@{seller}> · `!market buy {lid}`' for lid,seller,name,price in rows) if rows else 'No active listings found. Try `!market view recent`.'
+            e.description='\n\n'.join(f'{"✨ " if shiny else ""}**#{lid} · {name.replace("-", " " ).title()}** · Lv. **{level}** — **{price:,}** {get_vantacoin_emoji()}\nSeller: <@{seller}> · `!market buy {lid}`' for lid,seller,name,price,shiny,level in rows) if rows else 'No active listings found. Try `!market view recent`.'
             e.set_footer(text='Showing up to 10 active listings.')
             return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
         if action in ('listings','offers'):
@@ -2423,10 +2488,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 if balance<price: c.rollback(); return await ctx.send(f'❌ Not enough balance. Price: **{price:,}** coins; your balance: **{balance:,}**.')
                 if not c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=0',(pokemon_id,)).fetchone(): c.rollback(); return await ctx.send('❌ Listing could not be verified. Please contact an administrator.')
                 c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(price,ctx.author.id))
-                c.execute('UPDATE pokemon SET user_id=? WHERE instance_id=? AND user_id=0',(ctx.author.id,pokemon_id))
+                new_box_id=transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
                 c.execute("UPDATE market_listings SET status='sold',buyer_id=?,proceeds=? WHERE listing_id=? AND status='active'",(ctx.author.id,price,lid)); c.commit()
             e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought **{pname.title()}** from <@{seller}>!',color=discord.Color.green())
-            e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{pokemon_id}`',inline=True)
+            e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{new_box_id}`',inline=True)
             e.set_footer(text=f'Listing #{lid} · Seller can claim proceeds with !market claim {lid}')
             return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
         if action=='remove':
@@ -2435,7 +2500,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             with db() as c:
                 c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT pokemon_id,pokemon_name FROM market_listings WHERE listing_id=? AND seller_id=? AND status='active'",(lid,ctx.author.id)).fetchone()
                 if not row: c.rollback(); return await ctx.send('❌ No active listing with that ID belongs to you.')
-                pokemon_id,pname=row; c.execute('UPDATE pokemon SET user_id=? WHERE instance_id=? AND user_id=0',(ctx.author.id,pokemon_id)); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
+                pokemon_id,pname=row; transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
             return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'**{pname.title()}** has been returned to your collection.',color=discord.Color.orange()))
         if action=='claim':
             if not details.isdigit(): return await ctx.send('Usage: `!market claim <listing ID>`')
@@ -2455,7 +2520,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         parts=args.rsplit(maxsplit=1)
         if len(parts)!=2 or (not parts[1].isdigit() and parts[1].lower() != 'all'):
             return await ctx.send('Usage: `!giveitem <item name|shortform|id> <pokemon_id>` — example: `!giveitem Choice Band 12`')
-        product,pokemon_text=parts; pokemon_id=int(pokemon_text) if pokemon_text.isdigit() else None if pokemon_text.isdigit() else None if pokemon_text.isdigit() else None
+        product,pokemon_text=parts; public_box_id=int(pokemon_text) if pokemon_text.isdigit() else None; pokemon_id=public_box_id
+        if pokemon_id is not None:
+            with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+            if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Check `!box`.')
         product_id=resolve_shop_product(product)
         if product_id is None:
             return await ctx.send('❌ Unknown item. Use `!shop` to see item names and shortforms.')
@@ -2469,7 +2537,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if product_id == 54:
                 pool=await move_pool(row[2],fast=False)
                 view=EliteChargedMoveView(ctx.author.id,pokemon_id,key,row[3],pool)
-                return await ctx.send(f'✨ Choose the new Charged Move for **{row[3].title()}** (ID `{pokemon_id}`). Your current move stays until you select one.',view=view)
+                return await ctx.send(f'✨ Choose the new Charged Move for **{row[3].title()}** (ID `{public_box_id}`). Your current move stays until you select one.',view=view)
             fast=(product_id==52); pool=await move_pool(row[2],fast=fast); selected=random.choice(pool)
             column='fast_move' if fast else 'charged_move'
             with db() as c:
@@ -2481,7 +2549,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('UPDATE inventory SET amount=amount-1 WHERE user_id=? AND item=?',(ctx.author.id,key))
                 c.execute('DELETE FROM inventory WHERE user_id=? AND item=? AND amount<=0',(ctx.author.id,key))
             kind='Fast' if fast else 'Charged'
-            return await ctx.send(f'✅ **{row[3].title()}** (ID `{pokemon_id}`) changed its {kind} Move to **{selected["name"].replace("-", " ").title()}** using {item_emoji(key)} {label}.')
+            return await ctx.send(f'✅ **{row[3].title()}** (ID `{public_box_id}`) changed its {kind} Move to **{selected["name"].replace("-", " ").title()}** using {item_emoji(key)} {label}.')
         if 'berry' in key or key in {'potion','super-potion','hyper-potion','max-potion','full-restore'}:
             return await ctx.send('🧪 This is a consumable; use `!useitem <item> <pokemon_id>`.')
         try:
@@ -2494,7 +2562,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 old_item=row[2] or ''
                 if old_item==key:
                     c.rollback()
-                    return await ctx.send(f'{item_emoji(key)} **{row[1].title()}** (ID `{pokemon_id}`) is already holding **{label}**.')
+                    return await ctx.send(f'{item_emoji(key)} **{row[1].title()}** (ID `{public_box_id}`) is already holding **{label}**.')
                 stock=c.execute('SELECT amount FROM inventory WHERE user_id=? AND item=?',(ctx.author.id,key)).fetchone()
                 if not stock or stock[0] <= 0:
                     c.rollback()
@@ -2511,11 +2579,14 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             print(f'giveitem failed for user {ctx.author.id}, Pokémon {pokemon_id}: {exc!r}')
             return await ctx.send('❌ Could not equip that item because of a database error. No changes were saved; please try again.')
         previous=f'\n↩️ {item_emoji(old_item)} Returned **{ITEM_BY_KEY[old_item][2] if old_item in ITEM_BY_KEY else old_item.replace("-", " ").title()}** to your inventory.' if old_item else ''
-        await ctx.send(f'{item_emoji(key)} **{label}** is now held by **{row[1].title()}** (Pokémon ID `{pokemon_id}`).\n🎒 Inventory: **−1 {item_emoji(key)} {label}**.'+previous)
+        await ctx.send(f'{item_emoji(key)} **{label}** is now held by **{row[1].title()}** (Pokémon ID `{public_box_id}`).\n🎒 Inventory: **−1 {item_emoji(key)} {label}**.'+previous)
 
     @commands.command(name='takeitem',aliases=['unequip','removehelditem'])
     async def takeitem(self,ctx,pokemon_id:int):
         """Remove a Pokémon's held item and return it to the owner's inventory."""
+        public_box_id=pokemon_id
+        with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+        if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Check `!box`.')
         try:
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
@@ -2526,7 +2597,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 held=row[2] or ''
                 if not held:
                     c.rollback()
-                    return await ctx.send(f'ℹ️ **{row[1].title()}** (Pokémon ID `{pokemon_id}`) is not holding an item.')
+                    return await ctx.send(f'ℹ️ **{row[1].title()}** (Pokémon ID `{public_box_id}`) is not holding an item.')
                 c.execute('INSERT INTO inventory(user_id,item,amount) VALUES(?,?,1) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+1',(ctx.author.id,held))
                 c.execute("UPDATE pokemon SET held_item='' WHERE instance_id=? AND user_id=?",(pokemon_id,ctx.author.id))
                 c.commit()
@@ -2534,7 +2605,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             print(f'takeitem failed for user {ctx.author.id}, Pokémon {pokemon_id}: {exc!r}')
             return await ctx.send('❌ Could not remove that held item because of a database error. No changes were saved; please try again.')
         label=ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()
-        await ctx.send(f'🎒 Took {item_emoji(held)} **{label}** from **{row[1].title()}** (Pokémon ID `{pokemon_id}`). The item was returned to your inventory (+1).')
+        await ctx.send(f'🎒 Took {item_emoji(held)} **{label}** from **{row[1].title()}** (Pokémon ID `{public_box_id}`). The item was returned to your inventory (+1).')
 
     @commands.command(name='useitem',aliases=['use','itemuse'])
     async def useitem(self,ctx,*,args:str):
@@ -2542,7 +2613,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         if len(parts)!=2 or (not parts[1].isdigit() and parts[1].lower() != 'all'):
             return await ctx.send('Usage: `!useitem <berry/potion name|shortform|id> <pokemon_id|all>` — example: `!useitem Potion 12` or `!use 51 all` for bulk Full Restore')
         product,pokemon_text=parts
-        pokemon_id=None if pokemon_text.lower() == 'all' else int(pokemon_text)
+        public_box_id=None if pokemon_text.lower()=='all' else int(pokemon_text)
+        pokemon_id=public_box_id
+        if pokemon_id is not None:
+            with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+            if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Check `!box`.')
         product_id=resolve_shop_product(product)
         if product_id is None:return await ctx.send('❌ Unknown item. Use `!shop` or `!inventory` to see item names, shortforms, and IDs.')
         key,label,cost,desc,shortform=SHOP_ITEMS[product_id]
@@ -2634,7 +2709,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=? AND user_id=?',(hp,status,pokemon_id,ctx.author.id))
             c.execute('UPDATE inventory SET amount=amount-1 WHERE user_id=? AND item=?',(ctx.author.id,key))
             c.commit()
-        await ctx.send(f'🧪 Used {item_emoji(key)} **{label}** on **{row[1].title()}** (ID `{pokemon_id}`): {msg}. HP: {hp_bar(hp,maxhp)} • Status: **{status_label(status)}**.')
+        await ctx.send(f'🧪 Used {item_emoji(key)} **{label}** on **{row[1].title()}** (ID `{public_box_id}`): {msg}. HP: {hp_bar(hp,maxhp)} • Status: **{status_label(status)}**.')
 
     @commands.command(name='inventory',aliases=['inv','bag'],description='View your inventory in pages of ten entries.')
     async def inventory(self,ctx):
@@ -2760,7 +2835,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
     @commands.command(name='candy',description='Use Rare Candies to level up a Pokémon, up to level 300.')
     async def candy(self,ctx,pokemon_id:int,amount:int=1):
+        public_box_id=pokemon_id
         if amount<1:return await ctx.send('❌ Amount must be at least 1.')
+        with db() as c: pokemon_id=resolve_box_id(c,ctx.author.id,pokemon_id)
+        if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not yours. Check `!box`.')
         with db() as c:
             row=c.execute('SELECT name,level FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
             inv=c.execute("SELECT amount FROM inventory WHERE user_id=? AND item='rare-candy'",(ctx.author.id,)).fetchone()
@@ -2798,12 +2876,12 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         with db() as c:
             c.execute('UPDATE players SET coins=coins+?,daily=?,daily_streak=? WHERE user_id=?',(2000,now,streak,uid))
             c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 5) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+5",(uid,))
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh));iid=cur.lastrowid
+            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh));iid=cur.lastrowid; assign_box_id(c,uid,iid)
             if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
         if legendary:
-            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{iid}`\n💰 +2,000 {get_vantacoin_emoji()} VantaCoins • 🎟️ +5 Raid Passes')
+            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n💰 +2,000 {get_vantacoin_emoji()} VantaCoins • 🎟️ +5 Raid Passes')
         else:
-            await ctx.send(f'🎁 Daily reward: **2,000 {get_vantacoin_emoji()} VantaCoins** + **{display_name(pick)}** Lv.{lvl} — ID `{iid}`\n🎟️ +5 Raid Passes\n🔥 Current streak: **{streak}** days')
+            await ctx.send(f'🎁 Daily reward: **2,000 {get_vantacoin_emoji()} VantaCoins** + **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes\n🔥 Current streak: **{streak}** days')
     @commands.command(name='balance',aliases=['bal','money'],description='View your VantaCoins, level and XP.')
     async def balance(self,ctx):
         coins,xp,level,_,_=get_player(ctx.author.id)
@@ -3093,9 +3171,31 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         try:
             for attachment in attachments:
                 files.append(await attachment.to_file())
+            clean_message = message.strip()
+            image_url = None
+            urls = re.findall(r'https?://\S+', clean_message)
+            for raw_url in urls:
+                candidate = raw_url.rstrip('.,)>')
+                if candidate.lower().split('?', 1)[0].endswith(('.gif','.png','.jpg','.jpeg','.webp')):
+                    image_url = image_url or candidate
+                    clean_message = clean_message.replace(raw_url, '').strip()
+                elif not image_url:
+                    try:
+                        timeout = aiohttp.ClientTimeout(total=6)
+                        async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent':'Mozilla/5.0'}) as session:
+                            async with session.get(candidate, allow_redirects=True) as response:
+                                if response.status == 200:
+                                    html = await response.text(errors='ignore')
+                                    for pattern in (r'<meta[^>]+property=["\']og:video(?:\:url)?["\'][^>]+content=["\']([^"\']+)', r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?:\:url)?["\']', r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)'):
+                                        match = re.search(pattern, html, re.I)
+                                        if match and match.group(1).startswith('http'):
+                                            image_url = match.group(1).replace('&amp;','&'); break
+                    except Exception:
+                        pass
+                    clean_message = clean_message.replace(raw_url, '').strip()
             announcement = discord.Embed(
                 title='📢 Announcement',
-                description=message.strip()[:4000] if message.strip() else None,
+                description=clean_message[:4000] if clean_message else None,
                 color=discord.Color.blurple(),
                 timestamp=discord.utils.utcnow(),
             )
@@ -3103,6 +3203,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             image_attachment = next((a for a in attachments if (a.content_type or '').startswith('image/')), None)
             if image_attachment:
                 announcement.set_image(url=f'attachment://{image_attachment.filename}')
+            elif image_url:
+                announcement.set_image(url=image_url)
             await channel.send(embed=announcement, files=files or None)
         except discord.Forbidden:
             return await ctx.send(f'❌ Discord denied my access to {channel.mention}. Check my channel permissions.')
@@ -3322,14 +3424,17 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     @commands.command(name='removepokemon',aliases=['removepoke'])
     async def removepokemon(self,ctx,member:discord.Member,pokemon_id:int):
         if not self.is_dev(ctx): return
+        public_box_id=pokemon_id
+        with db() as c: pokemon_id=resolve_box_id(c,member.id,pokemon_id)
+        if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not in that trainer’s box.')
         with db() as c: row=c.execute('SELECT instance_id,name,shiny,level FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,member.id)).fetchone()
         if not row: return await ctx.send('❌ That Pokémon ID does not belong to that user.')
         def action():
             with db() as c:
                 c.execute('DELETE FROM team WHERE instance_id=?',(pokemon_id,))
                 c.execute('DELETE FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,member.id))
-            return f'Removed {"✨ Shiny " if row[2] else ""}**{row[1].title()}** Lv. {row[3]} (ID `{pokemon_id}`) from {member.mention}.'
-        await self.dev_confirmation(ctx,'Confirm Pokémon removal',f'Remove **{row[1].title()}** (ID `{pokemon_id}`) from {member.mention}?',action)
+            return f'Removed {"✨ Shiny " if row[2] else ""}**{row[1].title()}** Lv. {row[3]} (ID `{public_box_id}`) from {member.mention}.'
+        await self.dev_confirmation(ctx,'Confirm Pokémon removal',f'Remove **{row[1].title()}** (ID `{public_box_id}`) from {member.mention}?',action)
 
     @commands.command(name='setupitememojis')
     @commands.guild_only()
@@ -3627,12 +3732,14 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             try: ids=[int(x) for x in args]
             except ValueError: return await ctx.send('Use Pokémon instance IDs, or `!ta vantacoin <amount>`.')
             if len(ids)!=len(set(ids)): return await ctx.send('❌ Do not repeat Pokémon IDs.')
+            translated=[]
             with db() as c:
-                for pid in ids:
-                    row=c.execute('SELECT instance_id FROM pokemon WHERE instance_id=? AND user_id=?',(pid,ctx.author.id)).fetchone()
-                    if not row: return await ctx.send(f'❌ Pokémon ID `{pid}` is not in your box.')
-                    if pid in offer['pokemon']: return await ctx.send(f'❌ Pokémon ID `{pid}` is already offered.')
-            offer['pokemon'].extend(ids)
+                for box_id in ids:
+                    pid=resolve_box_id(c,ctx.author.id,box_id)
+                    if pid is None: return await ctx.send(f'❌ Pokémon ID `{box_id}` is not in your box.')
+                    if pid in offer['pokemon']: return await ctx.send(f'❌ Pokémon ID `{box_id}` is already offered.')
+                    translated.append(pid)
+            offer['pokemon'].extend(translated)
         trade['confirmed'].clear(); await refresh_trade(trade)
         await ctx.send('✅ Offer updated. Both players must confirm again after any change.')
 
@@ -3687,10 +3794,16 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if amount>offer['coins']: return await ctx.send(f'❌ You only offered {offer["coins"]:,} coins.')
             offer['coins']-=amount
         else:
-            try: ids=[int(x) for x in args]
+            try: box_ids=[int(x) for x in args]
             except ValueError: return await ctx.send('Use offered Pokémon IDs or `!tr c <amount>`.')
-            missing=[pid for pid in ids if pid not in offer['pokemon']]
+            translated={}
+            with db() as c:
+                for box_id in box_ids:
+                    pid=resolve_box_id(c,ctx.author.id,box_id)
+                    if pid is not None: translated[box_id]=pid
+            missing=[box_id for box_id in box_ids if translated.get(box_id) not in offer['pokemon']]
             if missing: return await ctx.send('❌ Not in your offer: '+', '.join(map(str,missing)))
+            ids=set(translated[box_id] for box_id in box_ids)
             offer['pokemon']=[pid for pid in offer['pokemon'] if pid not in ids]
         trade['confirmed'].clear(); await refresh_trade(trade)
         await ctx.send('✅ Offer updated. Both players must confirm again after any change.')
@@ -3726,8 +3839,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 a,b=trade['starter'],trade['target']; oa,ob=trade['offers'][a],trade['offers'][b]
                 c.execute('UPDATE players SET coins=coins-?+? WHERE user_id=?',(oa['coins'],ob['coins'],a))
                 c.execute('UPDATE players SET coins=coins-?+? WHERE user_id=?',(ob['coins'],oa['coins'],b))
-                for pid in oa['pokemon']: c.execute('UPDATE pokemon SET user_id=? WHERE instance_id=? AND user_id=?',(b,pid,a))
-                for pid in ob['pokemon']: c.execute('UPDATE pokemon SET user_id=? WHERE instance_id=? AND user_id=?',(a,pid,b))
+                for pid in oa['pokemon']: transfer_pokemon_owner(c,pid,a,b)
+                for pid in ob['pokemon']: transfer_pokemon_owner(c,pid,b,a)
         except (ValueError, sqlite3.Error) as exc:
             trade['confirmed'].clear(); await ctx.send(f'❌ Trade not completed: {exc}')
             return
@@ -3774,10 +3887,10 @@ async def trade_embed(trade):
         for side, uid in [('offer', trade['starter']), ('target_offer', trade['target'])]:
             lines=[]
             for pid in trade['offers'][uid]['pokemon']:
-                row=c.execute('SELECT name,shiny,nickname FROM pokemon WHERE instance_id=? AND user_id=?',(pid,uid)).fetchone()
+                row=c.execute('SELECT name,shiny,nickname,box_id FROM pokemon WHERE instance_id=? AND user_id=?',(pid,uid)).fetchone()
                 if row:
-                    name=row[2] or row[0]
-                    lines.append(f"✨ **{name}** (`{pid}`)" if row[1] else f"**{name}** (`{pid}`)")
+                    name=row[2] or row[0]; local_id=row[3]
+                    lines.append(f"✨ **{name}** (`{local_id}`)" if row[1] else f"**{name}** (`{local_id}`)")
             lines.append(f"🪙 Coins: **{trade['offers'][uid]['coins']:,}**")
             member = trade['guild'].get_member(uid) if trade.get('guild') else None
             user_label = member.mention if member else f'<@{uid}>'
@@ -3999,6 +4112,23 @@ class CarlStyleExtensions(commands.Cog):
             candidate = urls[0].rstrip('.,)>')
             if candidate.lower().split('?', 1)[0].endswith(('.gif','.png','.jpg','.jpeg','.webp')):
                 art_url = art_url or candidate
+            elif not art_url:
+                # Resolve common GIF-hosting pages (e.g. Tenor/Giphy) to their actual media URL.
+                try:
+                    timeout = aiohttp.ClientTimeout(total=8)
+                    async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent':'Mozilla/5.0'}) as session:
+                        async with session.get(candidate, allow_redirects=True) as response:
+                            if response.status == 200:
+                                html = await response.text(errors='ignore')
+                                for pattern in (r'<meta[^>]+property=["\']og:video(?:\:url)?["\'][^>]+content=["\']([^"\']+)', r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?:\:url)?["\']', r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)'):
+                                    match = re.search(pattern, html, re.I)
+                                    if match:
+                                        found = match.group(1).replace('&amp;', '&')
+                                        if found.startswith('http'):
+                                            art_url = found
+                                            break
+                except Exception:
+                    pass
             message = message.replace(urls[0], '').strip()
             if not message:
                 message = 'Welcome {user} to {server}! Make yourself at home!'
