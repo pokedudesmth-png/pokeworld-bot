@@ -200,7 +200,7 @@ TYPE_CHART = {
 def db(): return sqlite3.connect(DB)
 def setup():
     with db() as c:
-        c.execute('CREATE TABLE IF NOT EXISTS players(user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 500, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, daily INTEGER DEFAULT 0, daily_streak INTEGER DEFAULT 0)')
+        c.execute('CREATE TABLE IF NOT EXISTS players(user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 500, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, daily INTEGER DEFAULT 0, daily_streak INTEGER DEFAULT 0, started INTEGER DEFAULT 0)')
         c.execute("CREATE TABLE IF NOT EXISTS bot_bans(user_id INTEGER PRIMARY KEY, reason TEXT NOT NULL DEFAULT 'Violation of game rules', banned_by INTEGER NOT NULL, banned_at INTEGER NOT NULL)")
         c.execute('CREATE TABLE IF NOT EXISTS nick_freezes(guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, freezer_id INTEGER NOT NULL, original_nick TEXT, locked_nick TEXT, PRIMARY KEY(guild_id,user_id))')
         freeze_cols=[r[1] for r in c.execute('PRAGMA table_info(nick_freezes)').fetchall()]
@@ -208,6 +208,10 @@ def setup():
         c.execute('UPDATE nick_freezes SET locked_nick=original_nick WHERE locked_nick IS NULL')
         cols=[r[1] for r in c.execute('PRAGMA table_info(players)').fetchall()]
         if 'daily_streak' not in cols: c.execute('ALTER TABLE players ADD COLUMN daily_streak INTEGER DEFAULT 0')
+        if 'started' not in cols:
+            c.execute('ALTER TABLE players ADD COLUMN started INTEGER DEFAULT 0')
+            # Existing trainers were already playing before this feature existed.
+            c.execute('UPDATE players SET started=1')
         c.execute('CREATE TABLE IF NOT EXISTS pokemon(instance_id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,dex_id INTEGER,name TEXT,level INTEGER DEFAULT 5,xp INTEGER DEFAULT 0,shiny INTEGER DEFAULT 0,nickname TEXT DEFAULT "",hp INTEGER DEFAULT 1,max_hp INTEGER DEFAULT 1,held_item TEXT DEFAULT "",status_condition TEXT DEFAULT "")')
         c.execute("CREATE TABLE IF NOT EXISTS pokedex_entries(user_id INTEGER NOT NULL,dex_id INTEGER NOT NULL,name TEXT NOT NULL,shiny INTEGER NOT NULL DEFAULT 0,registered_at INTEGER DEFAULT 0,PRIMARY KEY(user_id,dex_id,shiny))")
         pcols=[r[1] for r in c.execute('PRAGMA table_info(pokemon)').fetchall()]
@@ -1225,6 +1229,27 @@ class Game(commands.Cog):
         action = str(ctx.kwargs.get('action', '') or '').strip().lower()
         message_content = (getattr(getattr(ctx, 'message', None), 'content', '') or '').strip().lower()
 
+        # Players must explicitly start their adventure before gameplay commands.
+        # Utility/moderation commands and the onboarding/profile commands remain available.
+        gameplay_commands = {
+            'hunt','h','search','hint','i','clue','catch','c','guess','cancel','stop','quit',
+            'fix','repair','legendarybattle','lbattle','lgbattle','bossfight','battle','fight','b',
+            'challenge','pvp','duel','chall','shinyhunt','spawnshiny','shinyspawn','setteam','teamset','slotteam',
+            'select','s','sel','team','myteam','tm','usetm','tmuse','shop','market','store','giveitem','equip','holditem',
+            'takeitem','unequip','removehelditem','useitem','use','itemuse','inventory','inv','bag','raid','candy',
+            'daily','d','claim','balance','bal','money','bet','trade','tradeadd','ta','traderemove','tr','tradeconfirm',
+            'tradeaccept','trconfirm','pokemonadd','pokeadd','addboss','bossadd','removeboss','bossremove',
+            'pokedex','pd','dex','box','pokemon','pc','storage','info','pinfo','stats','moves','pmoves',
+            'leaderboard','lb','top','coinsadd','addcoins','removecoins','takecoins','removepokemon','removepoke',
+            'usetm','tmuse','pass','raid','hint','i','clue','profile','prof','me'
+        }
+        if name in gameplay_commands:
+            with db() as c:
+                row = c.execute('SELECT started FROM players WHERE user_id=?', (uid,)).fetchone()
+            if not row or not row[0]:
+                await ctx.send('🧭 You need to start your adventure first! Use `!start` to begin.')
+                return False
+
         # Normalize the three mutually exclusive encounter activities.
         is_hunt = name in {'hunt', 'h', 'search'}
         is_legendary = name in {'legendarybattle', 'lbattle', 'lgbattle', 'bossfight'}
@@ -1257,7 +1282,40 @@ class Game(commands.Cog):
         # team management, and all unrelated commands remain available during encounters.
         return True
     @commands.command(name='start',aliases=['begin','st'],description='Start your adventure.')
-    async def start(self,ctx):ensure_player(ctx.author.id);await ctx.send('🎒 **Adventure started!** Use `!hunt` or `/hunt`.')
+    async def start(self,ctx):
+        ensure_player(ctx.author.id)
+        with db() as c:
+            row=c.execute('SELECT started FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if row and row[0]:
+                return await ctx.send('🧭 **Your journey is already started!** See `!profile` to view your adventure stats.')
+            c.execute('UPDATE players SET started=1 WHERE user_id=?',(ctx.author.id,))
+        e=discord.Embed(title='🎒 Adventure Started!', description=f'Welcome to **PokéVanta**, {ctx.author.mention}!\n\nYour adventure has begun and your trainer profile has been created.\n\n🌿 Use `!hunt` to find Pokémon\n👤 Use `!profile` to view your stats\n🪙 Use `!daily` to claim your daily reward', color=discord.Color.green())
+        e.set_thumbnail(url=ctx.author.display_avatar.url)
+        await ctx.send(embed=e)
+
+    @commands.command(name='profile',aliases=['prof','me'],description='View your trainer adventure profile.')
+    async def profile(self,ctx,member:discord.Member=None):
+        member=member or ctx.author
+        with db() as c:
+            row=c.execute('SELECT coins,xp,level,daily_streak,started FROM players WHERE user_id=?',(member.id,)).fetchone()
+            pokemon_count=c.execute('SELECT COUNT(*) FROM pokemon WHERE user_id=?',(member.id,)).fetchone()[0]
+            shiny_count=c.execute('SELECT COUNT(*) FROM pokemon WHERE user_id=? AND shiny=1',(member.id,)).fetchone()[0]
+            dex_count=c.execute('SELECT COUNT(DISTINCT dex_id) FROM pokedex_entries WHERE user_id=?',(member.id,)).fetchone()[0]
+            hunts=c.execute('SELECT count FROM hunt_counts WHERE user_id=?',(member.id,)).fetchone()
+            team_count=c.execute('SELECT COUNT(*) FROM team WHERE user_id=?',(member.id,)).fetchone()[0]
+        if not row:
+            e=discord.Embed(title='🧭 Journey Not Started',description=f'{member.mention} has not started their adventure yet. Use `!start` first.',color=discord.Color.orange())
+        else:
+            coins,xp,level,streak,started=row
+            e=discord.Embed(title=f'🧑‍🚀 {member.display_name}’s Trainer Profile',description='A snapshot of this trainer’s PokéVanta journey.',color=discord.Color.blurple())
+            e.set_thumbnail(url=member.display_avatar.url)
+            e.add_field(name='🌟 Progress', value=f'**Level:** {level}\n**XP:** {xp}/{max(1,level)*100}\n**Adventure:** {"Started ✅" if started else "Not started"}', inline=True)
+            e.add_field(name='🪙 Wallet', value=f'**{coins:,}** VantaCoins\n**Daily streak:** {streak} day(s)', inline=True)
+            e.add_field(name='📚 Collection', value=f'**Pokémon:** {pokemon_count}\n**✨ Shiny:** {shiny_count}\n**Pokédex:** {dex_count} species\n**Team slots:** {team_count}/6', inline=True)
+            e.add_field(name='🌿 Exploration',value=f'**Successful hunts:** {hunts[0] if hunts else 0}',inline=True)
+            e.set_footer(text='Keep exploring — your next discovery is waiting!')
+        await ctx.send(embed=e)
+
     @commands.command(name='hunt',aliases=['h','search'],description='Find a wild Pokémon; every tenth hunt triggers a boss battle.')
     async def hunt(self,ctx):
         try:
@@ -1279,7 +1337,7 @@ class Game(commands.Cog):
             if shiny:e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
             art=sprite(d,shiny=shiny)
             if art:e.set_image(url=art)
-            await ctx.send(embed=e)
+            await ctx.reply(embed=e, mention_author=False)
         except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
 
     @commands.command(name='add',aliases=['addboss','bossadd'])
@@ -2874,7 +2932,17 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         try:
             for attachment in attachments:
                 files.append(await attachment.to_file())
-            await channel.send(content=message.strip() or None, files=files or None)
+            announcement = discord.Embed(
+                title='📢 Announcement',
+                description=message.strip()[:4000] if message.strip() else None,
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            announcement.set_footer(text=f'Announced by {ctx.author.display_name}', icon_url=ctx.author.display_avatar.url)
+            image_attachment = next((a for a in attachments if (a.content_type or '').startswith('image/')), None)
+            if image_attachment:
+                announcement.set_image(url=f'attachment://{image_attachment.filename}')
+            await channel.send(embed=announcement, files=files or None)
         except discord.Forbidden:
             return await ctx.send(f'❌ Discord denied my access to {channel.mention}. Check my channel permissions.')
         except discord.HTTPException as exc:
@@ -3578,16 +3646,15 @@ async def end_trade(trade, message):
     for uid in (trade['starter'], trade['target']):
         TRADE_BY_USER.pop(uid, None)
     ACTIVE_TRADES.pop(trade['id'], None)
-    # For successful trades, replace the original invite/status message so the
-    # old embed and confirmation checkboxes disappear. Other endings get a new notice.
+    # Remove stale trade controls, then announce successful trades in a fresh message.
     if message.startswith('**Trade successful!**'):
         try:
-            await trade['message'].edit(content=message, embed=None, view=None)
-            return
+            await trade['message'].edit(content='✅ Trade completed.', embed=None, view=None)
         except (discord.HTTPException, AttributeError):
             pass
+        message = f'🎉 **Trade successful!** <@{trade["starter"]}> and <@{trade["target"]}> have completed their trade!'
     try:
-        await trade['channel'].send(message)
+        await trade['channel'].send(message, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
     except discord.HTTPException:
         pass
 
@@ -3763,7 +3830,11 @@ class CarlStyleExtensions(commands.Cog):
         if not ctx.guild: return
         if len(message)>1500: return await ctx.send('Welcome template is too long.')
         self.setting(ctx.guild.id,'welcome_channel',channel.id); self.setting(ctx.guild.id,'welcome_message',message)
-        await ctx.send(f'✅ Welcome messages configured for {channel.mention}. Placeholders: `{{user}}`, `{{server}}`, `{{member_count}}`.')
+        # Attach a GIF/image to the !setwelcome command to save it as the welcome artwork.
+        media = next((a for a in getattr(ctx.message, 'attachments', []) if (a.content_type or '').startswith('image/')), None)
+        if media:
+            self.setting(ctx.guild.id,'welcome_gif',media.url)
+        await ctx.send(f'✅ Welcome messages configured for {channel.mention}.' + (' Welcome GIF/image saved!' if media else ' Attach a GIF/image to `!setwelcome` to set the welcome artwork.') + ' Placeholders: `{user}`, `{server}`, `{member_count}`.')
 
     @commands.hybrid_command(name='setgoodbye')
     async def setgoodbye(self, ctx, channel: discord.TextChannel, *, message='Goodbye {user}!'):
@@ -4280,7 +4351,12 @@ class CarlStyleExtensions(commands.Cog):
         if channel:
             template=settings.get('welcome_message','Welcome {user} to {server}!')
             text=template.replace('{user}',member.mention).replace('{server}',member.guild.name).replace('{member_count}',str(member.guild.member_count))
-            try: await channel.send(text[:1900],allowed_mentions=discord.AllowedMentions(users=True,roles=False,everyone=False))
+            welcome = discord.Embed(title=f'🎉 Welcome to {member.guild.name}!', description=f'{text[:3500]}\n\nYou are our **{member.guild.member_count:,}th** member. Make yourself at home!', color=discord.Color.from_rgb(88, 101, 242), timestamp=discord.utils.utcnow())
+            welcome.set_thumbnail(url=member.display_avatar.url)
+            welcome.set_footer(text='We’re glad you’re here!')
+            art=settings.get('welcome_gif')
+            if art: welcome.set_image(url=art)
+            try: await channel.send(content=member.mention, embed=welcome, allowed_mentions=discord.AllowedMentions(users=True,roles=False,everyone=False))
             except discord.HTTPException: pass
         log_id=settings.get('log_channel'); log=member.guild.get_channel(int(log_id)) if log_id else None
         if log:
