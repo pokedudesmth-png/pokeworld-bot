@@ -2428,7 +2428,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             e.add_field(name='🔎 Browse',value='`!market view recent`\n`!market view <Pokémon name>`\n`!market view user @user`',inline=False)
             e.add_field(name='💰 List a Pokémon',value='`!market offer <Pokémon ID> <price>`\nExample: `!market offer 12 2500`',inline=False)
             e.add_field(name='🛒 Buy / your listings',value='`!market buy <listing ID>`\n`!market listings`',inline=True)
-            e.add_field(name='↩️ Remove / claim',value='`!market remove <listing ID>`\n`!market claim <listing ID>`',inline=True)
+            e.add_field(name='↩️ Remove / claim',value='`!market remove <listing ID>`\n`!market claim <listing ID>`\n`!m claim all`',inline=True)
             e.set_footer(text='5% market fee applies when claiming sold listings. Use !shop for items.')
             return await ctx.send(embed=e)
         if action == 'offer':
@@ -2473,16 +2473,18 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         if action in ('listings','offers'):
             with db() as c: rows=c.execute("SELECT listing_id,pokemon_name,price,status FROM market_listings WHERE seller_id=? AND status IN ('active','sold') ORDER BY listing_id DESC LIMIT 15",(ctx.author.id,)).fetchall()
             e=discord.Embed(title=f'📋 {ctx.author.display_name}’s Market Listings',color=discord.Color.blurple())
-            e.description='\n\n'.join((f'**#{lid} · {name.title()}** — {price:,} coins · Active\nRemove: `!market remove {lid}`' if status=='active' else f'**#{lid} · {name.title()}** — Sold · Claim: `!market claim {lid}`') for lid,name,price,status in rows) if rows else 'You have no active or unclaimed sold listings.'
+            with db() as c:
+                shiny_map={int(r[0]):bool(r[1]) for r in c.execute("SELECT listing_id,shiny FROM market_listings WHERE seller_id=? AND status IN ('active','sold')",(ctx.author.id,)).fetchall()}
+            e.description='\n\n'.join(((f'✨ ' if shiny_map.get(int(lid),False) else '') + (f'**#{lid} · {name.replace('-', ' ').title()}** — {price:,} coins · Active\nRemove: `!market remove {lid}`' if status=='active' else f'**#{lid} · {name.replace('-', ' ').title()}** — Sold · Claim: `!market claim {lid}`')) for lid,name,price,status in rows) if rows else 'You have no active or unclaimed sold listings.'
             return await ctx.send(embed=e)
         if action=='buy':
             if not details.isdigit() or int(details)<1: return await ctx.send('Usage: `!market buy <listing ID>`')
             lid=int(details)
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
-                listing=c.execute("SELECT seller_id,pokemon_id,pokemon_name,price FROM market_listings WHERE listing_id=? AND status='active'",(lid,)).fetchone()
+                listing=c.execute("SELECT seller_id,pokemon_id,pokemon_name,price,shiny FROM market_listings WHERE listing_id=? AND status='active'",(lid,)).fetchone()
                 if not listing: c.rollback(); return await ctx.send('❌ That listing is no longer available.')
-                seller,pokemon_id,pname,price=listing
+                seller,pokemon_id,pname,price,listing_shiny=listing
                 if seller==ctx.author.id: c.rollback(); return await ctx.send('❌ You cannot buy your own listing. Use `!market remove {lid}`.')
                 row=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone(); balance=int(row[0]) if row else 0
                 if balance<price: c.rollback(); return await ctx.send(f'❌ Not enough balance. Price: **{price:,}** coins; your balance: **{balance:,}**.')
@@ -2490,7 +2492,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(price,ctx.author.id))
                 new_box_id=transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
                 c.execute("UPDATE market_listings SET status='sold',buyer_id=?,proceeds=? WHERE listing_id=? AND status='active'",(ctx.author.id,price,lid)); c.commit()
-            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought **{pname.title()}** from <@{seller}>!',color=discord.Color.green())
+            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace('-', ' ').title()}** from <@{seller}>!',color=discord.Color.green())
             e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{new_box_id}`',inline=True)
             e.set_footer(text=f'Listing #{lid} · Seller can claim proceeds with !market claim {lid}')
             return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
@@ -2498,19 +2500,35 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if not details.isdigit(): return await ctx.send('Usage: `!market remove <listing ID>`')
             lid=int(details)
             with db() as c:
-                c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT pokemon_id,pokemon_name FROM market_listings WHERE listing_id=? AND seller_id=? AND status='active'",(lid,ctx.author.id)).fetchone()
+                c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT pokemon_id,pokemon_name,shiny FROM market_listings WHERE listing_id=? AND seller_id=? AND status='active'",(lid,ctx.author.id)).fetchone()
                 if not row: c.rollback(); return await ctx.send('❌ No active listing with that ID belongs to you.')
-                pokemon_id,pname=row; transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
-            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'**{pname.title()}** has been returned to your collection.',color=discord.Color.orange()))
+                pokemon_id,pname,listing_shiny=row; transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
+            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'{"✨ " if listing_shiny else ""}**{pname.replace('-', ' ').title()}** has been returned to your collection.',color=discord.Color.orange()))
         if action=='claim':
-            if not details.isdigit(): return await ctx.send('Usage: `!market claim <listing ID>`')
+            if details.lower()=='all':
+                with db() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    rows=c.execute("SELECT listing_id,proceeds,pokemon_name,shiny FROM market_listings WHERE seller_id=? AND status='sold' ORDER BY listing_id",(ctx.author.id,)).fetchall()
+                    if not rows:
+                        c.rollback(); return await ctx.send('❌ You have no sold listings to claim.')
+                    gross=sum(max(0,int(r[1])) for r in rows); fee=(gross*5)//100; payout=gross-fee
+                    ids=[int(r[0]) for r in rows]
+                    c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,ctx.author.id))
+                    c.executemany("UPDATE market_listings SET status='claimed',proceeds=0 WHERE listing_id=? AND seller_id=? AND status='sold'",[(lid,ctx.author.id) for lid in ids])
+                    c.commit()
+                names=', '.join((('✨ ' if shiny else '')+name.replace('-', ' ').title()) for _,_,name,shiny in rows[:5])
+                if len(rows)>5: names+=f' and {len(rows)-5} more'
+                e=discord.Embed(title='💰 All Market Proceeds Claimed!',description=f'Claimed **{len(rows)}** sold listing(s): {names}.',color=discord.Color.green())
+                e.add_field(name='Total sale value',value=f'{gross:,} coins',inline=True); e.add_field(name='Market fee (5%)',value=f'{fee:,} coins',inline=True); e.add_field(name='You received',value=f'**{payout:,}** {get_vantacoin_emoji()} VantaCoins',inline=True)
+                return await ctx.send(embed=e)
+            if not details.isdigit(): return await ctx.send('Usage: `!m claim <listing ID>` or `!m claim all`')
             lid=int(details)
             with db() as c:
-                c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT proceeds,pokemon_name FROM market_listings WHERE listing_id=? AND seller_id=? AND status='sold'",(lid,ctx.author.id)).fetchone()
+                c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT proceeds,pokemon_name,shiny FROM market_listings WHERE listing_id=? AND seller_id=? AND status='sold'",(lid,ctx.author.id)).fetchone()
                 if not row: c.rollback(); return await ctx.send('❌ No unclaimed sold listing with that ID belongs to you.')
-                gross,pname=row; fee=(gross*5)//100; payout=gross-fee
+                gross,pname,shiny=row; fee=(gross*5)//100; payout=gross-fee
                 c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,ctx.author.id)); c.execute("UPDATE market_listings SET status='claimed',proceeds=0 WHERE listing_id=?",(lid,)); c.commit()
-            e=discord.Embed(title='💰 Market proceeds claimed!',description=f'Your **{pname.title()}** listing sold successfully.',color=discord.Color.green())
+            e=discord.Embed(title='💰 Market proceeds claimed!',description=f'Your {"✨ " if shiny else ""}**{pname.replace("-", " ").title()}** listing sold successfully.',color=discord.Color.green())
             e.add_field(name='Sale price',value=f'{gross:,} coins',inline=True); e.add_field(name='Market fee (5%)',value=f'{fee:,} coins',inline=True); e.add_field(name='You received',value=f'**{payout:,}** {get_vantacoin_emoji()} VantaCoins',inline=True)
             return await ctx.send(embed=e)
         return await ctx.send('Unknown market action. Use `!market` to see all market commands.')
@@ -2919,113 +2937,139 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.add_field(name='Recipient',value=f'{member.mention} received **{amount:,}** coins.',inline=True)
         await ctx.send(embed=e, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
 
-    @commands.command(name='bet', description='Challenge another player to a VantaCoin wager.')
-    async def bet(self, ctx, opponent: discord.Member, amount: int):
-        """Challenge a player: !bet @user <amount>. Winner takes both stakes."""
+    @commands.command(name='bet', description='Challenge another player to a VantaCoin wager, including high-stakes mini-games.')
+    async def bet(self, ctx, opponent: discord.Member, *, details: str = ''):
+        """Use !bet @user <amount> or !bet @user high-stakes <amount>."""
         if ctx.guild is None:
             return await ctx.send('❌ Use `!bet` in a server.')
         if opponent.bot or opponent.id == ctx.author.id:
             return await ctx.send('❌ You must challenge another human player.')
-        if amount < 1 or amount > 1_000_000:
-            return await ctx.send('❌ Bet between **1 and 1,000,000 VantaCoins** per player.')
+        parts=details.split()
+        high_stakes=bool(parts and parts[0].lower() in ('high-stakes','highstakes','high'))
+        if high_stakes:
+            if len(parts)!=2 or not parts[1].isdigit():
+                return await ctx.send('Usage: `!bet @user high-stakes <amount>`')
+            amount=int(parts[1])
+        else:
+            if len(parts)!=1 or not parts[0].isdigit():
+                return await ctx.send('Usage: `!bet @user <amount>` or `!bet @user high-stakes <amount>`')
+            amount=int(parts[0])
+        if amount < 1 or amount > 2_000_000_000:
+            return await ctx.send('❌ Bet an amount from **1 to 2,000,000,000 VantaCoins** per player.')
         if ctx.author.id in self.coin_bets or opponent.id in self.coin_bets:
             return await ctx.send('❌ One of you already has a pending or active coin bet.')
-
-        ensure_player(ctx.author.id)
-        ensure_player(opponent.id)
+        ensure_player(ctx.author.id); ensure_player(opponent.id)
         with db() as c:
-            challenger_row = c.execute('SELECT coins FROM players WHERE user_id=?', (ctx.author.id,)).fetchone()
-            opponent_row = c.execute('SELECT coins FROM players WHERE user_id=?', (opponent.id,)).fetchone()
-        challenger_coins = int(challenger_row[0]) if challenger_row else 0
-        opponent_coins = int(opponent_row[0]) if opponent_row else 0
-        if challenger_coins < amount:
-            return await ctx.send(f'❌ You only have **{challenger_coins:,} {get_vantacoin_emoji()} VantaCoins**.')
-        if opponent_coins < amount:
-            return await ctx.send(f'❌ {opponent.mention} only has **{opponent_coins:,} {get_vantacoin_emoji()} VantaCoins**, not enough to match that bet.')
+            rows=c.execute('SELECT user_id,coins FROM players WHERE user_id IN (?,?)',(ctx.author.id,opponent.id)).fetchall()
+        balances={int(uid):int(coins) for uid,coins in rows}
+        if balances.get(ctx.author.id,0)<amount:
+            return await ctx.send(f'❌ You only have **{balances.get(ctx.author.id,0):,} {get_vantacoin_emoji()} VantaCoins**.')
+        if balances.get(opponent.id,0)<amount:
+            return await ctx.send(f'❌ {opponent.mention} only has **{balances.get(opponent.id,0):,} {get_vantacoin_emoji()} VantaCoins**, not enough to match that bet.')
 
-        self.coin_bets[ctx.author.id] = opponent.id
-        self.coin_bets[opponent.id] = ctx.author.id
-        view = TimedView(timeout=60, timeout_text='⏰ Bet challenge expired. No coins were taken.')
-        accept = discord.ui.Button(label='Accept Bet', style=discord.ButtonStyle.success, emoji='🤝')
-        decline = discord.ui.Button(label='Decline', style=discord.ButtonStyle.danger, emoji='✖️')
-        view.add_item(accept)
-        view.add_item(decline)
-        settled = False
-
+        self.coin_bets[ctx.author.id]=opponent.id
+        self.coin_bets[opponent.id]=ctx.author.id
+        settled=False
+        chosen_mode=None
+        mode_view=TimedView(timeout=60,timeout_text='⏰ Bet challenge expired. No coins were taken.')
         async def cleanup():
-            self.coin_bets.pop(ctx.author.id, None)
-            self.coin_bets.pop(opponent.id, None)
+            self.coin_bets.pop(ctx.author.id,None); self.coin_bets.pop(opponent.id,None)
+        async def mode_timeout():
+            await cleanup(); await TimedView.on_timeout(mode_view)
+        mode_view.on_timeout=mode_timeout
 
-        async def timeout_callback():
-            await cleanup()
-            await TimedView.on_timeout(view)
-        view.on_timeout = timeout_callback
+        async def begin_challenge(mode):
+            nonlocal chosen_mode
+            chosen_mode=mode
+            challenge=TimedView(timeout=60,timeout_text='⏰ Bet challenge expired. No coins were taken.')
+            accept=discord.ui.Button(label='Accept Bet',style=discord.ButtonStyle.success,emoji='🤝')
+            decline=discord.ui.Button(label='Decline',style=discord.ButtonStyle.danger,emoji='✖️')
+            challenge.add_item(accept); challenge.add_item(decline)
+            async def challenge_timeout():
+                await cleanup(); await TimedView.on_timeout(challenge)
+            challenge.on_timeout=challenge_timeout
+            async def accept_cb(interaction):
+                nonlocal settled
+                if interaction.user.id!=opponent.id:
+                    return await interaction.response.send_message('Only the challenged player can accept this bet.',ephemeral=True)
+                if settled: return await interaction.response.send_message('This bet has already been settled.',ephemeral=True)
+                settled=True
+                await interaction.response.defer()
+                with db() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    rows=c.execute('SELECT user_id,coins FROM players WHERE user_id IN (?,?)',(ctx.author.id,opponent.id)).fetchall()
+                    now_bal={int(uid):int(coins) for uid,coins in rows}
+                    if now_bal.get(ctx.author.id,0)<amount or now_bal.get(opponent.id,0)<amount:
+                        c.rollback(); await cleanup(); challenge.stop()
+                        return await interaction.edit_original_response(content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.',embed=None,view=None)
+                    c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?,?)',(amount,ctx.author.id,opponent.id))
+                    pot=amount*2
+                    if mode=='roll':
+                        score_a=random.randint(1,100); score_b=random.randint(1,100)
+                        outcome=f'🎲 Roll results: {ctx.author.mention} rolled **{score_a}**; {opponent.mention} rolled **{score_b}**.'
+                    elif mode=='roulette':
+                        score_a=random.randint(0,36); score_b=random.randint(0,36)
+                        outcome=f'🎡 Roulette spins: {ctx.author.mention} landed on **{score_a}**; {opponent.mention} landed on **{score_b}**.'
+                    else:
+                        def blackjack_total():
+                            cards=[random.choice([2,3,4,5,6,7,8,9,10,10,10,11]) for _ in range(2)]
+                            total=sum(cards)
+                            if total>21 and 11 in cards: total-=10
+                            # Simulate one conservative hit when below 16.
+                            if total<16:
+                                card=random.choice([2,3,4,5,6,7,8,9,10,10,10,11]); total+=card
+                                if total>21 and (11 in cards or card==11): total-=10
+                            return total
+                        score_a=blackjack_total(); score_b=blackjack_total()
+                        outcome=f'🃏 Blackjack totals: {ctx.author.mention} **{score_a}**; {opponent.mention} **{score_b}**.'
+                    if score_a==score_b:
+                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(amount,ctx.author.id))
+                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(amount,opponent.id))
+                        winner_id=None; fee=0; payout=0
+                    else:
+                        winner_id=ctx.author.id if score_a>score_b else opponent.id
+                        fee=(pot*5)//100 if high_stakes else 0
+                        payout=pot-fee
+                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,winner_id))
+                    winner_row=c.execute('SELECT coins FROM players WHERE user_id=?',(winner_id,)).fetchone() if winner_id else None
+                    winner_balance=int(winner_row[0]) if winner_row else 0
+                    c.commit()
+                await cleanup(); challenge.stop()
+                e=discord.Embed(title=f'🎰 High-Stakes {mode.title()} Bet Complete' if high_stakes else '🪙 VantaCoin Head-to-Head Bet',color=discord.Color.gold())
+                if winner_id is None:
+                    e.description=f'{outcome}\n\n🤝 **Tie!** Both players get their **{amount:,}** stake back. No fee was charged.'
+                else:
+                    fee_text=' after the 5% pot fee' if high_stakes else ''
+                    e.description=(f'{outcome}\n\n🏆 <@{winner_id}> wins **{payout:,} {get_vantacoin_emoji()} VantaCoins**{fee_text}.\n'
+                                   f'💰 Total pot: **{pot:,}** · Bot fee: **{fee:,}** · Winner payout: **{payout:,}**.')
+                    e.add_field(name='Winner Balance',value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
+                e.set_footer(text='Both stakes are debited only after acceptance. High-stakes games charge 5% of the pot after a winner is determined.')
+                try: await interaction.edit_original_response(content=None,embed=e,view=None)
+                except Exception: await ctx.send(embed=e)
+            async def decline_cb(interaction):
+                nonlocal settled
+                if interaction.user.id!=opponent.id:
+                    return await interaction.response.send_message('Only the challenged player can decline this bet.',ephemeral=True)
+                if settled: return await interaction.response.send_message('This bet has already been settled.',ephemeral=True)
+                settled=True; await cleanup(); challenge.stop()
+                await interaction.response.edit_message(content='❌ Bet declined. No coins were taken.',embed=None,view=None)
+            accept.callback=accept_cb; decline.callback=decline_cb
+            await ctx.send(f'🎰 **{"High-Stakes " if high_stakes else ""}VantaCoin Bet!**\n{ctx.author.mention} challenges {opponent.mention} to **{mode.title()}** for **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\nThe pot is **{amount*2:,}**; the winner receives 95% and the bot takes 5%. Ties refund both stakes.\n{opponent.mention}, accept or decline within 60 seconds.',view=challenge,allowed_mentions=discord.AllowedMentions(users=True))
 
-        async def accept_callback(interaction):
-            nonlocal settled
-            if interaction.user.id != opponent.id:
-                return await interaction.response.send_message('Only the challenged player can accept this bet.', ephemeral=True)
-            if settled:
-                return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
-            settled = True
-            await interaction.response.defer()
-            # Re-check and debit both stakes together to prevent overspending if balances changed.
-            with db() as c:
-                rows = c.execute('SELECT user_id, coins FROM players WHERE user_id IN (?, ?)', (ctx.author.id, opponent.id)).fetchall()
-                balances = {int(uid): int(coins) for uid, coins in rows}
-                if balances.get(ctx.author.id, 0) < amount or balances.get(opponent.id, 0) < amount:
-                    await cleanup()
-                    view.stop()
-                    try:
-                        await interaction.edit_original_response(content='❌ Bet cancelled: one player no longer has enough VantaCoins. No coins were taken.', embed=None, view=None)
-                    except Exception:
-                        pass
-                    return
-                c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?, ?)', (amount, ctx.author.id, opponent.id))
-                winner_id = random.choice((ctx.author.id, opponent.id))
-                pot = amount * 2
-                c.execute('UPDATE players SET coins=coins+? WHERE user_id=?', (pot, winner_id))
-                winner_balance_row = c.execute('SELECT coins FROM players WHERE user_id=?', (winner_id,)).fetchone()
-                winner_balance = int(winner_balance_row[0]) if winner_balance_row else 0
-            await cleanup()
-            view.stop()
-            winner_mention = f'<@{winner_id}>'
-            loser_id = opponent.id if winner_id == ctx.author.id else ctx.author.id
-            embed = discord.Embed(title='🪙 VantaCoin Head-to-Head Bet', color=discord.Color.gold())
-            embed.description = (f'**{ctx.author.mention}** challenged **{opponent.mention}**.\n'
-                                f'Each player wagered **{amount:,} {get_vantacoin_emoji()} VantaCoins**.\n'
-                                f'🏆 {winner_mention} wins the **{pot:,} {get_vantacoin_emoji()} VantaCoin pot**!\n'
-                                f'💸 <@{loser_id}> lost **{amount:,}**; winner netted **+{amount:,}**.')
-            embed.add_field(name='Winner Balance', value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
-            embed.set_footer(text='Winner is chosen randomly • Both stakes are debited only after acceptance.')
-            try:
-                await interaction.edit_original_response(content=None, embed=embed, view=None)
-            except Exception:
-                await ctx.send(embed=embed)
-
-        async def decline_callback(interaction):
-            nonlocal settled
-            if interaction.user.id != opponent.id:
-                return await interaction.response.send_message('Only the challenged player can decline this bet.', ephemeral=True)
-            if settled:
-                return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
-            settled = True
-            await cleanup()
-            view.stop()
-            await interaction.response.edit_message(content='❌ Bet declined. No coins were taken.', embed=None, view=None)
-
-        accept.callback = accept_callback
-        decline.callback = decline_callback
-        try:
-            await ctx.send(
-                f'🪙 **VantaCoin Bet Challenge!**\n{ctx.author.mention} challenges {opponent.mention} to wager **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\n'
-                f'Both stakes make a **{amount * 2:,} coin pot**. Accept to enter a random head-to-head toss; the winner takes the pot (**+{amount:,} net**).\n'
-                f'{opponent.mention}, you have 60 seconds to accept or decline. No coins are taken unless you accept.',
-                view=view
-            )
-        except Exception:
-            await cleanup()
-            raise
+        if high_stakes:
+            for label,mode,emoji in [('Roll','roll','🎲'),('Roulette','roulette','🎡'),('Blackjack','blackjack','🃏')]:
+                button=discord.ui.Button(label=label,style=discord.ButtonStyle.primary,emoji=emoji)
+                async def mode_cb(interaction, selected=mode):
+                    if interaction.user.id!=ctx.author.id:
+                        return await interaction.response.send_message('Only the player who started the bet can choose the game mode.',ephemeral=True)
+                    if settled: return await interaction.response.send_message('This bet has already been settled.',ephemeral=True)
+                    await interaction.response.edit_message(content=f'✅ Selected **{selected.title()}**. Sending the challenge to {opponent.mention}…',view=None)
+                    mode_view.stop()
+                    await begin_challenge(selected)
+                button.callback=mode_cb; mode_view.add_item(button)
+            await ctx.send(f'🎰 {ctx.author.mention}, which high-stakes game do you want to play against {opponent.mention}?',view=mode_view)
+        else:
+            await begin_challenge('roll')
 
     async def dev_confirmation(self, ctx, title, description, action):
         # Developer confirmations do not expire; avoid stale timeout messages after a completed action.
