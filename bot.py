@@ -645,6 +645,48 @@ class PartySwitchPicker(TimedView):
         except Exception: pass
 
 
+async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level=None, image_url=None):
+    """Send shiny-only rare event logs to configured Pokémon and rare-spawn channels."""
+    if guild is None or user is None:
+        return
+    try:
+        with db() as c:
+            settings = dict(c.execute('SELECT key,value FROM cv_settings WHERE guild_id=?', (guild.id,)).fetchall())
+    except Exception:
+        return
+    level_text = f" · Level {int(level)}" if level is not None else ""
+    # Developer Pokémon log: detailed embed for rare shiny acquisition only.
+    pokemon_id = settings.get('log_channel_pokemon')
+    pokemon_channel = guild.get_channel(int(pokemon_id)) if pokemon_id else None
+    if pokemon_channel:
+        e = discord.Embed(title='✨ Rare Shiny Pokémon Acquired!',
+                          description=f"**{discord.utils.escape_markdown(str(pokemon_name))}**{level_text}",
+                          color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+        e.add_field(name='Trainer', value=f'{user.mention} ({discord.utils.escape_markdown(str(user))})', inline=False)
+        e.add_field(name='Event', value=action.title(), inline=True)
+        e.add_field(name='Server', value=discord.utils.escape_markdown(guild.name)[:100], inline=True)
+        if image_url:
+            e.set_image(url=image_url)
+        e.set_footer(text=f'User ID: {user.id} • Shiny-only Pokémon log')
+        try:
+            await pokemon_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    # Public rare-spawn channel: intentionally concise, only shiny + who acquired it.
+    rare_id = settings.get('rare_spawn_channel')
+    rare_channel = guild.get_channel(int(rare_id)) if rare_id else None
+    if rare_channel:
+        e = discord.Embed(title='✨ Shiny Rare Spawn!',
+                          description=f"**{discord.utils.escape_markdown(str(pokemon_name))}** was {action.lower()} by {user.mention}!",
+                          color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+        if image_url:
+            e.set_thumbnail(url=image_url)
+        try:
+            await rare_channel.send(embed=e, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
 class NPCBattleView(TimedView):
     def __init__(self,uid,row,enemy,boss=False,boss_shiny=False,active_boss_battles=None,raid=False):
         super().__init__(timeout=None, timeout_text=''); self.raid=raid; self.uid=uid; self.row=row; self.enemy=enemy; self.player_hp=row[8]; self.enemy_base_hp=max_hp(enemy,enemy['_level']); self.enemy_max_hp=self.enemy_base_hp*(4 if raid else 1); self.enemy_hp=self.enemy_max_hp; self.player_status=(row[11] or '') if len(row)>11 else ''; self.enemy_status=''; self.moves=[]; self.choice_lock=''; self.busy=False; self.boss=boss; self.boss_shiny=boss_shiny; self.party=[]; self.energy_by_pokemon={row[0]:0}; self.active_boss_battles=active_boss_battles
@@ -803,6 +845,8 @@ class NPCBattleView(TimedView):
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
+                if inter.guild:
+                    await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}` (raid boss was Lv.{boss_level})!\n🍬 **+50 Rare Candies** added to your inventory.\nUse `!candy {get_box_id(c,self.uid,iid)} <amount>` to level it or another Pokémon (max Lv. 300).',view=None)
             if self.boss:
                 mh=self.enemy_max_hp
@@ -812,6 +856,8 @@ class NPCBattleView(TimedView):
                     c.execute('DELETE FROM boss_encounters WHERE user_id=?',(self.uid,))
                     c.execute('DELETE FROM boss_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
+                if self.boss_shiny and inter.guild:
+                    await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=self.enemy.get('_level'), image_url=sprite(self.enemy, shiny=True))
                 jackpot=1_000_000 if self.boss_shiny else 0
                 if jackpot: add_progress(self.uid,coins=jackpot)
                 jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **1,000,000 {get_vantacoin_emoji()} VantaCoins (1 million)** have been credited to your balance! 💰' if jackpot else ''
@@ -828,6 +874,8 @@ class NPCBattleView(TimedView):
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
+                if inter.guild:
+                    await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}`!\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP',view=None)
@@ -1603,6 +1651,8 @@ class Game(commands.Cog):
             if not is_global:
                 c.execute('DELETE FROM encounters WHERE user_id=?',(uid,))
         add_progress(uid,coins=50,xp=25)
+        if bool(enc[2]) and ctx.guild:
+            await log_rare_shiny_event(ctx.guild, ctx.author, display_name(d), action='caught', level=enc[3], image_url=sprite(d, shiny=True))
         boss_unlocked=False
         catch_progress=None
         if not is_global:
@@ -3048,7 +3098,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         e.description = (f'{outcome}\\n\\n🏆 <@{winner_id}> wins **{payout:,} {get_vantacoin_emoji()} VantaCoins**{fee_text}.\\n'
                                         f'💰 Total pot: **{pot:,}** · Bot fee: **{fee:,}** · Winner payout: **{payout:,}**.')
                         e.add_field(name='Winner Balance', value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
-                    e.set_footer(text='Stakes are debited after acceptance. High-stakes games charge 5% of the pot after a winner is determined.')
+                    if high_stakes:
+                        e.set_footer(text='Stakes are debited after acceptance. High-stakes games charge 5% of the pot after a winner is determined.')
+                    else:
+                        e.set_footer(text='Stakes are debited after acceptance. Ties refund both stakes.')
                     try:
                         await challenge.message.edit(content=None, embed=e, view=None)
                     except Exception:
@@ -3214,7 +3267,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 settled=True; await cleanup(); challenge.stop()
                 await interaction.response.edit_message(content='❌ Bet declined. No coins were taken.',embed=None,view=None)
             accept.callback=accept_cb; decline.callback=decline_cb
-            challenge.message = await ctx.send(f'🎰 **{"High-Stakes " if high_stakes else ""}VantaCoin Bet!**\n{ctx.author.mention} challenges {opponent.mention} to **{mode.title()}** for **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\nThe pot is **{amount*2:,}**; the winner receives 95% and the bot takes 5%. Ties refund both stakes.\n{opponent.mention}, accept or decline within 60 seconds.',view=challenge,allowed_mentions=discord.AllowedMentions(users=True))
+            fee_rule = '\nThe winner receives 95% of the pot and the bot takes 5%. Ties refund both stakes.' if high_stakes else ''
+            challenge.message = await ctx.send(
+                f'🎰 **{"High-Stakes " if high_stakes else ""}VantaCoin Bet!**\n'
+                f'{ctx.author.mention} challenges {opponent.mention} to **{mode.title()}** for **{amount:,} {get_vantacoin_emoji()} VantaCoins each**.\n'
+                f'The pot is **{amount*2:,}**.{fee_rule}\n'
+                f'{opponent.mention}, accept or decline within 60 seconds.',
+                view=challenge, allowed_mentions=discord.AllowedMentions(users=True))
 
         if high_stakes:
             for label,mode,emoji in [('Roll','roll','🎲'),('Roulette','roulette','🎡'),('Blackjack','blackjack','🃏')]:
@@ -3404,7 +3463,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 timestamp=discord.utils.utcnow(),
             )
             announcement.set_footer(text=f'Announced by {ctx.author.display_name}', icon_url=ctx.author.display_avatar.url)
-            image_attachment = next((a for a in attachments if (a.content_type or '').startswith('image/')), None)
+            image_attachment = next((a for a in attachments if (a.content_type or '').startswith('image/') or a.filename.lower().endswith(('.gif','.png','.jpg','.jpeg','.webp'))), None)
             if image_attachment:
                 announcement.set_image(url=f'attachment://{image_attachment.filename}')
             elif image_url:
@@ -4309,7 +4368,7 @@ class CarlStyleExtensions(commands.Cog):
         if len(message)>1500: return await ctx.send('Welcome template is too long.')
         # If a URL was pasted into the template, keep it out of the welcome text and
         # use it as artwork only when it is a direct image/GIF URL. Uploaded media is preferred.
-        media = next((a for a in getattr(ctx.message, 'attachments', []) if (a.content_type or '').startswith('image/')), None)
+        media = next((a for a in getattr(ctx.message, 'attachments', []) if (a.content_type or '').startswith('image/') or a.filename.lower().endswith(('.gif','.png','.jpg','.jpeg','.webp'))), None)
         urls = re.findall(r'https?://\S+', message)
         art_url = media.url if media else None
         if urls:
@@ -4337,8 +4396,7 @@ class CarlStyleExtensions(commands.Cog):
             if not message:
                 message = 'Welcome {user} to {server}! Make yourself at home!'
         self.setting(ctx.guild.id,'welcome_channel',channel.id); self.setting(ctx.guild.id,'welcome_message',message)
-        if art_url:
-            self.setting(ctx.guild.id,'welcome_gif',art_url)
+        self.setting(ctx.guild.id,'welcome_gif', art_url or '')
         await ctx.send(f'✅ Welcome messages configured for {channel.mention}.' + (' Welcome GIF/image saved!' if art_url else ' Attach the actual GIF/image file, or provide a direct .gif/.png/.jpg/.webp URL, to set the welcome artwork.') + ' Placeholders: `{user}`, `{server}`, `{member_count}`.')
 
     @commands.hybrid_command(name='setgoodbye')
@@ -4351,17 +4409,30 @@ class CarlStyleExtensions(commands.Cog):
 
     @commands.hybrid_command(name='setlog')
     async def setlog(self, ctx, channel: discord.TextChannel):
-        if not await self.require_dev(ctx): return
+        if not await self.require_permission(ctx, 'manage_guild', 'Manage Server'): return
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel', channel.id)
-        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Use `!setpokemonlog`, `!settradinglog`, `!setcoinslog`, or `!setcommandlog` to configure game-log categories separately.')
+        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Command and button logs will also use this channel whenever a category-specific log channel is not configured. Use `!setpokemonlog`, `!settradinglog`, `!setcoinslog`, or `!setcommandlog` to configure separate game-log channels.')
 
     @commands.hybrid_command(name='setpokemonlog')
     async def set_pokemon_log(self, ctx, channel: discord.TextChannel):
-        if not await self.require_dev(ctx): return
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setpokemonlog`.')
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel_pokemon', channel.id)
         await ctx.send(f'✅ Pokémon logs will be sent to {channel.mention}.')
+
+    @commands.hybrid_command(name='rarespawn', description='Configure the public channel for shiny rare Pokémon acquisitions.')
+    @commands.guild_only()
+    async def rare_spawn_channel(self, ctx, channel: discord.TextChannel):
+        if not ctx.guild:
+            return
+        if not (ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild):
+            return await ctx.send('❌ You need **Manage Server** or **Administrator** permission in this server to use `!rarespawn`.')
+        if channel.guild.id != ctx.guild.id:
+            return await ctx.send('❌ Choose a channel from this server.')
+        self.setting(ctx.guild.id, 'rare_spawn_channel', channel.id)
+        await ctx.send(f'✅ Shiny rare-spawn announcements will be posted in {channel.mention}. Only shiny Pokémon caught or won will appear there.')
 
     @commands.hybrid_command(name='settradinglog')
     async def set_trading_log(self, ctx, channel: discord.TextChannel):
@@ -4889,10 +4960,12 @@ class CarlStyleExtensions(commands.Cog):
             welcome = discord.Embed(title=f'🎉 Welcome to {member.guild.name}!', description=f'{text[:3500]}\n\nYou are our **{member.guild.member_count:,}th** member. Make yourself at home!', color=discord.Color.from_rgb(88, 101, 242), timestamp=discord.utils.utcnow())
             welcome.set_thumbnail(url=member.display_avatar.url)
             welcome.set_footer(text='We’re glad you’re here!')
-            art=settings.get('welcome_gif')
-            if art: welcome.set_image(url=art)
+            art=(settings.get('welcome_gif') or '').strip()
+            if art and art.startswith(('https://','http://')):
+                try: welcome.set_image(url=art)
+                except (TypeError, ValueError): pass
             try: await channel.send(content=member.mention, embed=welcome, allowed_mentions=discord.AllowedMentions(users=True,roles=False,everyone=False))
-            except discord.HTTPException: pass
+            except discord.HTTPException as exc: print(f'Welcome media/message send failed in guild {member.guild.id}: {type(exc).__name__}: {exc}')
         log_id=settings.get('log_channel'); log=member.guild.get_channel(int(log_id)) if log_id else None
         if log:
             try: await log.send(embed=discord.Embed(description=f'📥 {member.mention} joined the server.',color=discord.Color.green()))
@@ -5155,6 +5228,11 @@ class Bot(commands.Bot):
             category = 'pokemon'
         else:
             category = 'commands'
+        # Pokémon command usage (catch/info/box/team/etc.) is intentionally not sent
+        # to either command logs or Pokémon logs. Shiny acquisitions are logged by
+        # log_rare_shiny_event() to the configured channels instead.
+        if category == 'pokemon':
+            return
         details = (ctx.message.content or '')[:500]
         try:
             with db() as c:
@@ -5167,6 +5245,11 @@ class Bot(commands.Bot):
             log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins', 'commands': 'log_channel_commands'}.get(category, 'log_channel_commands')
             log_id = self.setting(ctx.guild.id, log_key)
             log_channel = ctx.guild.get_channel(int(log_id)) if log_id else None
+            # If a category-specific channel has not been configured (or was deleted),
+            # fall back to the general !setlog channel instead of silently losing logs.
+            if log_channel is None:
+                general_id = self.setting(ctx.guild.id, 'log_channel')
+                log_channel = ctx.guild.get_channel(int(general_id)) if general_id else None
             if log_channel:
                 e = discord.Embed(title=f'📋 Game Command · {category.title()}', color=discord.Color.blurple(),
                                   timestamp=datetime.now(timezone.utc))
@@ -5188,16 +5271,22 @@ class Bot(commands.Bot):
             return
         try:
             custom = str((interaction.data or {}).get('custom_id', '')).lower()
+            # Pokémon-related component clicks are not command logs; shiny acquisitions
+            # alone are sent to the detailed Pokémon log and concise rare-spawn log.
+            if any(k in custom for k in ('pokemon', 'hunt', 'catch', 'team', 'box')):
+                return
             if any(k in custom for k in ('trade', 'market', 'offer', 'accept')):
                 log_key = 'log_channel_trading'
             elif any(k in custom for k in ('bet', 'coin', 'roll', 'roulette', 'blackjack', 'hit', 'stand')):
                 log_key = 'log_channel_coins'
-            elif any(k in custom for k in ('pokemon', 'hunt', 'catch', 'team', 'box')):
-                log_key = 'log_channel_pokemon'
             else:
                 log_key = 'log_channel_commands'
             log_id = self.setting(interaction.guild.id, log_key)
             log_channel = interaction.guild.get_channel(int(log_id)) if log_id else None
+            # Component interactions also fall back to the general log channel.
+            if log_channel is None:
+                general_id = self.setting(interaction.guild.id, 'log_channel')
+                log_channel = interaction.guild.get_channel(int(general_id)) if general_id else None
             if not log_channel:
                 return
             data = interaction.data or {}
