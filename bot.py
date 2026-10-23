@@ -3166,10 +3166,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         title=f'🎰 High-Stakes {mode.title()} Bet Complete' if high_stakes else '🪙 VantaCoin Head-to-Head Bet',
                         color=discord.Color.gold())
                     if winner_id is None:
-                        e.description = f'{outcome}\\n\\n🤝 **Tie!** Both players get their **{amount:,}** stake back. No fee was charged.'
+                        e.description = f'{outcome}\n\n🤝 **Tie!** Both players get their **{amount:,}** stake back. No fee was charged.'
                     else:
                         fee_text = ' after the 5% pot fee' if high_stakes else ''
-                        e.description = (f'{outcome}\\n\\n🏆 <@{winner_id}> wins **{payout:,} {get_vantacoin_emoji()} VantaCoins**{fee_text}.\\n'
+                        e.description = (f'{outcome}\n\n🏆 <@{winner_id}> wins **{payout:,} {get_vantacoin_emoji()} VantaCoins**{fee_text}.\n'
                                         f'💰 Total pot: **{pot:,}** · Bot fee: **{fee:,}** · Winner payout: **{payout:,}**.')
                         e.add_field(name='Winner Balance', value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
                     if high_stakes:
@@ -3229,13 +3229,15 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                                     await self.record(interaction, (k, v), lab)
                                 b.callback = cb
                                 self.add_item(b)
-                            sel = discord.ui.Select(placeholder='Or choose an exact number (0–36)',
-                                options=[discord.SelectOption(label=str(n), value=str(n)) for n in range(37)])
-                            async def number_cb(interaction):
-                                n = int(sel.values[0])
-                                await self.record(interaction, ('number', n), f'Number {n}')
-                            sel.callback = number_cb
-                            self.add_item(sel)
+                            for low, high in ((0, 18), (19, 36)):
+                                sel = discord.ui.Select(
+                                    placeholder=f'Exact number {low}–{high}',
+                                    options=[discord.SelectOption(label=str(n), value=str(n)) for n in range(low, high + 1)])
+                                async def number_cb(interaction, menu=sel):
+                                    n = int(menu.values[0])
+                                    await self.record(interaction, ('number', n), f'Number {n}')
+                                sel.callback = number_cb
+                                self.add_item(sel)
                         async def record(self, interaction, choice, label):
                             if interaction.user.id != self.player_id:
                                 return await interaction.response.send_message('This is not your roulette picker.', ephemeral=True)
@@ -3359,9 +3361,18 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                             return await interaction.response.send_message('It is not your turn.', ephemeral=True)
                         if active_id in stands:
                             return await interaction.response.send_message('You have already stood.', ephemeral=True)
-                        hands[active_id].append(deck.pop() if deck else (random.choice(ranks), random.choice(suits)))
+                        drawing_player_id = active_id
+                        hands[drawing_player_id].append(deck.pop() if deck else (random.choice(ranks), random.choice(suits)))
                         await interaction.response.defer()
                         await update_blackjack(interaction, 'You drew a card.')
+                        # Send a fresh DM after every Hit so the player sees the newly drawn card.
+                        player = ctx.guild.get_member(drawing_player_id) if ctx.guild else None
+                        if player is None:
+                            player = ctx.author if drawing_player_id == ctx.author.id else opponent
+                        try:
+                            await player.send(embed=private_hand_embed(drawing_player_id, '🃏 New card drawn. This is your updated hand.'))
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
                     async def stand_cb(interaction):
                         nonlocal active_id
                         if interaction.user.id != active_id:
