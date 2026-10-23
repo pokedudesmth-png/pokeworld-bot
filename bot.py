@@ -2990,62 +2990,213 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             challenge.on_timeout=challenge_timeout
             async def accept_cb(interaction):
                 nonlocal settled
-                if interaction.user.id!=opponent.id:
-                    return await interaction.response.send_message('Only the challenged player can accept this bet.',ephemeral=True)
-                if settled: return await interaction.response.send_message('This bet has already been settled.',ephemeral=True)
-                settled=True
+                if interaction.user.id != opponent.id:
+                    return await interaction.response.send_message('Only the challenged player can accept this bet.', ephemeral=True)
+                if settled:
+                    return await interaction.response.send_message('This bet has already been settled.', ephemeral=True)
+                settled = True
                 await interaction.response.defer()
+                # Debit both stakes atomically once the challenge is accepted.
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE')
-                    rows=c.execute('SELECT user_id,coins FROM players WHERE user_id IN (?,?)',(ctx.author.id,opponent.id)).fetchall()
-                    now_bal={int(uid):int(coins) for uid,coins in rows}
-                    if now_bal.get(ctx.author.id,0)<amount or now_bal.get(opponent.id,0)<amount:
-                        c.rollback(); await cleanup(); challenge.stop()
-                        return await interaction.edit_original_response(content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.',embed=None,view=None)
-                    c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?,?)',(amount,ctx.author.id,opponent.id))
-                    pot=amount*2
-                    if mode=='roll':
-                        score_a=random.randint(1,100); score_b=random.randint(1,100)
-                        outcome=f'🎲 Roll results: {ctx.author.mention} rolled **{score_a}**; {opponent.mention} rolled **{score_b}**.'
-                    elif mode=='roulette':
-                        score_a=random.randint(0,36); score_b=random.randint(0,36)
-                        outcome=f'🎡 Roulette spins: {ctx.author.mention} landed on **{score_a}**; {opponent.mention} landed on **{score_b}**.'
-                    else:
-                        def blackjack_total():
-                            cards=[random.choice([2,3,4,5,6,7,8,9,10,10,10,11]) for _ in range(2)]
-                            total=sum(cards)
-                            if total>21 and 11 in cards: total-=10
-                            # Simulate one conservative hit when below 16.
-                            if total<16:
-                                card=random.choice([2,3,4,5,6,7,8,9,10,10,10,11]); total+=card
-                                if total>21 and (11 in cards or card==11): total-=10
-                            return total
-                        score_a=blackjack_total(); score_b=blackjack_total()
-                        outcome=f'🃏 Blackjack totals: {ctx.author.mention} **{score_a}**; {opponent.mention} **{score_b}**.'
-                    if score_a==score_b:
-                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(amount,ctx.author.id))
-                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(amount,opponent.id))
-                        winner_id=None; fee=0; payout=0
-                    else:
-                        winner_id=ctx.author.id if score_a>score_b else opponent.id
-                        fee=(pot*5)//100 if high_stakes else 0
-                        payout=pot-fee
-                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,winner_id))
-                    winner_row=c.execute('SELECT coins FROM players WHERE user_id=?',(winner_id,)).fetchone() if winner_id else None
-                    winner_balance=int(winner_row[0]) if winner_row else 0
+                    rows = c.execute('SELECT user_id,coins FROM players WHERE user_id IN (?,?)',
+                                     (ctx.author.id, opponent.id)).fetchall()
+                    now_bal = {int(uid): int(coins) for uid, coins in rows}
+                    if now_bal.get(ctx.author.id, 0) < amount or now_bal.get(opponent.id, 0) < amount:
+                        c.rollback()
+                        await cleanup()
+                        challenge.stop()
+                        return await interaction.edit_original_response(
+                            content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.',
+                            embed=None, view=None)
+                    c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?,?)',
+                              (amount, ctx.author.id, opponent.id))
                     c.commit()
-                await cleanup(); challenge.stop()
-                e=discord.Embed(title=f'🎰 High-Stakes {mode.title()} Bet Complete' if high_stakes else '🪙 VantaCoin Head-to-Head Bet',color=discord.Color.gold())
-                if winner_id is None:
-                    e.description=f'{outcome}\n\n🤝 **Tie!** Both players get their **{amount:,}** stake back. No fee was charged.'
-                else:
-                    fee_text=' after the 5% pot fee' if high_stakes else ''
-                    e.description=(f'{outcome}\n\n🏆 <@{winner_id}> wins **{payout:,} {get_vantacoin_emoji()} VantaCoins**{fee_text}.\n'
-                                   f'💰 Total pot: **{pot:,}** · Bot fee: **{fee:,}** · Winner payout: **{payout:,}**.')
-                    e.add_field(name='Winner Balance',value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
-                e.set_footer(text='Both stakes are debited only after acceptance. High-stakes games charge 5% of the pot after a winner is determined.')
-                try: await interaction.edit_original_response(content=None,embed=e,view=None)
-                except Exception: await ctx.send(embed=e)
+                await cleanup()
+                challenge.stop()
+
+                async def settle_game(score_a, score_b, outcome):
+                    pot = amount * 2
+                    with db() as c:
+                        c.execute('BEGIN IMMEDIATE')
+                        if score_a == score_b:
+                            c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',
+                                      (amount, ctx.author.id))
+                            c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',
+                                      (amount, opponent.id))
+                            winner_id = None
+                            fee = payout = 0
+                        else:
+                            winner_id = ctx.author.id if score_a > score_b else opponent.id
+                            fee = (pot * 5) // 100 if high_stakes else 0
+                            payout = pot - fee
+                            c.execute('UPDATE players SET coins=coins+? WHERE user_id=?', (payout, winner_id))
+                        winner_row = c.execute('SELECT coins FROM players WHERE user_id=?',
+                                               (winner_id,)).fetchone() if winner_id else None
+                        winner_balance = int(winner_row[0]) if winner_row else 0
+                        c.commit()
+                    e = discord.Embed(
+                        title=f'🎰 High-Stakes {mode.title()} Bet Complete' if high_stakes else '🪙 VantaCoin Head-to-Head Bet',
+                        color=discord.Color.gold())
+                    if winner_id is None:
+                        e.description = f'{outcome}\\n\\n🤝 **Tie!** Both players get their **{amount:,}** stake back. No fee was charged.'
+                    else:
+                        fee_text = ' after the 5% pot fee' if high_stakes else ''
+                        e.description = (f'{outcome}\\n\\n🏆 <@{winner_id}> wins **{payout:,} {get_vantacoin_emoji()} VantaCoins**{fee_text}.\\n'
+                                        f'💰 Total pot: **{pot:,}** · Bot fee: **{fee:,}** · Winner payout: **{payout:,}**.')
+                        e.add_field(name='Winner Balance', value=f'**{winner_balance:,} {get_vantacoin_emoji()} VantaCoins**')
+                    e.set_footer(text='Stakes are debited after acceptance. High-stakes games charge 5% of the pot after a winner is determined.')
+                    try:
+                        await interaction.edit_original_response(content=None, embed=e, view=None)
+                    except Exception:
+                        await ctx.send(embed=e)
+
+                if mode == 'roulette':
+                    # Each player privately selects their own roulette bet.
+                    choices = {}
+                    roulette_view = TimedView(timeout=120, timeout_text='⏰ Roulette selection expired. Stakes were refunded.')
+                    async def refund_roulette():
+                        with db() as c:
+                            c.execute('UPDATE players SET coins=coins+? WHERE user_id IN (?,?)',
+                                      (amount, ctx.author.id, opponent.id))
+                        await ctx.send('⏰ Roulette selection expired; both stakes have been refunded.')
+                    async def roulette_timeout():
+                        if len(choices) < 2:
+                            await refund_roulette()
+                        await TimedView.on_timeout(roulette_view)
+                    roulette_view.on_timeout = roulette_timeout
+                    async def maybe_spin():
+                        if len(choices) != 2:
+                            return
+                        roulette_view.stop()
+                        number = random.randint(0, 36)
+                        red_numbers = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+                        color = 'green' if number == 0 else ('red' if number in red_numbers else 'black')
+                        parity = 'zero' if number == 0 else ('even' if number % 2 == 0 else 'odd')
+                        def wins(choice):
+                            kind, value = choice
+                            return (kind == 'number' and number == value) or (kind == 'color' and color == value) or (kind == 'parity' and parity == value)
+                        a_win, b_win = wins(choices[ctx.author.id]), wins(choices[opponent.id])
+                        if a_win == b_win:
+                            sa = sb = 1
+                        else:
+                            sa, sb = (2, 1) if a_win else (1, 2)
+                        outcome = (f'🎡 Roulette landed on **{number} ({color})**.\\n'
+                                   f'{ctx.author.mention} chose **{choices[ctx.author.id][1]}**: {"WIN" if a_win else "lose"}.\\n'
+                                   f'{opponent.mention} chose **{choices[opponent.id][1]}**: {"WIN" if b_win else "lose"}.')
+                        # A winning selection beats a losing selection; equal outcomes are a tie.
+                        await settle_game(2 if a_win and not b_win else 1 if not a_win and b_win else 0,
+                                          2 if b_win and not a_win else 1 if not b_win and a_win else 0, outcome)
+                    for label, kind, value, emoji in [
+                        ('Odd','parity','odd','🔢'),('Even','parity','even','🔢'),
+                        ('Red','color','red','🔴'),('Black','color','black','⚫')]:
+                        btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, emoji=emoji)
+                        async def pick_cb(interaction, k=kind, v=value, lab=label):
+                            if interaction.user.id not in (ctx.author.id, opponent.id):
+                                return await interaction.response.send_message('This roulette bet is for the two players only.', ephemeral=True)
+                            if interaction.user.id in choices:
+                                return await interaction.response.send_message('You already chose your roulette bet.', ephemeral=True)
+                            choices[interaction.user.id] = (k, v)
+                            await interaction.response.send_message(f'Your roulette choice: **{lab}**.', ephemeral=True)
+                            await maybe_spin()
+                            if len(choices) < 2:
+                                await interaction.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                        btn.callback = pick_cb
+                        roulette_view.add_item(btn)
+                    number_select = discord.ui.Select(
+                        placeholder='Or choose an exact number (0–36)',
+                        options=[discord.SelectOption(label=str(n), value=str(n)) for n in range(37)])
+                    async def number_cb(interaction):
+                        if interaction.user.id not in (ctx.author.id, opponent.id):
+                            return await interaction.response.send_message('This roulette bet is for the two players only.', ephemeral=True)
+                        if interaction.user.id in choices:
+                            return await interaction.response.send_message('You already chose your roulette bet.', ephemeral=True)
+                        n = int(number_select.values[0])
+                        choices[interaction.user.id] = ('number', n)
+                        await interaction.response.send_message(f'Your roulette choice: exact number **{n}**.', ephemeral=True)
+                        await maybe_spin()
+                        if len(choices) < 2:
+                            await interaction.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                    number_select.callback = number_cb
+                    roulette_view.add_item(number_select)
+                    await interaction.edit_original_response(content=f'🎡 **Roulette choices** — {ctx.author.mention} and {opponent.mention}, choose your own bet separately. Exact number pays only if the ball lands on that number.', embed=None, view=roulette_view)
+                    return
+
+                if mode == 'blackjack':
+                    deck_values = [2,3,4,5,6,7,8,9,10,10,10,11]
+                    hands = {ctx.author.id: [random.choice(deck_values), random.choice(deck_values)],
+                             opponent.id: [random.choice(deck_values), random.choice(deck_values)]}
+                    stands = set()
+                    active_id = ctx.author.id
+                    def hand_total(hand):
+                        total = sum(hand)
+                        aces = hand.count(11)
+                        while total > 21 and aces:
+                            total -= 10
+                            aces -= 1
+                        return total
+                    blackjack_view = TimedView(timeout=180, timeout_text='⏰ Blackjack timed out. Stakes were refunded.')
+                    async def refund_blackjack():
+                        with db() as c:
+                            c.execute('UPDATE players SET coins=coins+? WHERE user_id IN (?,?)',
+                                      (amount, ctx.author.id, opponent.id))
+                        await ctx.send('⏰ Blackjack timed out; both stakes have been refunded.')
+                    async def blackjack_timeout():
+                        if len(stands) < 2:
+                            await refund_blackjack()
+                        await TimedView.on_timeout(blackjack_view)
+                    blackjack_view.on_timeout = blackjack_timeout
+                    async def update_blackjack(interaction=None):
+                        nonlocal active_id
+                        # Automatically stand on bust and advance to the other player.
+                        if hand_total(hands[active_id]) > 21:
+                            stands.add(active_id)
+                        if active_id in stands:
+                            other = opponent.id if active_id == ctx.author.id else ctx.author.id
+                            if other not in stands:
+                                active_id = other
+                        if len(stands) == 2:
+                            blackjack_view.stop()
+                            ta, tb = hand_total(hands[ctx.author.id]), hand_total(hands[opponent.id])
+                            outcome = (f'🃏 {ctx.author.mention}: **{hands[ctx.author.id]}** = **{ta}**.\\n'
+                                       f'{opponent.mention}: **{hands[opponent.id]}** = **{tb}**.')
+                            sa = -1 if ta > 21 else ta
+                            sb = -1 if tb > 21 else tb
+                            await settle_game(sa, sb, outcome)
+                            return
+                        text = (f'🃏 **Blackjack — separate hands**\\n'
+                                f'{ctx.author.mention}: **{hands[ctx.author.id]}** (total {hand_total(hands[ctx.author.id])}) {"— STAND" if ctx.author.id in stands else ""}\\n'
+                                f'{opponent.mention}: **{hands[opponent.id]}** (total {hand_total(hands[opponent.id])}) {"— STAND" if opponent.id in stands else ""}\\n\\n'
+                                f'It is <@{active_id}>’s turn. Only that player can Hit or Stand.')
+                        for item in blackjack_view.children:
+                            item.disabled = False
+                        await interaction.edit_original_response(content=text, embed=None, view=blackjack_view)
+                    hit = discord.ui.Button(label='Hit', style=discord.ButtonStyle.success, emoji='🃏')
+                    stand = discord.ui.Button(label='Stand', style=discord.ButtonStyle.secondary, emoji='✋')
+                    async def hit_cb(interaction):
+                        if interaction.user.id != active_id:
+                            return await interaction.response.send_message('It is not your turn.', ephemeral=True)
+                        if active_id in stands:
+                            return await interaction.response.send_message('You have already stood.', ephemeral=True)
+                        hands[active_id].append(random.choice(deck_values))
+                        await interaction.response.defer()
+                        await update_blackjack(interaction)
+                    async def stand_cb(interaction):
+                        if interaction.user.id != active_id:
+                            return await interaction.response.send_message('It is not your turn.', ephemeral=True)
+                        stands.add(active_id)
+                        await interaction.response.defer()
+                        await update_blackjack(interaction)
+                    hit.callback = hit_cb; stand.callback = stand_cb
+                    blackjack_view.add_item(hit); blackjack_view.add_item(stand)
+                    await interaction.edit_original_response(content=f'🃏 **Blackjack — separate hands**\\n{ctx.author.mention}: **{hands[ctx.author.id]}** (total {hand_total(hands[ctx.author.id])})\\n{opponent.mention}: **{hands[opponent.id]}** (total {hand_total(hands[opponent.id])})\\n\\nIt is {ctx.author.mention}’s turn. Use Hit or Stand.', embed=None, view=blackjack_view)
+                    return
+
+                # Roll mode remains a quick simultaneous roll.
+                score_a = random.randint(1, 100)
+                score_b = random.randint(1, 100)
+                outcome = f'🎲 Roll results: {ctx.author.mention} rolled **{score_a}**; {opponent.mention} rolled **{score_b}**.'
+                await settle_game(score_a, score_b, outcome)
             async def decline_cb(interaction):
                 nonlocal settled
                 if interaction.user.id!=opponent.id:
