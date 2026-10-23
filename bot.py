@@ -3101,19 +3101,29 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 # Acknowledge the click immediately; Discord otherwise reports “application did not respond”.
                 await interaction.response.defer(thinking=False)
                 # Debit both stakes atomically once the challenge is accepted.
-                with db() as c:
-                    c.execute('BEGIN IMMEDIATE')
-                    rows = c.execute('SELECT user_id,coins FROM players WHERE user_id IN (?,?)',
-                                     (ctx.author.id, opponent.id)).fetchall()
-                    now_bal = {int(uid): int(coins) for uid, coins in rows}
-                    if now_bal.get(ctx.author.id, 0) < amount or now_bal.get(opponent.id, 0) < amount:
-                        c.rollback()
-                        await cleanup()
-                        challenge.stop()
-                        return await challenge.message.edit(content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.', embed=None, view=None)
-                    c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?,?)',
-                              (amount, ctx.author.id, opponent.id))
-                    c.commit()
+                try:
+                    with db() as c:
+                        c.execute('BEGIN IMMEDIATE')
+                        rows = c.execute('SELECT user_id,coins FROM players WHERE user_id IN (?,?)',
+                                         (ctx.author.id, opponent.id)).fetchall()
+                        now_bal = {int(uid): int(coins) for uid, coins in rows}
+                        if now_bal.get(ctx.author.id, 0) < amount or now_bal.get(opponent.id, 0) < amount:
+                            c.rollback()
+                            await cleanup()
+                            challenge.stop()
+                            return await challenge.message.edit(content='❌ Bet cancelled: one player no longer has enough coins. No coins were taken.', embed=None, view=None)
+                        c.execute('UPDATE players SET coins=coins-? WHERE user_id IN (?,?)',
+                                  (amount, ctx.author.id, opponent.id))
+                        c.commit()
+                except Exception as exc:
+                    print(f'[HIGH-STAKES BET] Stake debit failed: {exc!r}')
+                    await cleanup()
+                    challenge.stop()
+                    try:
+                        await challenge.message.edit(content='❌ The bet could not start because of a database error. No game was started; contact a bot developer.', embed=None, view=None)
+                    except Exception:
+                        pass
+                    return
                 await cleanup()
                 challenge.stop()
 
@@ -3331,9 +3341,21 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                     if interaction.user.id!=ctx.author.id:
                         return await interaction.response.send_message('Only the player who started the bet can choose the game mode.',ephemeral=True)
                     if settled: return await interaction.response.send_message('This bet has already been settled.',ephemeral=True)
-                    await interaction.response.edit_message(content=f'✅ Selected **{selected.title()}**. Sending the challenge to {opponent.mention}…',view=None)
+                    await interaction.response.defer()
                     mode_view.stop()
-                    await begin_challenge(selected)
+                    try:
+                        await mode_view.message.edit(content=f'✅ Selected **{selected.title()}**. Sending the challenge to {opponent.mention}…', view=None)
+                    except Exception:
+                        pass
+                    try:
+                        await begin_challenge(selected)
+                    except Exception as exc:
+                        print(f'[HIGH-STAKES BET] Could not create {selected} challenge: {exc!r}')
+                        await cleanup()
+                        try:
+                            await ctx.send('❌ The high-stakes challenge could not be created. No coins were taken. Please try again; check the bot console for the error.')
+                        except Exception:
+                            pass
                 button.callback=mode_cb; mode_view.add_item(button)
             mode_view.message = await ctx.send(f'🎰 {ctx.author.mention}, which high-stakes game do you want to play against {opponent.mention}?',view=mode_view)
         else:
