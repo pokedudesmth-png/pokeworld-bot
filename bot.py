@@ -3182,7 +3182,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         await ctx.send(embed=e)
 
                 if mode == 'roulette':
-                    # Each player privately selects their own roulette bet.
+                    # Each player gets their own private picker; neither can see the other's selection.
                     choices = {}
                     roulette_view = TimedView(timeout=120, timeout_text='⏰ Roulette selection expired. Stakes were refunded.')
                     async def refund_roulette():
@@ -3195,82 +3195,126 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                             await refund_roulette()
                         await TimedView.on_timeout(roulette_view)
                     roulette_view.on_timeout = roulette_timeout
+
                     async def maybe_spin():
                         if len(choices) != 2:
                             return
                         roulette_view.stop()
                         number = random.randint(0, 36)
-                        red_numbers = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
-                        color = 'green' if number == 0 else ('red' if number in red_numbers else 'black')
+                        reds = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+                        color = 'green' if number == 0 else ('red' if number in reds else 'black')
                         parity = 'zero' if number == 0 else ('even' if number % 2 == 0 else 'odd')
                         def wins(choice):
                             kind, value = choice
-                            return (kind == 'number' and number == value) or (kind == 'color' and color == value) or (kind == 'parity' and parity == value)
+                            return ((kind == 'number' and number == value) or
+                                    (kind == 'color' and color == value) or
+                                    (kind == 'parity' and parity == value))
                         a_win, b_win = wins(choices[ctx.author.id]), wins(choices[opponent.id])
-                        if a_win == b_win:
-                            sa = sb = 1
-                        else:
-                            sa, sb = (2, 1) if a_win else (1, 2)
-                        outcome = (f'🎡 Roulette landed on **{number} ({color})**.\\n'
-                                   f'{ctx.author.mention} chose **{choices[ctx.author.id][1]}**: {"WIN" if a_win else "lose"}.\\n'
-                                   f'{opponent.mention} chose **{choices[opponent.id][1]}**: {"WIN" if b_win else "lose"}.')
-                        # A winning selection beats a losing selection; equal outcomes are a tie.
+                        outcome = (f'**Ball landed on {number} — {color.upper()}**\n\n'
+                                   f'{ctx.author.mention}: **{"WIN" if a_win else "LOSE"}**\n'
+                                   f'{opponent.mention}: **{"WIN" if b_win else "LOSE"}**')
                         await settle_game(2 if a_win and not b_win else 1 if not a_win and b_win else 0,
-                                          2 if b_win and not a_win else 1 if not b_win and a_win else 0, outcome)
-                    for label, kind, value, emoji in [
-                        ('Odd','parity','odd','🔢'),('Even','parity','even','🔢'),
-                        ('Red','color','red','🔴'),('Black','color','black','⚫')]:
-                        btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, emoji=emoji)
-                        async def pick_cb(interaction, k=kind, v=value, lab=label):
-                            if interaction.user.id not in (ctx.author.id, opponent.id):
-                                return await interaction.response.send_message('This roulette bet is for the two players only.', ephemeral=True)
-                            if interaction.user.id in choices:
+                                          2 if b_win and not a_win else 1 if not b_win and a_win else 0,
+                                          outcome)
+
+                    class RoulettePicker(discord.ui.View):
+                        def __init__(self, player_id):
+                            super().__init__(timeout=120)
+                            self.player_id = player_id
+                            for label, kind, value, emoji in [
+                                ('Odd', 'parity', 'odd', '🔢'), ('Even', 'parity', 'even', '🔢'),
+                                ('Red', 'color', 'red', '🔴'), ('Black', 'color', 'black', '⚫')]:
+                                b = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, emoji=emoji)
+                                async def cb(interaction, k=kind, v=value, lab=label):
+                                    await self.record(interaction, (k, v), lab)
+                                b.callback = cb
+                                self.add_item(b)
+                            sel = discord.ui.Select(placeholder='Or choose an exact number (0–36)',
+                                options=[discord.SelectOption(label=str(n), value=str(n)) for n in range(37)])
+                            async def number_cb(interaction):
+                                n = int(sel.values[0])
+                                await self.record(interaction, ('number', n), f'Number {n}')
+                            sel.callback = number_cb
+                            self.add_item(sel)
+                        async def record(self, interaction, choice, label):
+                            if interaction.user.id != self.player_id:
+                                return await interaction.response.send_message('This is not your roulette picker.', ephemeral=True)
+                            if self.player_id in choices:
                                 return await interaction.response.send_message('You already chose your roulette bet.', ephemeral=True)
-                            choices[interaction.user.id] = (k, v)
-                            await interaction.response.send_message(f'Your roulette choice: **{lab}**.', ephemeral=True)
-                            await maybe_spin()
-                            if len(choices) < 2:
-                                try:
-                                    await roulette_view.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
-                                except (discord.HTTPException, AttributeError):
-                                    pass
-                        btn.callback = pick_cb
-                        roulette_view.add_item(btn)
-                    number_select = discord.ui.Select(
-                        placeholder='Or choose an exact number (0–36)',
-                        options=[discord.SelectOption(label=str(n), value=str(n)) for n in range(37)])
-                    async def number_cb(interaction):
-                        if interaction.user.id not in (ctx.author.id, opponent.id):
-                            return await interaction.response.send_message('This roulette bet is for the two players only.', ephemeral=True)
-                        if interaction.user.id in choices:
-                            return await interaction.response.send_message('You already chose your roulette bet.', ephemeral=True)
-                        n = int(number_select.values[0])
-                        choices[interaction.user.id] = ('number', n)
-                        await interaction.response.send_message(f'Your roulette choice: exact number **{n}**.', ephemeral=True)
-                        await maybe_spin()
-                        if len(choices) < 2:
+                            choices[self.player_id] = choice
+                            await interaction.response.edit_message(content=f'✅ Your private roulette choice is **{label}**. Your opponent cannot see it.', view=None)
                             try:
-                                await roulette_view.message.edit(content=f'🎡 Roulette: each player chooses separately. Selections received: **{len(choices)}/2**.', view=roulette_view)
+                                await roulette_view.message.edit(embed=roulette_embed(), view=roulette_view)
                             except (discord.HTTPException, AttributeError):
                                 pass
-                    number_select.callback = number_cb
-                    roulette_view.add_item(number_select)
-                    roulette_view.message = await challenge.message.edit(content=f'🎡 **Roulette choices** — {ctx.author.mention} and {opponent.mention}, choose your own bet separately. Exact number pays only if the ball lands on that number.', embed=None, view=roulette_view)
+                            await maybe_spin()
+
+                    def roulette_embed():
+                        e = discord.Embed(title='🎡 Roulette', description='Each player picks privately. Your opponent cannot see your selection.', color=discord.Color.dark_teal())
+                        e.add_field(name='Players ready', value=f'🎯 {len(choices)}/2 selections received', inline=False)
+                        e.set_footer(text='0 is green • red/black and odd/even bets pay when matched')
+                        return e
+                    for player in (ctx.author, opponent):
+                        b = discord.ui.Button(label=f'{player.display_name} — Choose privately', style=discord.ButtonStyle.success, emoji='🎯')
+                        async def open_picker(interaction, p=player):
+                            if interaction.user.id != p.id:
+                                return await interaction.response.send_message('That private picker belongs to the other player.', ephemeral=True)
+                            if p.id in choices:
+                                return await interaction.response.send_message('You have already made your choice.', ephemeral=True)
+                            await interaction.response.send_message('🎡 **Choose your roulette bet privately:**', view=RoulettePicker(p.id), ephemeral=True)
+                        b.callback = open_picker
+                        roulette_view.add_item(b)
+                    roulette_view.message = await challenge.message.edit(content=None, embed=roulette_embed(), view=roulette_view)
                     return
 
                 if mode == 'blackjack':
-                    deck_values = [2,3,4,5,6,7,8,9,10,10,10,11]
-                    hands = {ctx.author.id: [random.choice(deck_values), random.choice(deck_values)],
-                             opponent.id: [random.choice(deck_values), random.choice(deck_values)]}
+                    suits = ['♠️', '♥️', '♦️', '♣️']
+                    ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+                    deck = [(rank, suit) for suit in suits for rank in ranks]
+                    random.shuffle(deck)
+                    hands = {ctx.author.id: [deck.pop(), deck.pop()],
+                             opponent.id: [deck.pop(), deck.pop()]}
                     stands = set()
                     active_id = ctx.author.id
+                    player_names = {ctx.author.id: ctx.author.display_name, opponent.id: opponent.display_name}
+
+                    def card_value(card):
+                        rank = card[0]
+                        return 11 if rank == 'A' else 10 if rank in ('J', 'Q', 'K') else int(rank)
                     def hand_total(hand):
-                        total = sum(hand)
-                        aces = hand.count(11)
+                        total = sum(card_value(card) for card in hand)
+                        aces = sum(1 for card in hand if card[0] == 'A')
                         while total > 21 and aces:
                             total -= 10
                             aces -= 1
                         return total
+                    def cards_text(hand):
+                        return '　'.join(f'〔{rank}{suit}〕' for rank, suit in hand)
+                    def public_blackjack_embed(final=False):
+                        e = discord.Embed(title='🃏 Blackjack · Head to Head',
+                                          description='Take turns drawing cards. Your hand is private; your opponent only sees card backs.',
+                                          color=discord.Color.dark_purple())
+                        for player in (ctx.author, opponent):
+                            hand = hands[player.id]
+                            if final:
+                                shown = cards_text(hand)
+                                value = f'{shown}\n**Total: {hand_total(hand)}**'
+                            else:
+                                shown = '　'.join('🂠' for _ in hand)
+                                status = ' · STAND' if player.id in stands else ''
+                                value = f'{shown}\n**{len(hand)} cards**{status}'
+                            e.add_field(name=f'{player.display_name}’s hand', value=value, inline=False)
+                        if not final:
+                            e.add_field(name='Turn', value=f'🎯 **{player_names[active_id]}** — use Hit or Stand', inline=False)
+                        e.set_footer(text='Aces count as 1 or 11 • Closest to 21 wins')
+                        return e
+                    def private_hand_embed(player_id, note='Your cards are only visible to you.'):
+                        e = discord.Embed(title='🃏 Your Blackjack Hand',
+                                          description=f'{cards_text(hands[player_id])}\n\n**Total: {hand_total(hands[player_id])}**\n{note}',
+                                          color=discord.Color.purple())
+                        e.set_footer(text='Keep this hand private from your opponent.')
+                        return e
+
                     blackjack_view = TimedView(timeout=180, timeout_text='⏰ Blackjack timed out. Stakes were refunded.')
                     async def refund_blackjack():
                         with db() as c:
@@ -3282,10 +3326,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                             await refund_blackjack()
                         await TimedView.on_timeout(blackjack_view)
                     blackjack_view.on_timeout = blackjack_timeout
-                    async def update_blackjack(interaction=None):
+
+                    async def update_blackjack(interaction=None, note=None):
                         nonlocal active_id
-                        # Automatically stand on bust and advance to the other player.
-                        if hand_total(hands[active_id]) > 21:
+                        if hand_total(hands[active_id]) >= 21:
                             stands.add(active_id)
                         if active_id in stands:
                             other = opponent.id if active_id == ctx.author.id else ctx.author.id
@@ -3294,38 +3338,48 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         if len(stands) == 2:
                             blackjack_view.stop()
                             ta, tb = hand_total(hands[ctx.author.id]), hand_total(hands[opponent.id])
-                            outcome = (f'🃏 {ctx.author.mention}: **{hands[ctx.author.id]}** = **{ta}**.\\n'
-                                       f'{opponent.mention}: **{hands[opponent.id]}** = **{tb}**.')
-                            sa = -1 if ta > 21 else ta
-                            sb = -1 if tb > 21 else tb
+                            outcome = (f'{ctx.author.mention}: {cards_text(hands[ctx.author.id])} — **{ta}**\n'
+                                       f'{opponent.mention}: {cards_text(hands[opponent.id])} — **{tb}**')
+                            sa, sb = (-1 if ta > 21 else ta), (-1 if tb > 21 else tb)
+                            # Show both hands only after the game is finished.
+                            await blackjack_view.message.edit(embed=public_blackjack_embed(final=True), view=None, content=None)
                             await settle_game(sa, sb, outcome)
                             return
-                        text = (f'🃏 **Blackjack — separate hands**\\n'
-                                f'{ctx.author.mention}: **{hands[ctx.author.id]}** (total {hand_total(hands[ctx.author.id])}) {"— STAND" if ctx.author.id in stands else ""}\\n'
-                                f'{opponent.mention}: **{hands[opponent.id]}** (total {hand_total(hands[opponent.id])}) {"— STAND" if opponent.id in stands else ""}\\n\\n'
-                                f'It is <@{active_id}>’s turn. Only that player can Hit or Stand.')
                         for item in blackjack_view.children:
                             item.disabled = False
-                        await blackjack_view.message.edit(content=text, embed=None, view=blackjack_view)
+                        await blackjack_view.message.edit(embed=public_blackjack_embed(), view=blackjack_view, content=None)
+                        if interaction and not interaction.response.is_done():
+                            await interaction.response.send_message(embed=private_hand_embed(interaction.user.id, note or 'Your move has been recorded.'), ephemeral=True)
+
                     hit = discord.ui.Button(label='Hit', style=discord.ButtonStyle.success, emoji='🃏')
                     stand = discord.ui.Button(label='Stand', style=discord.ButtonStyle.secondary, emoji='✋')
                     async def hit_cb(interaction):
+                        nonlocal active_id
                         if interaction.user.id != active_id:
                             return await interaction.response.send_message('It is not your turn.', ephemeral=True)
                         if active_id in stands:
                             return await interaction.response.send_message('You have already stood.', ephemeral=True)
-                        hands[active_id].append(random.choice(deck_values))
+                        hands[active_id].append(deck.pop() if deck else (random.choice(ranks), random.choice(suits)))
                         await interaction.response.defer()
-                        await update_blackjack(interaction)
+                        await update_blackjack(interaction, 'You drew a card.')
                     async def stand_cb(interaction):
+                        nonlocal active_id
                         if interaction.user.id != active_id:
                             return await interaction.response.send_message('It is not your turn.', ephemeral=True)
                         stands.add(active_id)
                         await interaction.response.defer()
-                        await update_blackjack(interaction)
-                    hit.callback = hit_cb; stand.callback = stand_cb
-                    blackjack_view.add_item(hit); blackjack_view.add_item(stand)
-                    blackjack_view.message = await challenge.message.edit(content=f'🃏 **Blackjack — separate hands**\\n{ctx.author.mention}: **{hands[ctx.author.id]}** (total {hand_total(hands[ctx.author.id])})\\n{opponent.mention}: **{hands[opponent.id]}** (total {hand_total(hands[opponent.id])})\\n\\nIt is {ctx.author.mention}’s turn. Use Hit or Stand.', embed=None, view=blackjack_view)
+                        await update_blackjack(interaction, 'You stood.')
+                    hit.callback = hit_cb
+                    stand.callback = stand_cb
+                    blackjack_view.add_item(hit)
+                    blackjack_view.add_item(stand)
+                    blackjack_view.message = await challenge.message.edit(content=None, embed=public_blackjack_embed(), view=blackjack_view)
+                    # Initial hands are delivered privately via DM; button responses also show each player's hand ephemerally.
+                    for player in (ctx.author, opponent):
+                        try:
+                            await player.send(embed=private_hand_embed(player.id, 'The game has started. Use the buttons in the server when it is your turn.'))
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
                     return
 
                 # Roll mode remains a quick simultaneous roll.
