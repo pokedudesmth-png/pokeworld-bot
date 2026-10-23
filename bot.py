@@ -2475,7 +2475,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             e=discord.Embed(title=f'📋 {ctx.author.display_name}’s Market Listings',color=discord.Color.blurple())
             with db() as c:
                 shiny_map={int(r[0]):bool(r[1]) for r in c.execute("SELECT listing_id,shiny FROM market_listings WHERE seller_id=? AND status IN ('active','sold')",(ctx.author.id,)).fetchall()}
-            e.description='\n\n'.join(((f'✨ ' if shiny_map.get(int(lid),False) else '') + (f'**#{lid} · {name.replace('-', ' ').title()}** — {price:,} coins · Active\nRemove: `!market remove {lid}`' if status=='active' else f'**#{lid} · {name.replace('-', ' ').title()}** — Sold · Claim: `!market claim {lid}`')) for lid,name,price,status in rows) if rows else 'You have no active or unclaimed sold listings.'
+            e.description='\n\n'.join(((f'✨ ' if shiny_map.get(int(lid),False) else '') + (f'**#{lid} · {name.replace(chr(45), chr(32)).title()}** — {price:,} coins · Active\nRemove: `!market remove {lid}`' if status=='active' else f'**#{lid} · {name.replace(chr(45), chr(32)).title()}** — Sold · Claim: `!market claim {lid}`')) for lid,name,price,status in rows) if rows else 'You have no active or unclaimed sold listings.'
             return await ctx.send(embed=e)
         if action=='buy':
             if not details.isdigit() or int(details)<1: return await ctx.send('Usage: `!market buy <listing ID>`')
