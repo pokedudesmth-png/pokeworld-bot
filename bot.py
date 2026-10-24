@@ -5629,15 +5629,17 @@ class CarlStyleExtensions(commands.Cog):
 # PokéVanta Events & Missions — persistent global event state and trainer goals
 # ─────────────────────────────────────────────────────────────────────────────
 MISSION_DEFS = {
+    # High-difficulty objectives; activity is only counted when the corresponding
+    # successful gameplay action is recorded by pv_record_activity.
     'daily': [
-        ('catch', '🌿 Wild Collector', 'Catch 3 Pokémon', 3, 7500, 20),
-        ('hunt', '🔎 Field Researcher', 'Start 5 successful hunts', 5, 6250, 20),
-        ('win', '⚔️ Battle Ready', 'Win 2 NPC battles', 2, 12500, 30),
+        ('catch', '🌿 Wild Collector', 'Catch 20 Pokémon', 20, 7500, 35),
+        ('hunt', '🔎 Field Researcher', 'Complete 30 successful hunts', 30, 6250, 35),
+        ('win', '⚔️ Battle Ready', 'Win 12 NPC battles', 12, 12500, 45),
     ],
     'weekly': [
-        ('catch', '🎒 Master Collector', 'Catch 15 Pokémon', 15, 50000, 90),
-        ('hunt', '🌎 Wild Explorer', 'Start 25 successful hunts', 25, 42500, 80),
-        ('win', '🏆 Battle Veteran', 'Win 10 NPC battles', 10, 75000, 120),
+        ('catch', '🎒 Master Collector', 'Catch 150 Pokémon', 150, 50000, 150),
+        ('hunt', '🌎 Wild Explorer', 'Complete 250 successful hunts', 250, 42500, 140),
+        ('win', '🏆 Battle Veteran', 'Win 60 NPC battles', 60, 75000, 180),
     ],
 }
 
@@ -5716,6 +5718,47 @@ def pv_record_activity(uid, activity, amount=1, guild_id=None):
             completed=c.execute("SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status FROM pv_events WHERE id=1 AND status='ended'").fetchone()
             if completed and completed[5]>=completed[4]:
                 c.execute('INSERT INTO pv_event_history(event_id,event_type,title,description,goal,progress,starts_at,ends_at,status) VALUES(?,?,?,?,?,?,?,?,?)',completed)
+
+def pv_event_catalog_embed():
+    """Public reference for every configured event type and its real reward settings."""
+    e = discord.Embed(
+        title='🌌 PokéVanta Global Event Guide',
+        description=(
+            'All event types currently supported by PokéVanta are listed below. '
+            "These are event templates; the active event's actual goal and end time are set when a developer launches it.\n\n"
+            '**How global events work:** use `!event join` to register, then complete successful hunts, catches, and NPC battle wins. '
+            'Each qualifying recorded action adds contribution to the shared global progress. Personal contribution is tracked only for joined trainers. '
+            'When the event ends or the community goal is reached, joined trainers can use `!event claim` once.'
+        ),
+        color=discord.Color.from_rgb(118, 83, 220),
+    )
+    for key, cfg in EVENT_TYPES.items():
+        value = (
+            f"{cfg['description']}\n"
+            f"**Base claim reward:** {cfg['coins']:,} VantaCoins + {cfg['points']} Mission Points (MP)\n"
+            f"**Achievement:** {cfg['flavor']}\n"
+            '**If the global goal is reached:** an additional 50,000 VantaCoins + 250 MP for eligible claimants.'
+        )
+        e.add_field(name=f"{cfg['title']} · `{key}`", value=value, inline=False)
+    e.add_field(
+        name='📌 Shared rules and commands',
+        value=(
+            '`!events` / `!event info` — this complete event guide\n'
+            '`!event` — current event status, progress, and remaining time\n'
+            '`!event join` — register for the current event\n'
+            '`!event rewards` — rewards for the currently active/most recent event\n'
+            '`!event leaderboard` — top joined participants\n'
+            '`!event history` — recently archived events\n'
+            '`!event badges` — your event achievements\n'
+            '`!eventhelp` — all player and developer event commands\n\n'
+            'Developers choose the actual global goal (100–1,000,000 points) and duration (1–168 hours) when starting an event. '
+            'The base rewards shown above are the configured rewards for each event type.'
+        ),
+        inline=False,
+    )
+    e.set_footer(text='Public information • anyone can view this guide; event management remains developer-only')
+    return e
+
 
 def pv_event_embed(row, user_points=0):
     now=int(time.time()); remaining=max(0,row[7]-now)
@@ -5828,7 +5871,9 @@ class EventsMissions(commands.Cog):
                 c.execute("UPDATE pv_events SET status='ended' WHERE id=1 AND status='active'")
                 c.execute("INSERT INTO pv_event_history(event_id,event_type,title,description,goal,progress,starts_at,ends_at,status) SELECT id,event_type,title,description,goal,progress,starts_at,?,'ended' FROM pv_events WHERE id=1 AND NOT EXISTS (SELECT 1 FROM pv_event_history WHERE event_id=1 AND ends_at=?)",(ended_at,ended_at))
                 row=c.execute('SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status,announcement_channel,rewards_claimed FROM pv_events WHERE id=1').fetchone()
-        if action in {'status','', 'join','rewards','leaderboard','claim','history','badges'}:
+        if action in {'status','', 'join','rewards','leaderboard','claim','history','badges','info','catalog','types'}:
+            if action in {'info','catalog','types'}:
+                return await ctx.send(embed=pv_event_catalog_embed())
             if action=='history':
                 with db() as c: history=c.execute('SELECT title,progress,goal,starts_at,ends_at,status FROM pv_event_history ORDER BY archive_id DESC LIMIT 10').fetchall()
                 lines=[]
@@ -5927,9 +5972,14 @@ class EventsMissions(commands.Cog):
         if action=='status':return await ctx.send('No active event.')
         return await ctx.send('Unknown event action. Use `!event` for status or developer actions: `start`, `end`, `pause`, `resume`, `setgoal`, `setduration`, `announce`.')
 
+    @commands.command(name='events', aliases=['eventinfo'])
+    async def events_catalog(self, ctx):
+        """Show all global event types, descriptions, rewards, and participation rules."""
+        await ctx.send(embed=pv_event_catalog_embed())
+
     @commands.command(name='eventhelp')
     async def eventhelp(self,ctx):
-        e=discord.Embed(title='🌌 PokéVanta Events & Missions',description='**Player commands**\n`!missions [daily|weekly]` · View objectives\n`!missionclaim` · Claim completed missions\n`!missionboard` · Global mission rankings\n`!mprewards` / `!mpclaim` · View and claim lifetime MP milestones\n`!event` · View the current global event\n`!event join` · Register for the event\n`!event rewards` · View rewards\n`!event leaderboard` · Global event rankings\n`!event claim` · Claim eligible event rewards\n`!event history` · Event archive\n`!event badges` · View your earned event achievements\n\n**Developer commands**\n`!event start <type>|<goal>|<hours>` · Start event (types: rift, surge, invasion, fossil, ultra, champion)\n`!event end` · End it\n`!event pause` / `!event resume` · Pause or resume\n`!event setgoal <points>` · Change target\n`!event setduration <hours>` · Change remaining duration\n`!event announce` · Reannounce event',color=discord.Color.from_rgb(118,83,220))
+        e=discord.Embed(title='🌌 PokéVanta Events & Missions',description='**Player commands**\n`!missions [daily|weekly]` · View objectives\n`!missionclaim` · Claim completed missions\n`!missionboard` · Global mission rankings\n`!mprewards` / `!mpclaim` · View and claim lifetime MP milestones\n`!events` / `!event info` · Full guide to every event type and its rewards\n`!event` · View the current global event\n`!event join` · Register for the event\n`!event rewards` · View rewards\n`!event leaderboard` · Global event rankings\n`!event claim` · Claim eligible event rewards\n`!event history` · Event archive\n`!event badges` · View your earned event achievements\n\n**Developer commands**\n`!event start <type>|<goal>|<hours>` · Start event (types: rift, surge, invasion, fossil, ultra, champion)\n`!event end` · End it\n`!event pause` / `!event resume` · Pause or resume\n`!event setgoal <points>` · Change target\n`!event setduration <hours>` · Change remaining duration\n`!event announce` · Reannounce event',color=discord.Color.from_rgb(118,83,220))
         e.set_footer(text='Global event data is stored in the configured database file')
         await ctx.send(embed=e)
 
