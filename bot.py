@@ -645,6 +645,38 @@ class PartySwitchPicker(TimedView):
         except Exception: pass
 
 
+async def send_developer_log(bot, category, title, description, *, guild=None, user=None):
+    """Send only meaningful successful events to globally configured developer logs.
+
+    Developer log channels are stored under guild_id=0 so events from any server
+    where PokéVanta is installed can reach the developer-configured log channels.
+    """
+    key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins'}.get(category)
+    if not key or bot is None:
+        return
+    try:
+        with db() as c:
+            row = c.execute('SELECT value FROM cv_settings WHERE guild_id=0 AND key=?', (key,)).fetchone()
+        if not row:
+            return
+        channel_id = int(row[0])
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+                return
+        colors = {'pokemon': discord.Color.gold(), 'trading': discord.Color.blurple(), 'coins': discord.Color.green()}
+        e = discord.Embed(title=title, description=description[:4000], color=colors.get(category, discord.Color.blurple()), timestamp=discord.utils.utcnow())
+        if guild is not None:
+            e.add_field(name='Server', value=f'{discord.utils.escape_markdown(guild.name)[:100]} (`{guild.id}`)', inline=False)
+        if user is not None:
+            e.add_field(name='Trainer', value=f'{discord.utils.escape_markdown(str(user))} (`{user.id}`)', inline=True)
+        await channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as exc:
+        print(f'[DEVELOPER LOG ERROR] category={category}: {type(exc).__name__}: {exc}')
+
+
 async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level=None, image_url=None):
     """Send shiny-only rare event logs to configured Pokémon and rare-spawn channels."""
     if guild is None or user is None:
@@ -655,23 +687,13 @@ async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level
     except Exception:
         return
     level_text = f" · Level {int(level)}" if level is not None else ""
-    # Developer Pokémon log: detailed embed for rare shiny acquisition only.
-    pokemon_id = settings.get('log_channel_pokemon')
-    pokemon_channel = guild.get_channel(int(pokemon_id)) if pokemon_id else None
-    if pokemon_channel:
-        e = discord.Embed(title='✨ Rare Shiny Pokémon Acquired!',
-                          description=f"**{discord.utils.escape_markdown(str(pokemon_name))}**{level_text}",
-                          color=discord.Color.gold(), timestamp=discord.utils.utcnow())
-        e.add_field(name='Trainer', value=f'{user.mention} ({discord.utils.escape_markdown(str(user))})', inline=False)
-        e.add_field(name='Event', value=action.title(), inline=True)
-        e.add_field(name='Server', value=discord.utils.escape_markdown(guild.name)[:100], inline=True)
-        if image_url:
-            e.set_image(url=image_url)
-        e.set_footer(text=f'User ID: {user.id} • Shiny-only Pokémon log')
-        try:
-            await pokemon_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            print(f'[POKEMON LOG DELIVERY ERROR] guild={guild.id} channel={pokemon_id}: {type(exc).__name__}: {exc}')
+    # Global developer Pokémon log: only rare shiny acquisitions/wins, never routine commands.
+    try:
+        client = guild._state._get_client()
+        details = f"**{discord.utils.escape_markdown(str(pokemon_name))}**{level_text}\n**Event:** {action.title()}"
+        await send_developer_log(client, 'pokemon', '✨ Rare Shiny Pokémon Event', details, guild=guild, user=user)
+    except Exception as exc:
+        print(f'[POKEMON LOG DELIVERY ERROR] guild={guild.id}: {type(exc).__name__}: {exc}')
     # Public rare-spawn channel: intentionally concise, only shiny + who acquired it.
     rare_id = settings.get('rare_spawn_channel')
     rare_channel = guild.get_channel(int(rare_id)) if rare_id else None
@@ -859,7 +881,10 @@ class NPCBattleView(TimedView):
                 if self.boss_shiny and inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=self.enemy.get('_level'), image_url=sprite(self.enemy, shiny=True))
                 jackpot=1_000_000 if self.boss_shiny else 0
-                if jackpot: add_progress(self.uid,coins=jackpot)
+                if jackpot:
+                    add_progress(self.uid,coins=jackpot)
+                    if inter.guild:
+                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}** and received **1,000,000 VantaCoins**.\n**Result:** Jackpot credited after victory.', guild=inter.guild, user=inter.user)
                 jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **1,000,000 {get_vantacoin_emoji()} VantaCoins (1 million)** have been credited to your balance! 💰' if jackpot else ''
                 return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]} — ID `{get_box_id(c,self.uid,iid)}`!\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP{jackpot_text}',view=None)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP',view=None)
@@ -1727,9 +1752,7 @@ class Game(commands.Cog):
                 return await ctx.send('ℹ️ There is no cancellable match task running right now.')
         trade = ACTIVE_TRADES.get(TRADE_BY_USER.get(ctx.author.id))
         if trade:
-            if ctx.author.id != trade['starter']:
-                return await ctx.send('Only the person who initiated this trade can cancel it.')
-            await end_trade(trade, '🚫 Trade cancelled by its initiator.')
+            await end_trade(trade, f'🚫 Trade cancelled by <@{ctx.author.id}>. No Pokémon or VantaCoins were transferred.')
             return
         uid=ctx.author.id; changes=[]
         with db() as c:
@@ -2594,7 +2617,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** from <@{seller}>!',color=discord.Color.green())
             e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{new_box_id}`',inline=True)
             e.set_footer(text=f'Listing #{lid} · Seller can claim proceeds with !market claim {lid}')
-            return await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
+            await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
+            if ctx.guild:
+                await send_developer_log(ctx.bot, 'coins', '🛒 Market Purchase Completed', f'{ctx.author.mention} purchased {"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** from <@{seller}> for **{price:,} VantaCoins**.\n**Result:** Purchase completed successfully.', guild=ctx.guild, user=ctx.author)
+            return
         if action=='remove':
             if not details.isdigit(): return await ctx.send('Usage: `!market remove <listing ID>`')
             lid=int(details)
@@ -2629,7 +2655,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('UPDATE players SET coins=coins+? WHERE user_id=?',(payout,ctx.author.id)); c.execute("UPDATE market_listings SET status='claimed',proceeds=0 WHERE listing_id=?",(lid,)); c.commit()
             e=discord.Embed(title='💰 Market proceeds claimed!',description=f'Your {"✨ " if shiny else ""}**{pname.replace("-", " ").title()}** listing sold successfully.',color=discord.Color.green())
             e.add_field(name='Sale price',value=f'{gross:,} coins',inline=True); e.add_field(name='Market fee (5%)',value=f'{fee:,} coins',inline=True); e.add_field(name='You received',value=f'**{payout:,}** {get_vantacoin_emoji()} VantaCoins',inline=True)
-            return await ctx.send(embed=e)
+            await ctx.send(embed=e)
+            if ctx.guild:
+                await send_developer_log(ctx.bot, 'coins', '💰 Market Proceeds Claimed', f'{ctx.author.mention} claimed **{payout:,} VantaCoins** after sale of {"✨ " if shiny else ""}**{pname.replace(chr(45), chr(32)).title()}**. Sale value: {gross:,}; fee: {fee:,}.\n**Result:** Proceeds credited successfully.', guild=ctx.guild, user=ctx.author)
+            return
         return await ctx.send('Unknown market action. Use `!market` to see all market commands.')
 
     @commands.command(name='giveitem',aliases=['equip','holditem'])
@@ -2999,6 +3028,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n💰 +2,000 {get_vantacoin_emoji()} VantaCoins • 🎟️ +5 Raid Passes')
         else:
             await ctx.send(f'🎁 Daily reward: **2,000 {get_vantacoin_emoji()} VantaCoins** + **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes\n🔥 Current streak: **{streak}** days')
+        if ctx.guild:
+            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **2,000 VantaCoins**, **5 Raid Passes**, and **{display_name(pick)} Lv. {lvl}**.\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
     @commands.command(name='balance',aliases=['bal','money'],description='View your VantaCoins, level and XP.')
     async def balance(self,ctx):
         coins,xp,level,_,_=get_player(ctx.author.id)
@@ -3035,6 +3066,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.add_field(name='Sender balance',value=f'Use `!bal` to check your remaining coins.',inline=True)
         e.add_field(name='Recipient',value=f'{member.mention} received **{amount:,}** coins.',inline=True)
         await ctx.send(embed=e, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        if ctx.guild:
+            await send_developer_log(ctx.bot, 'coins', '💸 VantaCoin Transfer Completed', f'{ctx.author.mention} sent **{amount:,} VantaCoins** to {member.mention}.\n**Result:** Transfer completed successfully.', guild=ctx.guild, user=ctx.author)
 
     @commands.command(name='bet', description='Challenge another player to a VantaCoin wager, including high-stakes mini-games.')
     async def bet(self, ctx, opponent: discord.Member, *, details: str = ''):
@@ -4149,7 +4182,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         tid = f'{ctx.channel.id}:{ctx.author.id}:{target.id}:{time.time_ns()}'
         trade = {'id':tid,'starter':ctx.author.id,'target':target.id,'channel':ctx.channel,'guild':ctx.guild,
                  'offer':{'pokemon':[],'coins':0},'target_offer':{'pokemon':[],'coins':0},
-                 'accepted':False,'confirmed':set(),'message':None}
+                 'accepted':False,'confirmed':set(),'message':None,'bot':ctx.bot}
         # Keep one canonical offer key per participant.
         trade['offers'] = {ctx.author.id:trade['offer'], target.id:trade['target_offer']}
         ACTIVE_TRADES[tid]=trade; TRADE_BY_USER[ctx.author.id]=tid; TRADE_BY_USER[target.id]=tid
@@ -4213,13 +4246,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 await refresh_trade(trade)
             return await ctx.send('🤝 Trade accepted! Add Pokémon/VantaCoins with `!ta` and confirm with `!tr confirm`.')
         if action == 'cancel':
-            if ctx.author.id != trade['starter']:
-                return await ctx.send('Only the person who initiated this trade can cancel it. Use `!tr decline` to decline an invitation.')
-            await end_trade(trade, '🚫 Trade cancelled by its initiator.')
+            await end_trade(trade, f'🚫 Trade cancelled by <@{ctx.author.id}>. No Pokémon or VantaCoins were transferred.')
             return
         if action == 'decline':
             if trade.get('accepted'):
-                return await ctx.send('This trade has already been accepted. The initiator can use `!tr cancel` to cancel it.')
+                return await ctx.send('This trade has already been accepted. Either participant can use `!tr cancel` or `!cancel` to cancel it.')
             if ctx.author.id != trade['target']:
                 return await ctx.send('Only the invited player can decline this trade. The initiator can use `!tr cancel`.')
             await end_trade(trade, '👋 Trade invitation declined.')
@@ -4370,6 +4401,28 @@ async def end_trade(trade, message):
         await trade['channel'].send(message, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
     except discord.HTTPException:
         pass
+    # Developer trading logs are emitted only for completed successful trades.
+    if message.startswith('🎉 **Trade successful!**'):
+        try:
+            bot = trade.get('bot')
+            guild = trade.get('guild')
+            with db() as c:
+                def offer_summary(uid):
+                    offer = trade['offers'][uid]
+                    names=[]
+                    for pid in offer['pokemon']:
+                        row=c.execute('SELECT name,shiny,nickname FROM pokemon WHERE instance_id=?', (pid,)).fetchone()
+                        if row:
+                            names.append(('✨ ' if row[1] else '') + (row[2] or row[0]).replace('-', ' ').title())
+                    parts = names[:12]
+                    if len(names)>12: parts.append(f'and {len(names)-12} more Pokémon')
+                    if offer['coins']: parts.append(f"{offer['coins']:,} VantaCoins")
+                    return ', '.join(parts) if parts else 'Nothing'
+                a, b = trade['starter'], trade['target']
+                details = f'<@{a}> traded: **{offer_summary(a)}**\n<@{b}> traded: **{offer_summary(b)}**\n**Result:** Completed successfully; both offers were transferred.'
+            await send_developer_log(bot, 'trading', '🤝 Trade Completed Successfully', details, guild=guild)
+        except Exception as exc:
+            print(f'[TRADE LOG ERROR] {type(exc).__name__}: {exc}')
 
 
 
@@ -4418,6 +4471,15 @@ class TicketPanelView(discord.ui.View):
             await channel.send(content=interaction.user.mention, embed=embed, view=view,
                                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             await interaction.response.send_message(f"Your private ticket is ready: {channel.mention}", ephemeral=True)
+            try:
+                settings_cog = self.bot.get_cog('CarlStyleExtensions')
+                log_id = settings_cog.setting(guild.id, 'log_channel') if settings_cog else None
+                log_channel = guild.get_channel(int(log_id)) if log_id else None
+                if log_channel:
+                    log_embed = discord.Embed(title='🎫 Support Ticket Opened', description=f'Ticket: {channel.mention}\nOpened by: {interaction.user.mention}', color=discord.Color.green(), timestamp=discord.utils.utcnow())
+                    await log_channel.send(embed=log_embed, allowed_mentions=discord.AllowedMentions.none())
+            except Exception as exc:
+                print(f'[TICKET LOG ERROR] {type(exc).__name__}: {exc}')
         except discord.Forbidden:
             await interaction.response.send_message("I can't create tickets. Please ask a server administrator to give me **Manage Channels** permission.", ephemeral=True)
         except discord.HTTPException:
@@ -4446,6 +4508,15 @@ class TicketCloseView(discord.ui.View):
         if interaction.user.id != owner_id and not is_staff:
             return await interaction.response.send_message("Only the ticket opener or staff with **Manage Channels** can close this ticket.", ephemeral=True)
         await interaction.response.send_message("🔒 Ticket closed. This channel will be deleted in 5 seconds.", ephemeral=True)
+        try:
+            settings_cog = self.bot.get_cog('CarlStyleExtensions')
+            log_id = settings_cog.setting(interaction.guild.id, 'log_channel') if settings_cog else None
+            log_channel = interaction.guild.get_channel(int(log_id)) if log_id else None
+            if log_channel:
+                log_embed = discord.Embed(title='🔒 Support Ticket Closed', description=f'Channel: **#{interaction.channel.name}** (`{interaction.channel.id}`)\nClosed by: {interaction.user.mention}\nTicket owner: <@{owner_id}>', color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+                await log_channel.send(embed=log_embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as exc:
+            print(f'[TICKET LOG ERROR] {type(exc).__name__}: {exc}')
         try:
             await interaction.channel.send(f"🔒 Ticket closed by {interaction.user.mention}.")
             await asyncio.sleep(5)
@@ -4670,15 +4741,15 @@ class CarlStyleExtensions(commands.Cog):
         if not await self.require_permission(ctx, 'manage_guild', 'Manage Server'): return
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel', channel.id)
-        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Command and button logs will also use this channel whenever a category-specific log channel is not configured. Use `!setpokemonlog`, `!settradinglog`, or `!setcoinlog` to configure separate game-log channels.')
+        await ctx.send(f'✅ This server’s moderation and ticket log channel is set to {channel.mention}. Routine commands and button clicks will not be logged here. Developer game logs are configured separately with `!setpokemonlog`, `!settradinglog`, and `!setcoinlog`.')
 
     @commands.hybrid_command(name='setpokemonlog')
     async def set_pokemon_log(self, ctx, channel: discord.TextChannel):
         if not self.is_dev(ctx):
             return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setpokemonlog`.')
         if not ctx.guild: return
-        self.setting(ctx.guild.id, 'log_channel_pokemon', channel.id)
-        await ctx.send(f'✅ Pokémon logs will be sent to {channel.mention}.')
+        self.setting(0, 'log_channel_pokemon', channel.id)
+        await ctx.send(f'✅ Global developer Pokémon event logs will be sent to {channel.mention} from every server where PokéVanta is installed. Routine commands are not logged.')
 
     @commands.hybrid_command(name='rarespawn', description='Configure the public channel for shiny rare Pokémon acquisitions.')
     @commands.guild_only()
@@ -4697,16 +4768,16 @@ class CarlStyleExtensions(commands.Cog):
         if not self.is_dev(ctx):
             return await ctx.send('❌ Only configured PokéVanta bot developers can use `!settradinglog`.')
         if not ctx.guild: return
-        self.setting(ctx.guild.id, 'log_channel_trading', channel.id)
-        await ctx.send(f'✅ Trading logs will be sent to {channel.mention}.')
+        self.setting(0, 'log_channel_trading', channel.id)
+        await ctx.send(f'✅ Global developer trading logs will be sent to {channel.mention}; only successful completed trades are logged.')
 
     @commands.hybrid_command(name='setcoinlog', aliases=['setcoinslog'])
     async def set_coins_log(self, ctx, channel: discord.TextChannel):
         if not self.is_dev(ctx):
             return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setcoinlog`.')
         if not ctx.guild: return
-        self.setting(ctx.guild.id, 'log_channel_coins', channel.id)
-        await ctx.send(f'✅ Coin logs will be sent to {channel.mention}.')
+        self.setting(0, 'log_channel_coins', channel.id)
+        await ctx.send(f'✅ Global developer VantaCoin logs will be sent to {channel.mention}; only meaningful successful transactions are logged.')
 
 
     @commands.hybrid_command(name='ticketsetup', description='Post the PokéVanta ticket panel in a channel.')
@@ -5550,97 +5621,37 @@ class Bot(commands.Bot):
                 return
         await self.process_commands(message)
     async def on_command_completion(self, ctx):
-        """Persist and deliver completed transaction/game command logs to the right configured channel."""
-        if not getattr(ctx, 'command', None) or not ctx.guild:
+        """Log moderation actions to this server's !setlog channel; ignore routine commands."""
+        if not ctx.guild or not getattr(ctx, 'command', None):
             return
-        name = ctx.command.qualified_name.lower()
-        content = (getattr(ctx.message, 'content', '') or '').strip()
-        tokens = set(re.findall(r'[a-z0-9_]+', name + ' ' + content.lower()))
-        # Transaction-oriented commands take priority over broad keyword matches.
-        if any(x in tokens for x in ('trade', 'tr', 'market', 'offer', 'listing', 'gift', 'giveitem')) or name.startswith('trade'):
-            category = 'trading'
-        elif any(x in tokens for x in ('shop', 'buy', 'sell', 'coin', 'coins', 'bet', 'bal', 'daily', 'pay', 'give', 'roulette', 'blackjack')):
-            category = 'coins'
-        elif any(x in tokens for x in ('pokemon', 'hunt', 'catch', 'box', 'info', 'team', 'select', 'evolve', 'release', 'useitem', 'dex')):
-            category = 'pokemon'
-        else:
-            category = 'commands'
-        details = content[:500]
+        command_name = ctx.command.qualified_name.lower().split()[-1]
+        moderation_commands = {
+            'ban', 'unban', 'kick', 'mute', 'unmute', 'timeout', 'untimeout',
+            'warn', 'warnings', 'clearwarnings', 'removewarn', 'clear', 'purge',
+            'lock', 'unlock', 'slowmode', 'roleadd', 'roleremove', 'rolecreate',
+            'roledelete', 'setnick', 'automodword', 'automodwords'
+        }
+        if command_name not in moderation_commands:
+            return
         try:
-            with db() as c:
-                c.execute('INSERT INTO game_logs(created_at,category,user_id,guild_id,command,details) VALUES(?,?,?,?,?,?)',
-                          (datetime.now(timezone.utc).isoformat(), category, ctx.author.id, ctx.guild.id, name, details))
-        except Exception as exc:
-            print(f'[LOG DATABASE ERROR] {type(exc).__name__}: {exc}')
-        # Only transaction/game categories are sent to the requested category logs.
-        # General !setlog remains unchanged and continues to receive other command logs/fallbacks.
-        try:
-            log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins'}.get(category, 'log_channel')
             settings_cog = self.get_cog('CarlStyleExtensions')
-            if settings_cog is None:
-                return
-            log_id = settings_cog.setting(ctx.guild.id, log_key)
+            log_id = settings_cog.setting(ctx.guild.id, 'log_channel') if settings_cog else None
             log_channel = ctx.guild.get_channel(int(log_id)) if log_id else None
-            if log_channel is None:
-                general_id = settings_cog.setting(ctx.guild.id, 'log_channel')
-                log_channel = ctx.guild.get_channel(int(general_id)) if general_id else None
-            if log_channel:
-                titles = {'pokemon': 'Pokémon Activity', 'trading': 'Trade / Market Activity',
-                          'coins': 'VantaCoin / Shop Transaction', 'commands': 'Server Command'}
-                e = discord.Embed(title=f'📋 {titles.get(category, "Game Activity")}',
-                                  color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
-                e.add_field(name='User', value=f'{ctx.author} (`{ctx.author.id}`)', inline=True)
-                e.add_field(name='Command', value=f'`{name}`', inline=True)
-                e.add_field(name='Channel', value=getattr(ctx.channel, 'mention', str(ctx.channel)), inline=True)
-                e.add_field(name='Details', value=discord.utils.escape_markdown(details.replace('`', "'") or '(no text)')[:1000], inline=False)
-                await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
-        except Exception as exc:
-            print(f'[LOG DELIVERY ERROR] command log guild={ctx.guild.id}: {type(exc).__name__}: {exc}')
-
-    async def on_interaction(self, interaction):
-        """Mirror button/select interactions (including bet games) to the configured log channel."""
-        if not interaction.guild or not interaction.user or getattr(interaction.user, 'bot', False):
-            return
-        # Command interactions are recorded by on_command_completion; avoid duplicates.
-        if interaction.type != discord.InteractionType.component:
-            return
-        try:
-            custom = str((interaction.data or {}).get('custom_id', '')).lower()
-            # Pokémon-related component clicks are not command logs; shiny acquisitions
-            # alone are sent to the detailed Pokémon log and concise rare-spawn log.
-            if any(k in custom for k in ('pokemon', 'hunt', 'catch', 'team', 'box')):
-                return
-            if any(k in custom for k in ('trade', 'market', 'offer', 'accept', 'listing')):
-                log_key = 'log_channel_trading'
-            elif any(k in custom for k in ('bet', 'coin', 'roll', 'roulette', 'blackjack', 'hit', 'stand', 'shop', 'buy', 'sell')):
-                log_key = 'log_channel_coins'
-            else:
-                log_key = 'log_channel'
-            settings_cog = self.get_cog('CarlStyleExtensions')
-            if settings_cog is None:
-                return
-            log_id = settings_cog.setting(interaction.guild.id, log_key)
-            log_channel = interaction.guild.get_channel(int(log_id)) if log_id else None
-            # Component interactions also fall back to the general log channel.
-            if log_channel is None:
-                general_id = settings_cog.setting(interaction.guild.id, 'log_channel')
-                log_channel = interaction.guild.get_channel(int(general_id)) if general_id else None
             if not log_channel:
                 return
-            data = interaction.data or {}
-            custom_id = str(data.get('custom_id', 'component'))[:150]
-            values = data.get('values') or []
-            action = custom_id
-            if values:
-                action += ' · selected: ' + ', '.join(str(v)[:60] for v in values[:10])
-            e = discord.Embed(title='🖱️ Game Interaction', color=discord.Color.blurple(),
-                              timestamp=datetime.now(timezone.utc))
-            e.add_field(name='User', value=f'{interaction.user} (`{interaction.user.id}`)', inline=True)
-            e.add_field(name='Action', value=discord.utils.escape_markdown(action)[:1000], inline=True)
-            e.add_field(name='Channel', value=getattr(interaction.channel, 'mention', str(interaction.channel)), inline=True)
-            await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+            details = (getattr(ctx.message, 'content', '') or f'/{command_name}')[:900]
+            embed = discord.Embed(title=f'🛡️ Moderation Action · {command_name.title()}',
+                                  description=f'**Moderator:** {ctx.author.mention} (`{ctx.author.id}`)\n**Command:** `{discord.utils.escape_markdown(details)}`',
+                                  color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.add_field(name='Channel', value=getattr(ctx.channel, 'mention', str(ctx.channel)), inline=True)
+            embed.set_footer(text=f'Server: {ctx.guild.name} • {ctx.guild.id}')
+            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
-            print(f'[LOG DELIVERY ERROR] component log guild={interaction.guild.id}: {type(exc).__name__}: {exc}')
+            print(f'[MODERATION LOG ERROR] guild={ctx.guild.id}: {type(exc).__name__}: {exc}')
+
+    async def on_interaction(self, interaction):
+        """Do not mirror every button/select click into logs; transaction handlers log outcomes."""
+        return
 
     @commands.command(name='gamelogs', aliases=['glogs'])
     async def game_logs_command(self, ctx, category: str = 'all', limit: int = 20):
