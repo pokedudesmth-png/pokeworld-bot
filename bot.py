@@ -4728,8 +4728,23 @@ class CarlStyleExtensions(commands.Cog):
             color=discord.Color.blurple()
         )
         embed.set_footer(text=f'{server_name} • Support')
-        await channel.send(embed=embed, view=TicketPanelView(self.bot))
-        await ctx.send(f'✅ Ticket panel posted in {channel.mention}. Make sure I have **Manage Channels** permission.')
+        bot_member = ctx.guild.me
+        permissions = channel.permissions_for(bot_member) if bot_member else None
+        if permissions and not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+            return await ctx.send(
+                f'❌ I cannot post the ticket panel in {channel.mention}. Please enable **View Channel**, '
+                '**Send Messages**, and **Embed Links** for me in that channel, then run `!ticketsetup` again.'
+            )
+        try:
+            await channel.send(embed=embed, view=TicketPanelView(self.bot))
+        except discord.Forbidden:
+            return await ctx.send(
+                f'❌ Discord denied permission to post in {channel.mention}. Give me **View Channel**, '
+                '**Send Messages**, and **Embed Links** there, then run `!ticketsetup` again.'
+            )
+        except discord.HTTPException:
+            return await ctx.send('❌ Discord could not post the ticket panel. Please try again in a moment.')
+        await ctx.send(f'✅ Ticket panel posted in {channel.mention}. I also need **Manage Channels** to create private tickets.')
 
     @commands.hybrid_command(name='setsuggestions', aliases=['setsuggestion'], description='Configure the suggestion channel.')
     @commands.guild_only()
@@ -5560,10 +5575,13 @@ class Bot(commands.Bot):
         # General !setlog remains unchanged and continues to receive other command logs/fallbacks.
         try:
             log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins'}.get(category, 'log_channel')
-            log_id = self.setting(ctx.guild.id, log_key)
+            settings_cog = self.get_cog('CarlStyleExtensions')
+            if settings_cog is None:
+                return
+            log_id = settings_cog.setting(ctx.guild.id, log_key)
             log_channel = ctx.guild.get_channel(int(log_id)) if log_id else None
             if log_channel is None:
-                general_id = self.setting(ctx.guild.id, 'log_channel')
+                general_id = settings_cog.setting(ctx.guild.id, 'log_channel')
                 log_channel = ctx.guild.get_channel(int(general_id)) if general_id else None
             if log_channel:
                 titles = {'pokemon': 'Pokémon Activity', 'trading': 'Trade / Market Activity',
@@ -5597,11 +5615,14 @@ class Bot(commands.Bot):
                 log_key = 'log_channel_coins'
             else:
                 log_key = 'log_channel'
-            log_id = self.setting(interaction.guild.id, log_key)
+            settings_cog = self.get_cog('CarlStyleExtensions')
+            if settings_cog is None:
+                return
+            log_id = settings_cog.setting(interaction.guild.id, log_key)
             log_channel = interaction.guild.get_channel(int(log_id)) if log_id else None
             # Component interactions also fall back to the general log channel.
             if log_channel is None:
-                general_id = self.setting(interaction.guild.id, 'log_channel')
+                general_id = settings_cog.setting(interaction.guild.id, 'log_channel')
                 log_channel = interaction.guild.get_channel(int(general_id)) if general_id else None
             if not log_channel:
                 return
