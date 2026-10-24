@@ -53,11 +53,30 @@ def _read_owner_ids():
     return owner_ids
 
 OWNER_IDS = _read_owner_ids()
+# Gameplay maintenance mode is persisted beside the bot file so it survives restarts.
+MAINTENANCE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pokemon_game_maintenance.json')
+def _load_gameplay_maintenance():
+    try:
+        with open(MAINTENANCE_FILE, 'r', encoding='utf-8') as maintenance_file:
+            data = json.load(maintenance_file)
+        return bool(data.get('enabled', False)) if isinstance(data, dict) else False
+    except (OSError, ValueError, TypeError):
+        return False
+
+def _save_gameplay_maintenance(enabled, changed_by=None):
+    temporary_path = MAINTENANCE_FILE + '.tmp'
+    with open(temporary_path, 'w', encoding='utf-8') as maintenance_file:
+        json.dump({'enabled': bool(enabled), 'changed_by': changed_by, 'updated_at': datetime.now(timezone.utc).isoformat()}, maintenance_file, indent=2)
+    os.replace(temporary_path, MAINTENANCE_FILE)
+
+GAMEPLAY_MAINTENANCE_ENABLED = _load_gameplay_maintenance()
 API = 'https://pokeapi.co/api/v2'
 API_CACHE, TYPE_CACHE, MOVE_CACHE = {}, {}, {}
 SESSION: Optional[aiohttp.ClientSession] = None
 POKEMON_LIST = []
 ACTIVE_VIEWS = {}
+BOT_BAN_CACHE = {}
+BOT_BAN_CACHE_TTL = 15.0
 
 # Stable product IDs used by !shop buy <id>. This is a curated battle-focused catalogue.
 SHOP_ITEMS = {
@@ -197,7 +216,13 @@ TYPE_CHART = {
 'steel':{'fire':.5,'water':.5,'electric':.5,'ice':2,'rock':2,'steel':.5,'fairy':2}, 'fairy':{'fire':.5,'fighting':2,'poison':.5,'dragon':2,'dark':2,'steel':.5}}
 
 
-def db(): return sqlite3.connect(DB)
+def db():
+    """Open a short-lived SQLite connection configured for concurrent bot commands."""
+    conn = sqlite3.connect(DB, timeout=30.0, isolation_level='DEFERRED')
+    conn.execute('PRAGMA busy_timeout=30000')
+    conn.execute('PRAGMA foreign_keys=ON')
+    return conn
+
 
 def pv_battle_cooldown_remaining(uid, battle_type='npc', now=None):
     """Return cooldown for this battle type only; NPC, PvP, legendary and raid cooldowns are independent."""
@@ -226,6 +251,14 @@ def pv_candy_quest_progress(uid, kind, amount=1):
         c.execute(f'UPDATE pv_candy_quests SET {column}=MIN({column}+?,?) WHERE user_id=? AND day_key=?', (max(0,int(amount)), {'catches':5,'wins':3,'fish':3}[column], uid, day))
 
 def setup():
+    # WAL lets reads continue while a command writes; busy_timeout handles brief competing writes.
+    try:
+        with sqlite3.connect(DB, timeout=30.0) as _conn:
+            _conn.execute('PRAGMA busy_timeout=30000')
+            _conn.execute('PRAGMA journal_mode=WAL')
+            _conn.execute('PRAGMA synchronous=NORMAL')
+    except sqlite3.Error as _db_error:
+        print(f'[DATABASE WARNING] Could not enable WAL mode: {_db_error}')
     with db() as c:
         c.execute('CREATE TABLE IF NOT EXISTS players(user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 500, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, daily INTEGER DEFAULT 0, daily_streak INTEGER DEFAULT 0, started INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS game_logs(log_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, category TEXT NOT NULL, user_id INTEGER, guild_id INTEGER, command TEXT NOT NULL, details TEXT NOT NULL)')
@@ -1423,6 +1456,22 @@ class Game(commands.Cog):
         name = ctx.command.qualified_name.lower() if ctx.command else ''
         action = str(ctx.kwargs.get('action', '') or '').strip().lower()
         message_content = (getattr(getattr(ctx, 'message', None), 'content', '') or '').strip().lower()
+        root_name = ctx.command.root_parent.name.lower() if ctx.command and ctx.command.root_parent else (ctx.command.name.lower() if ctx.command else '')
+
+        # Only gameplay is paused. Setup, moderation, utility, and the on/off controls remain available.
+        if name not in {'gameoff', 'gameon', 'maintenance'} and root_name not in {'gameoff', 'gameon', 'maintenance'} and GAMEPLAY_MAINTENANCE_ENABLED:
+            maintenance_gameplay = {
+                'start', 'hunt', 'hint', 'catch', 'cancel', 'legendarybattle', 'battle', 'challenge',
+                'shinyhunt', 'setteam', 'select', 'team', 'usetm', 'raid', 'candy', 'candyquests',
+                'fish', 'shop', 'market', 'giveitem', 'takeitem', 'useitem', 'inventory', 'daily',
+                'bet', 'trade', 'tradeadd', 'traderemove', 'tradeconfirm', 'tradeaccept',
+                'pokemonadd', 'addboss', 'removeboss', 'pokedex', 'dex', 'box', 'info', 'moves',
+                'leaderboard', 'coinsadd', 'removecoins', 'removepokemon', 'pass', 'balance', 'give',
+                'profile'
+            }
+            if root_name in maintenance_gameplay:
+                await ctx.send('🛠️ **PokéVanta is currently under maintenance.** Please try again after some time.')
+                return False
 
         # Players must explicitly start their adventure before gameplay commands.
         # Utility/moderation commands and the onboarding/profile commands remain available.
@@ -1497,6 +1546,38 @@ class Game(commands.Cog):
             await ctx.send('⚠️ You already have an active raid battle. Finish it or use `!cancel` first.')
             return False
         return True
+
+    @commands.command(name='gameoff', aliases=['maintenanceon'], description='Developer-only: pause Pokémon gameplay during maintenance.')
+    async def gameoff(self, ctx):
+        global GAMEPLAY_MAINTENANCE_ENABLED
+        if ctx.author.id not in OWNER_IDS:
+            return await ctx.send('❌ This command is restricted to the configured PokéVanta developers.')
+        if GAMEPLAY_MAINTENANCE_ENABLED:
+            return await ctx.send('🛠️ Gameplay maintenance is already **ON**. Use `!gameon` when maintenance is complete.')
+        try:
+            _save_gameplay_maintenance(True, ctx.author.id)
+        except OSError as exc:
+            return await ctx.send(f'❌ Could not save maintenance mode: `{type(exc).__name__}`. Check the bot file folder permissions.')
+        GAMEPLAY_MAINTENANCE_ENABLED = True
+        embed = discord.Embed(title='🛠️ PokéVanta Gameplay Maintenance Enabled', description='Pokémon gameplay commands are now paused. Players who use gameplay commands will be told to try again later. Utility, setup, and moderation commands remain available.', color=discord.Color.orange())
+        embed.set_footer(text='Use !gameon to restore gameplay')
+        await ctx.send(embed=embed)
+
+    @commands.command(name='gameon', aliases=['maintenanceoff'], description='Developer-only: resume Pokémon gameplay after maintenance.')
+    async def gameon(self, ctx):
+        global GAMEPLAY_MAINTENANCE_ENABLED
+        if ctx.author.id not in OWNER_IDS:
+            return await ctx.send('❌ This command is restricted to the configured PokéVanta developers.')
+        if not GAMEPLAY_MAINTENANCE_ENABLED:
+            return await ctx.send('✅ Gameplay is already **ON**. No maintenance pause is active.')
+        try:
+            _save_gameplay_maintenance(False, ctx.author.id)
+        except OSError as exc:
+            return await ctx.send(f'❌ Could not save maintenance mode: `{type(exc).__name__}`. Check the bot file folder permissions.')
+        GAMEPLAY_MAINTENANCE_ENABLED = False
+        embed = discord.Embed(title='✅ PokéVanta Gameplay Resumed', description='Maintenance mode is OFF. Pokémon gameplay commands are available again.', color=discord.Color.green())
+        await ctx.send(embed=embed)
+
     @commands.command(name='start',aliases=['begin','st'],description='Start your adventure.')
     async def start(self,ctx):
         ensure_player(ctx.author.id)
@@ -1555,6 +1636,18 @@ class Game(commands.Cog):
         ('dhelmise', 'Dhelmise', 'Legendary', 4200, 6, 'fish_legendary'),
         ('walking-wake', 'Walking Wake', 'Ultra Rare', 8000, 3, 'fish_legendary'),
         ('manaphy', 'Manaphy', 'Mythical', 12000, 1, 'fish_legendary'),
+        ('slowpoke', 'Slowpoke', 'Common', 42, 130, 'fish_common'),
+        ('poliwag', 'Poliwag', 'Common', 48, 115, 'fish_common'),
+        ('ducklett', 'Ducklett', 'Uncommon', 115, 78, 'fish_uncommon'),
+        ('mareanie', 'Mareanie', 'Uncommon', 145, 68, 'fish_uncommon'),
+        ('bruxish', 'Bruxish', 'Rare', 360, 27, 'fish_rare'),
+        ('luvdisc', 'Luvdisc', 'Rare', 280, 33, 'fish_rare'),
+        ('kingdra', 'Kingdra', 'Epic', 2100, 8, 'fish_epic'),
+        ('wailord', 'Wailord', 'Epic', 1750, 9, 'fish_epic'),
+        ('mantine', 'Mantine', 'Epic', 1450, 11, 'fish_epic'),
+        ('kyogre', 'Kyogre', 'Legendary', 6500, 4, 'fish_legendary'),
+        ('arrokuda', 'Arrokuda', 'Uncommon', 135, 72, 'fish_uncommon'),
+        ('barraskewda', 'Barraskewda', 'Rare', 390, 25, 'fish_rare'),
     ]
 
     @commands.group(name='fish', aliases=['fishing','cast'], invoke_without_command=True, description='Cast your line, discover Pokémon of different rarities, and sell your fish for VantaCoins.')
@@ -1570,23 +1663,24 @@ class Game(commands.Cog):
                 return await ctx.send(f'🎣 Your line is still settling! Try again in **{remaining}s**.')
             c.execute('UPDATE pv_fishing_cooldowns SET last_cast=? WHERE user_id=?', (now, uid))
 
-        # Friendly odds: most casts find something, but some casts get no bite or the Pokémon escapes.
+        # Chance-based fishing: most casts catch a Pokémon, while some have no bite
+        # or the Pokémon escapes. A successful catch still uses the rarity-weighted table.
         outcome = random.randint(1, 100)
         if outcome <= 10:
             e = discord.Embed(
                 title='🌊 The Water Was Quiet…',
                 description='Your bobber drifted peacefully, but nothing took the bait this time.\n\n'
-                            'No fish was caught — your next cast might be the one! 🎣',
+                            'No Pokémon was caught on this cast — try again when your line is ready! 🎣',
                 color=discord.Color.from_rgb(70, 145, 190))
-            e.set_footer(text='PokéVanta Fishing • Try again in 30 seconds')
+            e.set_footer(text='PokéVanta Fishing • 10% no-bite chance • Try again in 30 seconds')
             return await ctx.send(embed=e)
         if outcome <= 18:
             e = discord.Embed(
                 title='💨 It Got Away!',
                 description='Something tugged hard on your line, then slipped back beneath the waves!\n\n'
-                            'The Pokémon escaped before you could reel it in. Better luck on the next cast!',
+                            'The Pokémon escaped before you could reel it in. Better luck next cast!',
                 color=discord.Color.from_rgb(110, 105, 190))
-            e.set_footer(text='PokéVanta Fishing • Even skilled anglers miss one sometimes')
+            e.set_footer(text='PokéVanta Fishing • 8% escape chance')
             return await ctx.send(embed=e)
 
         catches = self.FISHING_CATCHES
@@ -1603,6 +1697,16 @@ class Game(commands.Cog):
         pv_candy_quest_progress(uid, 'fish')
         pv_record_activity(uid, activity, 1, getattr(ctx.guild, 'id', None))
 
+        # Give each catch a little story: location, conditions, and occasional bonus events.
+        waters = [
+            ('🌿 Viridian Brook', 'The clear stream ripples between mossy stones.'),
+            ('🌙 Moonlit Lake', 'Silver light dances over the water.'),
+            ('🌊 Cerulean Coast', 'Waves roll in with a salty breeze.'),
+            ('🪸 Coral Shoals', 'Bright coral glimmers just beneath the surface.'),
+            ('❄️ Frostpoint Bay', 'Cold mist drifts across the quiet water.'),
+            ('⚡ Stormglass Pier', 'Tiny sparks flicker in the storm-charged air.'),
+        ]
+        water_name, water_flavor = random.choice(waters)
         rarity_style = {
             'Common': discord.Color.light_grey(), 'Uncommon': discord.Color.green(),
             'Rare': discord.Color.blue(), 'Epic': discord.Color.purple(),
@@ -1613,16 +1717,29 @@ class Game(commands.Cog):
             'Common':'🐟', 'Uncommon':'🐠', 'Rare':'💧', 'Epic':'✨',
             'Legendary':'🌟', 'Ultra Rare':'💎', 'Mythical':'🔮'
         }
+        # Rare fishing moments give a small bonus without making normal fishing too difficult.
+        bonus_text = ''
+        roll = random.random()
+        if roll < 0.08:
+            bonus = random.randint(40, 180) * (2 if rarity in ('Legendary', 'Ultra Rare', 'Mythical') else 1)
+            add_progress(uid, coins=bonus)
+            bonus_text = f'\n\n🧰 **Washed-up treasure!** You also found **{bonus:,} {get_vantacoin_emoji()} VantaCoins**.'
+        elif roll < 0.15:
+            bonus_text = '\n\n💫 **Perfect Reel!** Your timing was excellent — the catch is recorded as an Angler highlight!'
+        elif roll < 0.19:
+            bonus_text = '\n\n🌊 **Ripple Encounter!** You spotted shadows moving deeper in the water. Your next cast will be worth the wait!'
         e = discord.Embed(
             title=f'{rarity_emoji.get(rarity, "🐟")} PokéVanta Fishing Discovery!',
             description=f'You reeled in **{fish_name}**!\n\n'
+                        f'📍 **Fishing spot:** {water_name}\n'
+                        f'_{water_flavor}_\n\n'
                         f'{rarity_emoji.get(rarity, "🐟")} **Rarity:** {rarity}\n'
                         f'🪙 **Basket value:** {sell_value:,} {get_vantacoin_emoji()} VantaCoins\n\n'
-                        'Your catch has been added to your Fish Basket.\n'
-                        'Use `!fish inventory` to admire your collection or `!fish sell all` to sell your catches.',
+                        'Your catch has been added to your Fish Basket.' + bonus_text,
             color=rarity_style.get(rarity, discord.Color.blurple()))
-        e.add_field(name='🎣 Angler Tip', value='Fishing is a little unpredictable: sometimes there is no bite, and sometimes a Pokémon escapes. Most casts still bring in a catch!', inline=False)
-        e.set_footer(text='PokéVanta Angler • 30-second cooldown • Join the event before casting to earn contribution')
+        e.add_field(name='🧭 Angler Journal', value=f'**Catch:** {fish_name}\n**Habitat:** {water_name}\n**Rarity tier:** {rarity}\n**Sell value:** {sell_value:,} VantaCoins', inline=True)
+        e.add_field(name='🎒 What next?', value='`!fish inventory` — view your basket\n`!fish sell all` — sell catches\n`!fish transfer Magikarp` — move a catch into your normal Pokémon Box', inline=True)
+        e.set_footer(text='PokéVanta Angler • Chance-based catches • 30-second cooldown • Bonus discoveries can appear!')
         await ctx.send(embed=e)
 
     @fish.command(name='inventory', aliases=['bag','inv'])
@@ -1666,6 +1783,44 @@ class Game(commands.Cog):
         add_progress(uid, coins=earned)
         description = f"You sold **{to_sell}** fish for **{earned:,} {get_vantacoin_emoji()} VantaCoins**.\n\n" + ', '.join(sold[:8]) + (' …' if len(sold)>8 else '')
         e = discord.Embed(title='💰 Fish sold!', description=description, color=discord.Color.green())
+        await ctx.send(embed=e)
+
+    @fish.command(name='transfer', aliases=['to-box','tobox'])
+    async def fish_transfer(self, ctx, *, pokemon_name: str):
+        """Transfer one caught fish Pokémon from the fish basket into the normal Pokémon box."""
+        uid = ctx.author.id
+        key = pokemon_name.strip().lower().replace(' ', '-').replace('_', '-')
+        match = next((item for item in self.FISHING_CATCHES if item[0] == key or item[1].lower() == pokemon_name.strip().lower()), None)
+        if not match:
+            return await ctx.send('❌ I could not find that species in the fishing collection. Use `!fish inventory` to see your catches, then `!fish transfer <Pokémon name>`.')
+        fish_key, fish_name, rarity, sell_value, weight, activity = match
+        # The species list is loaded during startup; use it to obtain the canonical Pokédex ID.
+        species = next((item for item in POKEMON_LIST if item.get('name', '').lower() == fish_key), None)
+        if not species:
+            try:
+                details = await pokemon_data(fish_key)
+                dex_id = int(details['id'])
+            except Exception:
+                return await ctx.send('⚠️ Pokémon data is temporarily unavailable. Please try again shortly.')
+        else:
+            dex_id = int(species['id'])
+        try:
+            with db() as c:
+                row = c.execute('SELECT amount FROM pv_fish_inventory WHERE user_id=? AND fish_key=?', (uid, fish_key)).fetchone()
+                if not row or row[0] < 1:
+                    return await ctx.send(f'🧺 You do not have **{fish_name}** in your Fish Basket.')
+                # Reserve the fish and create the box Pokémon in the same transaction.
+                c.execute('UPDATE pv_fish_inventory SET amount=amount-1 WHERE user_id=? AND fish_key=? AND amount>0', (uid, fish_key))
+                if c.total_changes == 0:
+                    return await ctx.send('🧺 That catch is no longer available in your basket.')
+                c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,xp,shiny,hp,max_hp,held_item,status_condition) VALUES(?,?,?,?,?,?,?,?,?,?)', (uid, dex_id, fish_name.lower(), 5, 0, 0, 20, 20, '', ''))
+                instance_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+                existing = c.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=? AND box_id IS NOT NULL', (uid,)).fetchone()[0]
+                c.execute('UPDATE pokemon SET box_id=? WHERE instance_id=?', (existing, instance_id))
+        except sqlite3.Error as exc:
+            return await ctx.send(f'❌ Database issue while transferring your catch. Your fish should remain safe; please try again. (`{type(exc).__name__}`)')
+        e = discord.Embed(title='📦 Pokémon Transferred to Your Box!', description=f'**{fish_name}** ({rarity}) has left your Fish Basket and joined your Pokémon collection as a normal Pokémon.\n\n**Box ID:** `{existing}` · **Level:** 5\nUse `!box` to view it and `!team` to manage your team.', color=discord.Color.from_rgb(126, 82, 220))
+        e.set_footer(text='PokéVanta Fishing • Fish are converted one at a time')
         await ctx.send(embed=e)
 
     @commands.command(name='hunt',aliases=['h','search'],description='Find a wild Pokémon (7-second cooldown); every 25th successful catch unlocks a legendary boss.')
@@ -2059,7 +2214,7 @@ class Game(commands.Cog):
             'ccdelete'
         }
         categories = {
-            'start': 'Adventure', 'profile': 'Adventure', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
+            'start': 'Adventure', 'profile': 'Adventure', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
             'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
             'select': 'Teams & Battles', 'setteam': 'Teams & Battles', 'team': 'Teams & Battles', 'legendarybattle': 'Teams & Battles', 'battle': 'Teams & Battles', 'challenge': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies',
@@ -2076,7 +2231,7 @@ class Game(commands.Cog):
         }
         category_aliases = {
             'box': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'pokedex': 'Box & Pokédex', 'pokemon': 'Box & Pokédex',
-            'adventure': 'Adventure', 'hunt': 'Adventure', 'battle': 'Teams & Battles', 'teams': 'Teams & Battles',
+            'adventure': 'Adventure', 'event': 'Fishing & Events', 'events': 'Fishing & Events', 'fishing': 'Fishing & Events', 'angler': 'Fishing & Events', 'hunt': 'Adventure', 'battle': 'Teams & Battles', 'teams': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies', 'candyquest': 'Raids & Candies', 'candytrail': 'Raids & Candies', 'trade': 'Trading', 'shop': 'Coins & Shop', 'market': 'Coins & Shop', 'm': 'Coins & Shop', 'coins': 'Coins & Shop',
             'items': 'Inventory & Items', 'inventory': 'Inventory & Items', 'utility': 'Utilities', 'utilities': 'Utilities', 'fun': 'Utilities',
             'tags': 'Tags & Custom Commands', 'custom': 'Tags & Custom Commands', 'mod': 'Moderation', 'moderation': 'Moderation',
@@ -2133,6 +2288,10 @@ class Game(commands.Cog):
                     'team': 'View your current Pokémon team.',
                     'start': 'Begin your PokéVanta adventure.',
                     'hunt': 'Search for a wild Pokémon encounter.',
+                    'fish': 'Fish for Pokémon, manage your Fish Basket, sell catches, or transfer one into your normal box.',
+                    'event': 'View global event progress, join events, and claim event rewards.',
+                    'events': 'Browse global event types and their rewards.',
+                    'eventhelp': 'View the complete event and fishing command guide.',
                     'hint': 'Get a hint about the current encounter.',
                     'catch': 'Attempt to catch the currently encountered Pokémon.',
                     'cancel': 'Cancel your current hunt, challenge, or battle.',
@@ -2196,7 +2355,7 @@ class Game(commands.Cog):
                     'Box & Pokédex': '`!help box`', 'Adventure': '`!help adventure`',
                     'Teams & Battles': '`!help battle`', 'Raids & Candies': '`!help raid`',
                     'Trading': '`!help trade`', 'Coins & Shop': '`!help shop`',
-                    'Inventory & Items': '`!help items`', 'Utilities': '`!help utilities`',
+                    'Inventory & Items': '`!help items`', 'Fishing & Events': '`!help event`', 'Utilities': '`!help utilities`',
                     'Tags & Custom Commands': '`!help tags`', 'Moderation': '`!help moderation`',
                     'Server Setup': '`!help setup`', 'Developer Controls': '`!help developer`',
                     'Developer Setup': '`!help developer setup`', 'Giveaways': '`!help giveaways`'
@@ -6334,11 +6493,19 @@ class Bot(commands.Bot):
             return
         # Banned users can still chat normally; PokéVanta-prefixed commands are blocked.
         if message.content.startswith(PREFIX) and message.author.id not in OWNER_IDS:
-            with db() as c:
-                ban = c.execute('SELECT reason FROM bot_bans WHERE user_id=?', (message.author.id,)).fetchone()
-            if ban:
+            # Cache bot-ban checks briefly so routine commands don't repeatedly open SQLite.
+            cached = BOT_BAN_CACHE.get(message.author.id)
+            now_mono = time.monotonic()
+            if cached and now_mono - cached[0] < BOT_BAN_CACHE_TTL:
+                ban_reason = cached[1]
+            else:
+                with db() as c:
+                    ban_row = c.execute('SELECT reason FROM bot_bans WHERE user_id=?', (message.author.id,)).fetchone()
+                ban_reason = ban_row[0] if ban_row else None
+                BOT_BAN_CACHE[message.author.id] = (now_mono, ban_reason)
+            if ban_reason:
                 e = discord.Embed(title='🚫 You are banned from PokéVanta', description='You cannot use PokéVanta commands because your account has been banned from the bot.', color=discord.Color.red())
-                e.add_field(name='Reason', value=discord.utils.escape_markdown(ban[0])[:1024], inline=False)
+                e.add_field(name='Reason', value=discord.utils.escape_markdown(ban_reason)[:1024], inline=False)
                 e.set_footer(text='Contact a PokéVanta developer if you believe this ban was issued by mistake.')
                 try:
                     await message.reply(embed=e, mention_author=False)
