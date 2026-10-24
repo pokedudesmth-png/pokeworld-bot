@@ -4715,12 +4715,19 @@ class CarlStyleExtensions(commands.Cog):
             return
         if channel.guild.id != ctx.guild.id:
             return await ctx.send('❌ Choose a channel in this server.')
+        server_name = ctx.guild.name
         embed = discord.Embed(
-            title='🎫 PokéVanta Support Center',
-            description='Need help, want to report an issue, or have a question? Open a private support ticket below.\n\n🔐 **Private by default** — only you and staff can see your ticket.\n🧑‍💻 **Staff access** — members with Manage Channels or Administrator can assist.\n📌 Please open one ticket per issue.',
+            title=f'🎫 {server_name} Support Center',
+            description=(
+                'Need help, want to report an issue, or have a question? '
+                'Open a support ticket below and the staff team will assist you.\n\n'
+                '⚠️ **Please use the ticket system responsibly.** Tickets opened for fun, '
+                'spam, or without a genuine reason may result in appropriate moderation '
+                'action by the server staff.'
+            ),
             color=discord.Color.blurple()
         )
-        embed.set_footer(text='PokéVanta • Support')
+        embed.set_footer(text=f'{server_name} • Support')
         await channel.send(embed=embed, view=TicketPanelView(self.bot))
         await ctx.send(f'✅ Ticket panel posted in {channel.mention}. Make sure I have **Manage Channels** permission.')
 
