@@ -4408,12 +4408,13 @@ class TicketPanelView(discord.ui.View):
                 reason=f"Ticket opened by {interaction.user} ({interaction.user.id})"
             )
             view = TicketCloseView(self.bot, interaction.user.id)
+            # Use the server where this ticket was opened, not the bot's own name.
             embed = discord.Embed(
-                title="🎫 PokéVanta Support Ticket",
+                title=f"🎫 {guild.name} Support Center",
                 description=f"Welcome {interaction.user.mention}! Please describe your issue and include any useful details.\n\nA staff member with **Manage Channels** or **Administrator** permission can help you here. When finished, press **Close Ticket**.",
                 color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc)
             )
-            embed.set_footer(text=f"Ticket opened by {interaction.user} • ID {interaction.user.id}")
+            embed.set_footer(text=f"{guild.name} • Ticket opened by {interaction.user} • ID {interaction.user.id}")
             await channel.send(content=interaction.user.mention, embed=embed, view=view,
                                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             await interaction.response.send_message(f"Your private ticket is ready: {channel.mention}", ephemeral=True)
