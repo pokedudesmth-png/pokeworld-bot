@@ -209,6 +209,8 @@ def setup():
         if 'paused_at' not in event_cols: c.execute('ALTER TABLE pv_events ADD COLUMN paused_at INTEGER')
         c.execute('CREATE TABLE IF NOT EXISTS pv_mission_progress(user_id INTEGER NOT NULL, period TEXT NOT NULL, mission_key TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0, claimed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,period,mission_key))')
         c.execute('CREATE TABLE IF NOT EXISTS pv_mission_points(user_id INTEGER PRIMARY KEY, points INTEGER NOT NULL DEFAULT 0)')
+        c.execute('CREATE TABLE IF NOT EXISTS pv_mp_reward_claims(user_id INTEGER NOT NULL, tier INTEGER NOT NULL, claimed_at INTEGER NOT NULL, PRIMARY KEY(user_id,tier))')
+        c.execute('CREATE TABLE IF NOT EXISTS pv_event_badges(user_id INTEGER NOT NULL, event_type TEXT NOT NULL, badge_name TEXT NOT NULL, earned_at INTEGER NOT NULL, PRIMARY KEY(user_id,event_type,earned_at))')
         c.execute("CREATE TABLE IF NOT EXISTS bot_bans(user_id INTEGER PRIMARY KEY, reason TEXT NOT NULL DEFAULT 'Violation of game rules', banned_by INTEGER NOT NULL, banned_at INTEGER NOT NULL)")
         c.execute('CREATE TABLE IF NOT EXISTS nick_freezes(guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, freezer_id INTEGER NOT NULL, original_nick TEXT, locked_nick TEXT, PRIMARY KEY(guild_id,user_id))')
         freeze_cols=[r[1] for r in c.execute('PRAGMA table_info(nick_freezes)').fetchall()]
@@ -281,6 +283,32 @@ def transfer_pokemon_owner(conn, instance_id, old_uid, new_uid):
         conn.execute(f'DELETE FROM {table} WHERE instance_id=?',(instance_id,))
     conn.execute('UPDATE pokemon SET user_id=?,box_id=? WHERE instance_id=? AND user_id=?',(new_uid,new_box_id,instance_id,old_uid))
     return new_box_id
+
+
+def compact_box_ids(conn, uid):
+    """Renumber a trainer's visible box IDs contiguously from 1 after collection changes.
+
+    Internal instance_id values are never changed; battle teams and other internal
+    references therefore remain stable while !box / !info / !ta show 1, 2, 3, ... .
+    """
+    rows=conn.execute(
+        'SELECT instance_id FROM pokemon WHERE user_id=? ORDER BY box_id IS NULL, box_id, instance_id',
+        (uid,)
+    ).fetchall()
+    if not rows:
+        return
+    # Move to unique temporary negative IDs first so the partial unique index cannot
+    # collide when IDs shift (for example 2 -> 1 while old ID 1 still exists).
+    for (instance_id,) in rows:
+        conn.execute(
+            'UPDATE pokemon SET box_id=? WHERE instance_id=? AND user_id=?',
+            (-int(instance_id), int(instance_id), uid)
+        )
+    for new_box_id, (instance_id,) in enumerate(rows, start=1):
+        conn.execute(
+            'UPDATE pokemon SET box_id=? WHERE instance_id=? AND user_id=?',
+            (new_box_id, int(instance_id), uid)
+        )
 
 def ensure_player(uid):
     with db() as c:
@@ -2187,7 +2215,7 @@ class Game(commands.Cog):
             base={}; types='Unknown'; abilities='Unknown'; d=None
         hp=max(0,min(hp,maxhp)); maxhp=max(1,maxhp); ratio=hp/maxhp
         filled=max(0,min(10,round(ratio*10))); bar='▰'*filled+'▱'*(10-filled)
-        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID:** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
+        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
         held_label=(ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()) if held else 'None'
         e.add_field(name='Condition',value=f'**Status:** {(status or "healthy").replace("-"," ").title()}\n**Held item:** {item_emoji(held) + " " if held else ""}{held_label}\n**Ability:** {abilities}',inline=True)
@@ -4322,6 +4350,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('UPDATE players SET coins=coins-?+? WHERE user_id=?',(ob['coins'],oa['coins'],b))
                 for pid in oa['pokemon']: transfer_pokemon_owner(c,pid,a,b)
                 for pid in ob['pokemon']: transfer_pokemon_owner(c,pid,b,a)
+                # Keep each visible box numbered 1..N after Pokémon leave/arrive.
+                # This changes only box_id; internal instance_id references stay intact.
+                compact_box_ids(c, a)
+                compact_box_ids(c, b)
         except (ValueError, sqlite3.Error) as exc:
             trade['confirmed'].clear(); await ctx.send(f'❌ Trade not completed: {exc}')
             return
@@ -5598,15 +5630,57 @@ class CarlStyleExtensions(commands.Cog):
 # ─────────────────────────────────────────────────────────────────────────────
 MISSION_DEFS = {
     'daily': [
-        ('catch', '🌿 Wild Collector', 'Catch 3 Pokémon', 3, 120, 10),
-        ('hunt', '🔎 Field Researcher', 'Start 5 successful hunts', 5, 100, 10),
-        ('win', '⚔️ Battle Ready', 'Win 2 NPC battles', 2, 180, 15),
+        ('catch', '🌿 Wild Collector', 'Catch 3 Pokémon', 3, 7500, 20),
+        ('hunt', '🔎 Field Researcher', 'Start 5 successful hunts', 5, 6250, 20),
+        ('win', '⚔️ Battle Ready', 'Win 2 NPC battles', 2, 12500, 30),
     ],
     'weekly': [
-        ('catch', '🎒 Master Collector', 'Catch 15 Pokémon', 15, 600, 45),
-        ('hunt', '🌎 Wild Explorer', 'Start 25 successful hunts', 25, 500, 40),
-        ('win', '🏆 Battle Veteran', 'Win 10 NPC battles', 10, 900, 60),
+        ('catch', '🎒 Master Collector', 'Catch 15 Pokémon', 15, 50000, 90),
+        ('hunt', '🌎 Wild Explorer', 'Start 25 successful hunts', 25, 42500, 80),
+        ('win', '🏆 Battle Veteran', 'Win 10 NPC battles', 10, 75000, 120),
     ],
+}
+
+
+# Lifetime Mission Point milestone rewards. Each tier is claimable only once.
+MP_REWARD_TIERS = [
+    (100, 25000, "🥉 Rookie Researcher"),
+    (250, 75000, "🥈 Field Specialist"),
+    (500, 200000, "🥇 Mission Expert"),
+    (1000, 500000, "👑 PokéVanta Strategist"),
+]
+
+EVENT_TYPES = {
+    'rift': {
+        'title': '🌌 The Mystery of the Rift',
+        'description': 'A space-time rift is destabilizing! Catch Pokémon and win battles to stabilize the anomaly.',
+        'coins': 50000, 'points': 50, 'flavor': 'Rift Stabilizer Badge (event achievement)'
+    },
+    'surge': {
+        'title': '✨ Shiny Surge',
+        'description': 'A wave of shimmering energy is sweeping the wilds. Every successful hunt and catch pushes back the surge.',
+        'coins': 75000, 'points': 80, 'flavor': 'Shimmer Seeker Badge (event achievement)'
+    },
+    'invasion': {
+        'title': '🔥 Legendary Invasion',
+        'description': 'A legendary threat has appeared. Trainers everywhere must contribute to defend the region.',
+        'coins': 150000, 'points': 120, 'flavor': 'Legend Guard Badge (event achievement)'
+    },
+    'fossil': {
+        'title': '🦴 Fossil Frenzy',
+        'description': 'Ancient energy is awakening! Explore and catch Pokémon to help researchers study the fossil surge.',
+        'coins': 62500, 'points': 70, 'flavor': 'Ancient Researcher Badge (event achievement)'
+    },
+    'ultra': {
+        'title': '🌀 Ultra Space Breach',
+        'description': 'Ultra Space is leaking into the region. Join the global effort to seal the breach.',
+        'coins': 250000, 'points': 160, 'flavor': 'Breach Warden Badge (event achievement)'
+    },
+    'champion': {
+        'title': '🏆 Champion Challenge',
+        'description': 'A worldwide training challenge is underway. Win battles and help the community reach the champion goal.',
+        'coins': 125000, 'points': 100, 'flavor': 'Champion Challenger Badge (event achievement)'
+    },
 }
 
 def pv_period(kind):
@@ -5649,7 +5723,7 @@ def pv_event_embed(row, user_points=0):
     goal=max(1,int(row[4])); progress=min(goal,int(row[5])); pct=int(progress*100/goal)
     bar='🟪'*min(10,pct//10)+'⬛'*(10-min(10,pct//10))
     e=discord.Embed(title=f'🌌 {row[2]}',description=f'{row[3]}\n\n**Global progress**\n{bar} **{progress:,}/{goal:,}** ({pct}%)\n\n**Your contribution:** `{user_points:,} points`\n**Time remaining:** `{hours}h {mins}m`',color=discord.Color.from_rgb(118,83,220))
-    e.add_field(name='Community goal rewards',value='🥉 **25% progress:** milestone unlocked\n🥈 **50% progress:** milestone unlocked\n🥇 **100% progress:** event goal reached; eligible participants can claim the event reward',inline=False)
+    e.add_field(name='Community goal rewards',value='🥉 **25% progress:** community milestone reached\n🥈 **50% progress:** community milestone reached\n🥇 **100% progress:** goal reached; eligible participants unlock **+50,000 VantaCoins +250 MP** bonus',inline=False)
     e.set_footer(text='PokéVanta Global Events • progress is shared across participating servers')
     return e
 
@@ -5680,7 +5754,7 @@ class EventsMissions(commands.Cog):
                     row=c.execute('SELECT progress,claimed FROM pv_mission_progress WHERE user_id=? AND period=? AND mission_key=?',(ctx.author.id,period_key,key)).fetchone()
                     progress,claimed=row or (0,0)
                     mark='✅' if progress>=target and claimed else ('🎁' if progress>=target else '▫️')
-                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • 🪙 {coins} VantaCoins + **{points} MP**'+(' • Claimed' if claimed else ''))
+                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • {get_vantacoin_emoji()} {coins:,} VantaCoins + **{points} MP**'+(' • Claimed' if claimed else ''))
                 sections.append((f'📅 {kind.title()} missions', '\n\n'.join(lines)))
         e=discord.Embed(title='📜 Trainer Mission Board',description='Complete real gameplay objectives to earn VantaCoins and Mission Points. Claim each completed mission once.',color=discord.Color.from_rgb(65,160,125))
         for title,value in sections:e.add_field(name=title,value=value,inline=False)
@@ -5705,6 +5779,38 @@ class EventsMissions(commands.Cog):
         e.set_footer(text='Keep going, Trainer — new objectives are waiting!')
         await ctx.send(embed=e)
 
+    @commands.command(name='mprewards', aliases=['mprewardshop', 'missionrewards'])
+    async def mprewards(self,ctx):
+        with db() as c:
+            row=c.execute('SELECT points FROM pv_mission_points WHERE user_id=?',(ctx.author.id,)).fetchone()
+            claimed={r[0] for r in c.execute('SELECT tier FROM pv_mp_reward_claims WHERE user_id=?',(ctx.author.id,)).fetchall()}
+        points=row[0] if row else 0
+        lines=[]
+        for tier,(need,coins,title) in enumerate(MP_REWARD_TIERS,1):
+            status='✅ Claimed' if tier in claimed else ('🎁 Ready to claim' if points>=need else f'🔒 Need {need-points:,} more MP')
+            lines.append(f'{status} — **{title}**\n`{points:,}/{need:,} MP` → **{coins:,} VantaCoins**')
+        e=discord.Embed(title='🏅 Mission Point Milestones',description=f'**Your lifetime Mission Points:** `{points:,} MP`\n\n'+'\n\n'.join(lines),color=discord.Color.gold())
+        e.add_field(name='How to claim',value='Use `!mpclaim` to claim every milestone you have unlocked. Each milestone can only be claimed once.',inline=False)
+        e.set_footer(text='Earn MP by completing and claiming daily and weekly missions, and by claiming eligible event rewards.')
+        await ctx.send(embed=e)
+
+    @commands.command(name='mpclaim', aliases=['claimmp'])
+    async def mpclaim(self,ctx):
+        uid=ctx.author.id; total=0; rewards=[]
+        with db() as c:
+            row=c.execute('SELECT points FROM pv_mission_points WHERE user_id=?',(uid,)).fetchone()
+            points=row[0] if row else 0
+            for tier,(need,coins,title) in enumerate(MP_REWARD_TIERS,1):
+                if points>=need:
+                    cur=c.execute('INSERT OR IGNORE INTO pv_mp_reward_claims(user_id,tier,claimed_at) VALUES(?,?,?)',(uid,tier,int(time.time())))
+                    if cur.rowcount:
+                        total+=coins;rewards.append(f'• **{title}** — +{coins:,} VantaCoins')
+        if not rewards:
+            return await ctx.send('🔒 No new Mission Point milestone is ready. Check `!mprewards` to see your progress and claimed tiers.')
+        add_progress(uid,coins=total)
+        e=discord.Embed(title='🎉 Mission milestones claimed!',description='\n'.join(rewards)+f'\n\n**Total reward:** +{total:,} {get_vantacoin_emoji()} VantaCoins',color=discord.Color.gold())
+        await ctx.send(embed=e)
+
     @commands.command(name='missionboard')
     async def missionboard(self,ctx):
         with db() as c: rows=c.execute('SELECT user_id,points FROM pv_mission_points ORDER BY points DESC,user_id ASC LIMIT 10').fetchall()
@@ -5722,13 +5828,18 @@ class EventsMissions(commands.Cog):
                 c.execute("UPDATE pv_events SET status='ended' WHERE id=1 AND status='active'")
                 c.execute("INSERT INTO pv_event_history(event_id,event_type,title,description,goal,progress,starts_at,ends_at,status) SELECT id,event_type,title,description,goal,progress,starts_at,?,'ended' FROM pv_events WHERE id=1 AND NOT EXISTS (SELECT 1 FROM pv_event_history WHERE event_id=1 AND ends_at=?)",(ended_at,ended_at))
                 row=c.execute('SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status,announcement_channel,rewards_claimed FROM pv_events WHERE id=1').fetchone()
-        if action in {'status','', 'join','rewards','leaderboard','claim','history'}:
+        if action in {'status','', 'join','rewards','leaderboard','claim','history','badges'}:
             if action=='history':
                 with db() as c: history=c.execute('SELECT title,progress,goal,starts_at,ends_at,status FROM pv_event_history ORDER BY archive_id DESC LIMIT 10').fetchall()
                 lines=[]
                 for title,progress,goal,started,ended,status in history:
                     lines.append(f'**{title}** — {min(progress,goal):,}/{goal:,} points • {datetime.fromtimestamp(started,timezone.utc).strftime("%d %b %Y")} to {datetime.fromtimestamp(ended,timezone.utc).strftime("%d %b %Y")} • `{status}`')
                 e=discord.Embed(title='📚 Global Event Archives',description='\n'.join(lines) or 'No completed events have been archived yet.',color=discord.Color.blurple())
+                return await ctx.send(embed=e)
+            if action=='badges':
+                with db() as c: badges=c.execute('SELECT badge_name,event_type,earned_at FROM pv_event_badges WHERE user_id=? ORDER BY earned_at DESC LIMIT 20',(uid,)).fetchall()
+                lines=[f'🏅 **{name}** — `{etype}` • <t:{earned}:d>' for name,etype,earned in badges]
+                e=discord.Embed(title=f'🏅 {ctx.author.display_name} — Event Achievements',description='\n'.join(lines) or 'No event achievements yet. Join and claim rewards from global events to earn them!',color=discord.Color.gold())
                 return await ctx.send(embed=e)
             if not row or row[8] not in {'active','paused','ended'} or (row[8]=='active' and row[7]<=int(time.time())):
                 return await ctx.send(embed=discord.Embed(title='🌙 No active global event',description='The wilds are quiet for now. A developer can launch the next adventure; check back soon!',color=discord.Color.blurple()))
@@ -5742,21 +5853,30 @@ class EventsMissions(commands.Cog):
                 with db() as c: leaders=c.execute('SELECT user_id,points FROM pv_event_users WHERE event_id=1 AND joined=1 ORDER BY points DESC,user_id ASC LIMIT 10').fetchall()
                 e=discord.Embed(title=f'🏆 {row[2]} — Global Leaderboard',description='\n'.join(f'**{i}.** <@{u}> — **{pts:,} pts**' for i,(u,pts) in enumerate(leaders,1)) or 'No trainers have contributed yet.',color=discord.Color.gold());e.set_footer(text='Global rankings across all PokéVanta servers');return await ctx.send(embed=e)
             if action=='rewards':
-                e=discord.Embed(title='🎁 Event Rewards',description='**Participation reward:** 100 VantaCoins if the event ends before the global goal is reached.\n**Goal completion reward:** 500 VantaCoins if the global target is reached.\n\nJoin with `!event join` and use `!event claim` when the event ends or reaches its goal.',color=discord.Color.gold());return await ctx.send(embed=e)
+                reward_cfg=EVENT_TYPES.get(row[1],EVENT_TYPES['rift'])
+                e=discord.Embed(title='🎁 Event Rewards',description=f"**{row[2]}**\n\n**Participation reward:** {reward_cfg['coins']:,} VantaCoins + {reward_cfg['points']} MP when the event ends.\n**Extra community bonus:** included when the global goal is reached: +50,000 VantaCoins and +250 MP.\n**Achievement:** {reward_cfg['flavor']} (shown in the claim message).\n\nJoin with `!event join`, contribute, then use `!event claim` when the event ends or reaches its goal.",color=discord.Color.gold());return await ctx.send(embed=e)
             if action=='claim':
                 if row[8]!='ended' and row[5]<row[4]:return await ctx.send('⏳ Event rewards become claimable when the event ends or its goal is reached.')
                 if not user or not user[1]:return await ctx.send('Join the event with `!event join` and contribute before claiming rewards.')
                 if user[2]:return await ctx.send('✅ You have already claimed this event reward.')
-                reward=500 if row[5]>=row[4] else 100
-                with db() as c:c.execute('UPDATE pv_event_users SET claimed=1 WHERE event_id=1 AND user_id=? AND claimed=0',(uid,))
-                add_progress(uid,coins=reward)
-                return await ctx.send(embed=discord.Embed(title='🎉 Event reward claimed!',description=f'You received **{reward:,} {get_vantacoin_emoji()} VantaCoins** for participating in **{row[2]}**.',color=discord.Color.gold()))
+                reward_cfg=EVENT_TYPES.get(row[1],EVENT_TYPES['rift'])
+                base_coins=reward_cfg['coins']; base_points=reward_cfg['points']
+                bonus_coins=50000 if row[5]>=row[4] else 0; bonus_points=250 if row[5]>=row[4] else 0
+                with db() as c:
+                    cur=c.execute('UPDATE pv_event_users SET claimed=1 WHERE event_id=1 AND user_id=? AND claimed=0',(uid,))
+                    if not cur.rowcount:return await ctx.send('✅ You have already claimed this event reward.')
+                    if base_points+bonus_points:c.execute('INSERT INTO pv_mission_points(user_id,points) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET points=points+excluded.points',(uid,base_points+bonus_points))
+                    c.execute('INSERT INTO pv_event_badges(user_id,event_type,badge_name,earned_at) VALUES(?,?,?,?)',(uid,row[1],reward_cfg['flavor'],int(time.time())))
+                add_progress(uid,coins=base_coins+bonus_coins)
+                achievement=reward_cfg['flavor']
+                extra=f'\n**Community goal bonus:** +{bonus_coins:,} VantaCoins and +{bonus_points} MP' if bonus_coins else '\n**Community goal bonus:** Not unlocked this time.'
+                return await ctx.send(embed=discord.Embed(title='🎉 Event reward claimed!',description=f'**Event:** {row[2]}\n**Reward:** +{base_coins+bonus_coins:,} {get_vantacoin_emoji()} VantaCoins\n**Mission Points:** +{base_points+bonus_points} MP\n**Achievement unlocked:** {achievement}\n{extra}\nUse `!event badges` to view your collection and `!mprewards` for MP milestones.',color=discord.Color.gold()))
             return await ctx.send(embed=pv_event_embed(row,points))
         if uid not in OWNER_IDS:return await ctx.send('🔒 Event management commands are restricted to PokéVanta developers.')
         if action=='start':
             parts=argument.split('|'); etype=(parts[0].strip().lower() if parts else 'rift')
-            valid={'rift':'🌌 The Mystery of the Rift','surge':'✨ Shiny Surge','invasion':'🔥 Legendary Invasion'}
-            if etype not in valid:return await ctx.send('Use `!event start rift`, `!event start surge`, or `!event start invasion`.')
+            valid={key:value['title'] for key,value in EVENT_TYPES.items()}
+            if etype not in valid:return await ctx.send('Event types: `rift`, `surge`, `invasion`, `fossil`, `ultra`, `champion`. Example: `!event start ultra|2500|48`.')
             goal=1000;duration=24;channel_id=ctx.channel.id
             if len(parts)>1:
                 try:goal=max(100,min(1000000,int(parts[1])))
@@ -5764,7 +5884,7 @@ class EventsMissions(commands.Cog):
             if len(parts)>2:
                 try:duration=max(1,min(168,int(parts[2])))
                 except ValueError:return await ctx.send('Duration must be between 1 and 168 hours.')
-            title=valid[etype];desc={'rift':'Strange energy is spreading through the wild! Catch Pokémon and win battles to help stabilize the rift.','surge':'A wave of unusual energy has swept the region. Explore and collect Pokémon to contribute to the Shiny Surge!','invasion':'A legendary threat has appeared. Trainers everywhere must prove their strength and contribute to the global challenge!'}[etype]
+            title=valid[etype];desc=EVENT_TYPES[etype]['description']
             with db() as c:
                 old=c.execute('SELECT status,ends_at FROM pv_events WHERE id=1').fetchone()
                 if old and old[0] in {'active','paused'} and old[1]>int(time.time()):return await ctx.send('⚠️ A global event is already active. Use `!event status` or end it first with `!event end`.')
@@ -5809,7 +5929,7 @@ class EventsMissions(commands.Cog):
 
     @commands.command(name='eventhelp')
     async def eventhelp(self,ctx):
-        e=discord.Embed(title='🌌 PokéVanta Events & Missions',description='**Player commands**\n`!missions [daily|weekly]` · View objectives\n`!missionclaim` · Claim completed missions\n`!missionboard` · Global mission rankings\n`!event` · View the current global event\n`!event join` · Register for the event\n`!event rewards` · View rewards\n`!event leaderboard` · Global event rankings\n`!event claim` · Claim eligible event rewards\n`!event history` · Event archive\n\n**Developer commands**\n`!event start rift|surge|invasion` · Start a global event\n`!event end` · End it\n`!event pause` / `!event resume` · Pause or resume\n`!event setgoal <points>` · Change target\n`!event setduration <hours>` · Change remaining duration\n`!event announce` · Reannounce event',color=discord.Color.from_rgb(118,83,220))
+        e=discord.Embed(title='🌌 PokéVanta Events & Missions',description='**Player commands**\n`!missions [daily|weekly]` · View objectives\n`!missionclaim` · Claim completed missions\n`!missionboard` · Global mission rankings\n`!mprewards` / `!mpclaim` · View and claim lifetime MP milestones\n`!event` · View the current global event\n`!event join` · Register for the event\n`!event rewards` · View rewards\n`!event leaderboard` · Global event rankings\n`!event claim` · Claim eligible event rewards\n`!event history` · Event archive\n`!event badges` · View your earned event achievements\n\n**Developer commands**\n`!event start <type>|<goal>|<hours>` · Start event (types: rift, surge, invasion, fossil, ultra, champion)\n`!event end` · End it\n`!event pause` / `!event resume` · Pause or resume\n`!event setgoal <points>` · Change target\n`!event setduration <hours>` · Change remaining duration\n`!event announce` · Reannounce event',color=discord.Color.from_rgb(118,83,220))
         e.set_footer(text='Global event data is stored in the configured database file')
         await ctx.send(embed=e)
 
