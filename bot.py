@@ -4372,6 +4372,87 @@ async def end_trade(trade, message):
         pass
 
 
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self, bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Open a Ticket", style=discord.ButtonStyle.primary, emoji="🎫", custom_id="vantaticket:open")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Tickets can only be opened inside a server.", ephemeral=True)
+        guild = interaction.guild
+        existing = discord.utils.get(guild.text_channels, topic=f"vantaticket-owner:{interaction.user.id}")
+        if existing:
+            return await interaction.response.send_message(f"You already have an open ticket: {existing.mention}", ephemeral=True)
+        category_id = None
+        try:
+            category_id = int(self.bot.get_cog("CarlStyleExtensions").setting(guild.id, "ticket_category") or 0)
+        except (ValueError, AttributeError):
+            pass
+        category = guild.get_channel(category_id) if category_id else None
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+        }
+        for role in guild.roles:
+            if role.permissions.manage_channels or role.permissions.administrator:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+        name = f"ticket-{interaction.user.name.lower().replace(' ', '-')[:35]}"
+        try:
+            channel = await guild.create_text_channel(
+                name=name, category=category if isinstance(category, discord.CategoryChannel) else None,
+                overwrites=overwrites, topic=f"vantaticket-owner:{interaction.user.id}",
+                reason=f"Ticket opened by {interaction.user} ({interaction.user.id})"
+            )
+            view = TicketCloseView(self.bot, interaction.user.id)
+            embed = discord.Embed(
+                title="🎫 PokéVanta Support Ticket",
+                description=f"Welcome {interaction.user.mention}! Please describe your issue and include any useful details.\n\nA staff member with **Manage Channels** or **Administrator** permission can help you here. When finished, press **Close Ticket**.",
+                color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc)
+            )
+            embed.set_footer(text=f"Ticket opened by {interaction.user} • ID {interaction.user.id}")
+            await channel.send(content=interaction.user.mention, embed=embed, view=view,
+                               allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            await interaction.response.send_message(f"Your private ticket is ready: {channel.mention}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("I can't create tickets. Please ask a server administrator to give me **Manage Channels** permission.", ephemeral=True)
+        except discord.HTTPException:
+            await interaction.response.send_message("I couldn't create the ticket just now. Please try again later.", ephemeral=True)
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self, bot, owner_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.owner_id = owner_id
+        # A shared persistent custom ID lets the close button continue working after restarts.
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="vantaticket:close")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+            return await interaction.response.send_message("This button only works in a ticket channel.", ephemeral=True)
+        topic = interaction.channel.topic or ""
+        match = re.search(r"vantaticket-owner:(\d+)", topic)
+        if not match:
+            return await interaction.response.send_message("This channel doesn't look like an active ticket.", ephemeral=True)
+        owner_id = int(match.group(1))
+        is_staff = isinstance(interaction.user, discord.Member) and (
+            interaction.user.guild_permissions.manage_channels or interaction.user.guild_permissions.administrator
+        )
+        if interaction.user.id != owner_id and not is_staff:
+            return await interaction.response.send_message("Only the ticket opener or staff with **Manage Channels** can close this ticket.", ephemeral=True)
+        await interaction.response.send_message("🔒 Ticket closed. This channel will be deleted in 5 seconds.", ephemeral=True)
+        try:
+            await interaction.channel.send(f"🔒 Ticket closed by {interaction.user.mention}.")
+            await asyncio.sleep(5)
+            await interaction.channel.delete(reason=f"Ticket closed by {interaction.user} ({interaction.user.id})")
+        except discord.HTTPException:
+            pass
+
+
 class CarlStyleExtensions(commands.Cog):
     """Additional Carl-bot-inspired server tools kept separate from the Pokémon game Cog."""
     def __init__(self, bot):
@@ -4588,7 +4669,7 @@ class CarlStyleExtensions(commands.Cog):
         if not await self.require_permission(ctx, 'manage_guild', 'Manage Server'): return
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel', channel.id)
-        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Command and button logs will also use this channel whenever a category-specific log channel is not configured. Use `!setpokemonlog`, `!settradinglog`, or `!setcoinslog` to configure separate game-log channels.')
+        await ctx.send(f'✅ General/moderation log channel set to {channel.mention}. Command and button logs will also use this channel whenever a category-specific log channel is not configured. Use `!setpokemonlog`, `!settradinglog`, or `!setcoinlog` to configure separate game-log channels.')
 
     @commands.hybrid_command(name='setpokemonlog')
     async def set_pokemon_log(self, ctx, channel: discord.TextChannel):
@@ -4618,13 +4699,70 @@ class CarlStyleExtensions(commands.Cog):
         self.setting(ctx.guild.id, 'log_channel_trading', channel.id)
         await ctx.send(f'✅ Trading logs will be sent to {channel.mention}.')
 
-    @commands.hybrid_command(name='setcoinslog')
+    @commands.hybrid_command(name='setcoinlog', aliases=['setcoinslog'])
     async def set_coins_log(self, ctx, channel: discord.TextChannel):
         if not self.is_dev(ctx):
-            return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setcoinslog`.')
+            return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setcoinlog`.')
         if not ctx.guild: return
         self.setting(ctx.guild.id, 'log_channel_coins', channel.id)
         await ctx.send(f'✅ Coin logs will be sent to {channel.mention}.')
+
+
+    @commands.hybrid_command(name='ticketsetup', description='Post the PokéVanta ticket panel in a channel.')
+    @commands.guild_only()
+    async def ticketsetup(self, ctx, channel: discord.TextChannel):
+        if not await self.require_permission(ctx, 'manage_guild', 'Manage Server'):
+            return
+        if channel.guild.id != ctx.guild.id:
+            return await ctx.send('❌ Choose a channel in this server.')
+        embed = discord.Embed(
+            title='🎫 PokéVanta Support Center',
+            description='Need help, want to report an issue, or have a question? Open a private support ticket below.\n\n🔐 **Private by default** — only you and staff can see your ticket.\n🧑‍💻 **Staff access** — members with Manage Channels or Administrator can assist.\n📌 Please open one ticket per issue.',
+            color=discord.Color.blurple()
+        )
+        embed.set_footer(text='PokéVanta • Support')
+        await channel.send(embed=embed, view=TicketPanelView(self.bot))
+        await ctx.send(f'✅ Ticket panel posted in {channel.mention}. Make sure I have **Manage Channels** permission.')
+
+    @commands.hybrid_command(name='setsuggestions', aliases=['setsuggestion'], description='Configure the suggestion channel.')
+    @commands.guild_only()
+    async def setsuggestions(self, ctx, channel: discord.TextChannel):
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ Only configured PokéVanta bot developers can configure the suggestion channel.')
+        if not ctx.guild:
+            return
+        self.setting(ctx.guild.id, 'suggestion_channel', channel.id)
+        await ctx.send(f'✅ Suggestions will be posted in {channel.mention}. Members can use `!suggest <text>`.')
+
+    @commands.hybrid_command(name='suggest', description='Submit a suggestion to the configured suggestion channel.')
+    @commands.guild_only()
+    async def suggest(self, ctx, *, text: str):
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ The `!suggest` command is restricted to configured PokéVanta bot developers.')
+        if not ctx.guild:
+            return
+        text = text.strip()
+        if not text:
+            return await ctx.send('Usage: `!suggest <your suggestion>`')
+        if len(text) > 1800:
+            return await ctx.send('❌ Suggestions must be 1,800 characters or fewer.')
+        channel_id = self.setting(ctx.guild.id, 'suggestion_channel')
+        channel = ctx.guild.get_channel(int(channel_id)) if channel_id else None
+        if not isinstance(channel, discord.TextChannel):
+            return await ctx.send('❌ Suggestions are not configured yet. A developer must use `!setsuggestions #channel`.')
+        embed = discord.Embed(title='💡 Community Suggestion', description=text, color=discord.Color.gold(),
+                              timestamp=datetime.now(timezone.utc))
+        embed.set_author(name=str(ctx.author), icon_url=ctx.author.display_avatar.url)
+        embed.set_footer(text=f'Suggestion by {ctx.author} • ID {ctx.author.id}')
+        try:
+            msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await msg.add_reaction('✅')
+            await msg.add_reaction('❌')
+            await ctx.send(f'✅ Your suggestion has been posted in {channel.mention}: {msg.jump_url}')
+        except discord.Forbidden:
+            await ctx.send('❌ I need permission to send messages and add reactions in the suggestion channel.')
+        except discord.HTTPException:
+            await ctx.send('❌ I could not post the suggestion. Please check the channel permissions.')
 
     def resolve_role(self, guild, value):
         """Resolve a role from a mention, numeric ID, or exact name."""
@@ -5357,7 +5495,10 @@ class Bot(commands.Bot):
         intents.members = True  # Required for reliable member lists and join/leave events.
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
     async def setup_hook(self):
-        await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self));await load_pokemon_list();await self.tree.sync()
+        await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self))
+        self.add_view(TicketPanelView(self))
+        self.add_view(TicketCloseView(self, 0))
+        await load_pokemon_list();await self.tree.sync()
     async def on_ready(self):
         print(f'Logged in as {self.user}')
         print(f'Loaded {len(POKEMON_LIST)} Pokémon species.')
@@ -5386,47 +5527,46 @@ class Bot(commands.Bot):
                 return
         await self.process_commands(message)
     async def on_command_completion(self, ctx):
-        """Record gameplay command activity for developers only; logs stay in the bot database."""
+        """Persist and deliver completed transaction/game command logs to the right configured channel."""
         if not getattr(ctx, 'command', None) or not ctx.guild:
             return
         name = ctx.command.qualified_name.lower()
-        if any(x in name for x in ('trade', 'market', 'gift', 'giveitem')):
+        content = (getattr(ctx.message, 'content', '') or '').strip()
+        tokens = set(re.findall(r'[a-z0-9_]+', name + ' ' + content.lower()))
+        # Transaction-oriented commands take priority over broad keyword matches.
+        if any(x in tokens for x in ('trade', 'tr', 'market', 'offer', 'listing', 'gift', 'giveitem')) or name.startswith('trade'):
             category = 'trading'
-        elif any(x in name for x in ('coin', 'bet', 'bal', 'daily', 'pay', 'give')):
+        elif any(x in tokens for x in ('shop', 'buy', 'sell', 'coin', 'coins', 'bet', 'bal', 'daily', 'pay', 'give', 'roulette', 'blackjack')):
             category = 'coins'
-        elif any(x in name for x in ('pokemon', 'hunt', 'catch', 'box', 'info', 'team', 'select', 'evolve', 'release', 'useitem')):
+        elif any(x in tokens for x in ('pokemon', 'hunt', 'catch', 'box', 'info', 'team', 'select', 'evolve', 'release', 'useitem', 'dex')):
             category = 'pokemon'
         else:
             category = 'commands'
-        # Pokémon command usage (catch/info/box/team/etc.) is intentionally not sent
-        # to either command logs or Pokémon logs. Shiny acquisitions are logged by
-        # log_rare_shiny_event() to the configured channels instead.
-        if category == 'pokemon':
-            return
-        details = (ctx.message.content or '')[:500]
+        details = content[:500]
         try:
             with db() as c:
                 c.execute('INSERT INTO game_logs(created_at,category,user_id,guild_id,command,details) VALUES(?,?,?,?,?,?)',
                           (datetime.now(timezone.utc).isoformat(), category, ctx.author.id, ctx.guild.id, name, details))
-        except Exception:
-            pass
-        # Mirror completed command activity into the server's configured log channel.
+        except Exception as exc:
+            print(f'[LOG DATABASE ERROR] {type(exc).__name__}: {exc}')
+        # Only transaction/game categories are sent to the requested category logs.
+        # General !setlog remains unchanged and continues to receive other command logs/fallbacks.
         try:
             log_key = {'pokemon': 'log_channel_pokemon', 'trading': 'log_channel_trading', 'coins': 'log_channel_coins'}.get(category, 'log_channel')
             log_id = self.setting(ctx.guild.id, log_key)
             log_channel = ctx.guild.get_channel(int(log_id)) if log_id else None
-            # If a category-specific channel has not been configured (or was deleted),
-            # fall back to the general !setlog channel instead of silently losing logs.
             if log_channel is None:
                 general_id = self.setting(ctx.guild.id, 'log_channel')
                 log_channel = ctx.guild.get_channel(int(general_id)) if general_id else None
             if log_channel:
-                e = discord.Embed(title=f'📋 Game Command · {category.title()}', color=discord.Color.blurple(),
-                                  timestamp=datetime.now(timezone.utc))
+                titles = {'pokemon': 'Pokémon Activity', 'trading': 'Trade / Market Activity',
+                          'coins': 'VantaCoin / Shop Transaction', 'commands': 'Server Command'}
+                e = discord.Embed(title=f'📋 {titles.get(category, "Game Activity")}',
+                                  color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
                 e.add_field(name='User', value=f'{ctx.author} (`{ctx.author.id}`)', inline=True)
                 e.add_field(name='Command', value=f'`{name}`', inline=True)
                 e.add_field(name='Channel', value=getattr(ctx.channel, 'mention', str(ctx.channel)), inline=True)
-                e.add_field(name='Input', value=discord.utils.escape_markdown(details.replace('`', "'") or '(no text)')[:1000], inline=False)
+                e.add_field(name='Details', value=discord.utils.escape_markdown(details.replace('`', "'") or '(no text)')[:1000], inline=False)
                 await log_channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             print(f'[LOG DELIVERY ERROR] command log guild={ctx.guild.id}: {type(exc).__name__}: {exc}')
@@ -5444,9 +5584,9 @@ class Bot(commands.Bot):
             # alone are sent to the detailed Pokémon log and concise rare-spawn log.
             if any(k in custom for k in ('pokemon', 'hunt', 'catch', 'team', 'box')):
                 return
-            if any(k in custom for k in ('trade', 'market', 'offer', 'accept')):
+            if any(k in custom for k in ('trade', 'market', 'offer', 'accept', 'listing')):
                 log_key = 'log_channel_trading'
-            elif any(k in custom for k in ('bet', 'coin', 'roll', 'roulette', 'blackjack', 'hit', 'stand')):
+            elif any(k in custom for k in ('bet', 'coin', 'roll', 'roulette', 'blackjack', 'hit', 'stand', 'shop', 'buy', 'sell')):
                 log_key = 'log_channel_coins'
             else:
                 log_key = 'log_channel'
