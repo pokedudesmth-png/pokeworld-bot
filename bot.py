@@ -202,6 +202,13 @@ def setup():
     with db() as c:
         c.execute('CREATE TABLE IF NOT EXISTS players(user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 500, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, daily INTEGER DEFAULT 0, daily_streak INTEGER DEFAULT 0, started INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS game_logs(log_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, category TEXT NOT NULL, user_id INTEGER, guild_id INTEGER, command TEXT NOT NULL, details TEXT NOT NULL)')
+        c.execute("CREATE TABLE IF NOT EXISTS pv_events(id INTEGER PRIMARY KEY CHECK(id=1), event_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, goal INTEGER NOT NULL, progress INTEGER NOT NULL DEFAULT 0, starts_at INTEGER NOT NULL, ends_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', announcement_channel INTEGER, rewards_claimed INTEGER NOT NULL DEFAULT 0)")
+        c.execute('CREATE TABLE IF NOT EXISTS pv_event_users(event_id INTEGER NOT NULL, user_id INTEGER NOT NULL, points INTEGER NOT NULL DEFAULT 0, joined INTEGER NOT NULL DEFAULT 0, claimed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(event_id,user_id))')
+        c.execute('CREATE TABLE IF NOT EXISTS pv_event_history(archive_id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, event_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, goal INTEGER NOT NULL, progress INTEGER NOT NULL, starts_at INTEGER NOT NULL, ends_at INTEGER NOT NULL, status TEXT NOT NULL)')
+        event_cols=[r[1] for r in c.execute('PRAGMA table_info(pv_events)').fetchall()]
+        if 'paused_at' not in event_cols: c.execute('ALTER TABLE pv_events ADD COLUMN paused_at INTEGER')
+        c.execute('CREATE TABLE IF NOT EXISTS pv_mission_progress(user_id INTEGER NOT NULL, period TEXT NOT NULL, mission_key TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0, claimed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,period,mission_key))')
+        c.execute('CREATE TABLE IF NOT EXISTS pv_mission_points(user_id INTEGER PRIMARY KEY, points INTEGER NOT NULL DEFAULT 0)')
         c.execute("CREATE TABLE IF NOT EXISTS bot_bans(user_id INTEGER PRIMARY KEY, reason TEXT NOT NULL DEFAULT 'Violation of game rules', banned_by INTEGER NOT NULL, banned_at INTEGER NOT NULL)")
         c.execute('CREATE TABLE IF NOT EXISTS nick_freezes(guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, freezer_id INTEGER NOT NULL, original_nick TEXT, locked_nick TEXT, PRIMARY KEY(guild_id,user_id))')
         freeze_cols=[r[1] for r in c.execute('PRAGMA table_info(nick_freezes)').fetchall()]
@@ -860,6 +867,7 @@ class NPCBattleView(TimedView):
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=? AND user_id=?',
                           (max(0, min(self.row[9], self.player_hp)), self.player_status or '', self.row[0], self.uid))
             r=random.randint(80,220);x=random.randint(40,90);add_progress(self.uid,r,x)
+            pv_record_activity(self.uid,'win',1,getattr(inter.guild,'id',None))
             if self.raid:
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
@@ -892,6 +900,7 @@ class NPCBattleView(TimedView):
         if tickmsg: msg+='\n'+tickmsg
         if self.enemy_hp<=0:
             r=random.randint(80,220);x=random.randint(40,90);add_progress(self.uid,r,x)
+            pv_record_activity(self.uid,'win',1,getattr(inter.guild,'id',None))
             if self.raid:
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
@@ -1469,6 +1478,7 @@ class Game(commands.Cog):
             # Starting a hunt does not advance catch progress. Only a successful catch does.
             d=await random_pokemon(); shiny=random.random()<1/128; lvl=random.randint(3,20)
             with db() as c:c.execute('INSERT OR REPLACE INTO encounters(user_id,dex_id,name,shiny,level,hints_used) VALUES(?,?,?,?,?,0)',(uid,d['id'],d['name'],int(shiny),lvl))
+            pv_record_activity(uid,'hunt',1,getattr(ctx.guild,'id',None))
             e=discord.Embed(title='🌿 A wild Pokémon appeared!',description=f'**Catch progress:** {count}/50 • **Level:** {lvl}\n**Type:** ???\n\n👀 Look at the picture and guess the Pokémon!\nUse `!hint` for up to 2 missing-letter hints and `!catch <name>` to catch it. Every 10 successful catches unlocks a legendary boss!')
             if shiny:e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
             art=sprite(d,shiny=shiny)
@@ -1696,6 +1706,7 @@ class Game(commands.Cog):
                 c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(uid,1,iid))
             if not is_global:
                 c.execute('DELETE FROM encounters WHERE user_id=?',(uid,))
+        pv_record_activity(uid,'catch',1,getattr(ctx.guild,'id',None))
         add_progress(uid,coins=50,xp=25)
         if bool(enc[2]) and ctx.guild:
             await log_rare_shiny_event(ctx.guild, ctx.author, display_name(d), action='caught', level=enc[3], image_url=sprite(d, shiny=True))
@@ -5582,6 +5593,227 @@ class CarlStyleExtensions(commands.Cog):
 
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PokéVanta Events & Missions — persistent global event state and trainer goals
+# ─────────────────────────────────────────────────────────────────────────────
+MISSION_DEFS = {
+    'daily': [
+        ('catch', '🌿 Wild Collector', 'Catch 3 Pokémon', 3, 120, 10),
+        ('hunt', '🔎 Field Researcher', 'Start 5 successful hunts', 5, 100, 10),
+        ('win', '⚔️ Battle Ready', 'Win 2 NPC battles', 2, 180, 15),
+    ],
+    'weekly': [
+        ('catch', '🎒 Master Collector', 'Catch 15 Pokémon', 15, 600, 45),
+        ('hunt', '🌎 Wild Explorer', 'Start 25 successful hunts', 25, 500, 40),
+        ('win', '🏆 Battle Veteran', 'Win 10 NPC battles', 10, 900, 60),
+    ],
+}
+
+def pv_period(kind):
+    now = datetime.now(timezone.utc)
+    if kind == 'daily': return now.strftime('%Y-%m-%d')
+    monday = now.date() - timedelta(days=now.weekday())
+    return monday.isoformat()
+
+def pv_ensure_missions(uid):
+    with db() as c:
+        for period in ('daily','weekly'):
+            key = pv_period(period)
+            for mission_key, *_ in MISSION_DEFS[period]:
+                c.execute('INSERT OR IGNORE INTO pv_mission_progress(user_id,period,mission_key,progress,claimed) VALUES(?,?,?,0,0)',(uid,key,mission_key))
+
+def pv_record_activity(uid, activity, amount=1, guild_id=None):
+    """Record only a completed qualifying action; safe to call from battle/catch handlers."""
+    if amount <= 0: return
+    pv_ensure_missions(uid)
+    now = int(time.time())
+    with db() as c:
+        for period in ('daily','weekly'):
+            period_key = pv_period(period)
+            keys = [m[0] for m in MISSION_DEFS[period] if m[0] == activity]
+            for key in keys:
+                c.execute('UPDATE pv_mission_progress SET progress=MIN(progress+?,?) WHERE user_id=? AND period=? AND mission_key=?', (amount, next(m[3] for m in MISSION_DEFS[period] if m[0]==key), uid, period_key, key))
+        event = c.execute("SELECT id,goal,progress,status,ends_at FROM pv_events WHERE id=1").fetchone()
+        if event and event[3] == 'active' and event[4] > now:
+            joined = c.execute('SELECT 1 FROM pv_event_users WHERE event_id=1 AND user_id=? AND joined=1',(uid,)).fetchone()
+            if joined:
+                c.execute('UPDATE pv_event_users SET points=points+? WHERE event_id=1 AND user_id=? AND joined=1',(amount,uid))
+            c.execute("UPDATE pv_events SET progress=MIN(goal,progress+?), status=CASE WHEN progress+?>=goal THEN 'ended' ELSE status END WHERE id=1 AND status='active'",(amount,amount))
+            completed=c.execute("SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status FROM pv_events WHERE id=1 AND status='ended'").fetchone()
+            if completed and completed[5]>=completed[4]:
+                c.execute('INSERT INTO pv_event_history(event_id,event_type,title,description,goal,progress,starts_at,ends_at,status) VALUES(?,?,?,?,?,?,?,?,?)',completed)
+
+def pv_event_embed(row, user_points=0):
+    now=int(time.time()); remaining=max(0,row[7]-now)
+    hours, rem = divmod(remaining,3600); mins=rem//60
+    goal=max(1,int(row[4])); progress=min(goal,int(row[5])); pct=int(progress*100/goal)
+    bar='🟪'*min(10,pct//10)+'⬛'*(10-min(10,pct//10))
+    e=discord.Embed(title=f'🌌 {row[2]}',description=f'{row[3]}\n\n**Global progress**\n{bar} **{progress:,}/{goal:,}** ({pct}%)\n\n**Your contribution:** `{user_points:,} points`\n**Time remaining:** `{hours}h {mins}m`',color=discord.Color.from_rgb(118,83,220))
+    e.add_field(name='Community goal rewards',value='🥉 **25% progress:** milestone unlocked\n🥈 **50% progress:** milestone unlocked\n🥇 **100% progress:** event goal reached; eligible participants can claim the event reward',inline=False)
+    e.set_footer(text='PokéVanta Global Events • progress is shared across participating servers')
+    return e
+
+class EventsMissions(commands.Cog):
+    def __init__(self, bot): self.bot=bot
+
+    async def _announce(self, row, title, description):
+        channel_id=row[9] if len(row)>9 else None
+        if not channel_id: return
+        channel=self.bot.get_channel(int(channel_id))
+        if channel:
+            embed=discord.Embed(title=title,description=description,color=discord.Color.from_rgb(118,83,220),timestamp=discord.utils.utcnow())
+            embed.set_footer(text='PokéVanta Global Event')
+            try: await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException: pass
+
+    @commands.command(name='missions')
+    async def missions(self,ctx,period:str='all'):
+        period=period.lower()
+        if period not in {'all','daily','weekly'}: return await ctx.send('Use `!missions`, `!missions daily`, or `!missions weekly`.')
+        pv_ensure_missions(ctx.author.id)
+        sections=[]
+        with db() as c:
+            for kind in ('daily','weekly'):
+                if period not in ('all',kind): continue
+                period_key=pv_period(kind); lines=[]
+                for key,title,desc,target,coins,points in MISSION_DEFS[kind]:
+                    row=c.execute('SELECT progress,claimed FROM pv_mission_progress WHERE user_id=? AND period=? AND mission_key=?',(ctx.author.id,period_key,key)).fetchone()
+                    progress,claimed=row or (0,0)
+                    mark='✅' if progress>=target and claimed else ('🎁' if progress>=target else '▫️')
+                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • 🪙 {coins} VantaCoins + **{points} MP**'+(' • Claimed' if claimed else ''))
+                sections.append((f'📅 {kind.title()} missions', '\n\n'.join(lines)))
+        e=discord.Embed(title='📜 Trainer Mission Board',description='Complete real gameplay objectives to earn VantaCoins and Mission Points. Claim each completed mission once.',color=discord.Color.from_rgb(65,160,125))
+        for title,value in sections:e.add_field(name=title,value=value,inline=False)
+        e.set_footer(text='Daily missions reset at 00:00 UTC • Weekly missions reset Monday 00:00 UTC')
+        await ctx.send(embed=e)
+
+    @commands.command(name='missionclaim')
+    async def missionclaim(self,ctx):
+        uid=ctx.author.id; pv_ensure_missions(uid); total_coins=total_points=claimed=0
+        with db() as c:
+            for kind in ('daily','weekly'):
+                period_key=pv_period(kind)
+                for key,title,desc,target,coins,points in MISSION_DEFS[kind]:
+                    row=c.execute('SELECT progress,claimed FROM pv_mission_progress WHERE user_id=? AND period=? AND mission_key=?',(uid,period_key,key)).fetchone()
+                    if row and row[0]>=target and not row[1]:
+                        c.execute('UPDATE pv_mission_progress SET claimed=1 WHERE user_id=? AND period=? AND mission_key=?',(uid,period_key,key))
+                        total_coins+=coins;total_points+=points;claimed+=1
+            if total_points:c.execute('INSERT INTO pv_mission_points(user_id,points) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET points=points+excluded.points',(uid,total_points))
+        if not claimed:return await ctx.send(embed=discord.Embed(title='🎁 No rewards to claim',description='Finish a mission first, or you may have already claimed every completed reward. Use `!missions` to check progress.',color=discord.Color.orange()))
+        add_progress(uid,coins=total_coins)
+        e=discord.Embed(title='🎉 Mission rewards claimed!',description=f'**Missions completed:** {claimed}\n**VantaCoins:** +{total_coins:,} {get_vantacoin_emoji()}\n**Mission Points:** +{total_points} MP',color=discord.Color.gold())
+        e.set_footer(text='Keep going, Trainer — new objectives are waiting!')
+        await ctx.send(embed=e)
+
+    @commands.command(name='missionboard')
+    async def missionboard(self,ctx):
+        with db() as c: rows=c.execute('SELECT user_id,points FROM pv_mission_points ORDER BY points DESC,user_id ASC LIMIT 10').fetchall()
+        e=discord.Embed(title='🏆 Mission Hall of Fame',description='\n'.join(f'**{i}.** <@{uid}> — **{points:,} MP**' for i,(uid,points) in enumerate(rows,1)) or 'No mission points yet. Complete missions to claim your place!',color=discord.Color.gold())
+        e.set_footer(text='Rankings are global across PokéVanta servers')
+        await ctx.send(embed=e)
+
+    @commands.command(name='event')
+    async def event(self,ctx,action:str='status',*,argument:str=''):
+        action=action.lower(); uid=ctx.author.id
+        with db() as c: row=c.execute('SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status,announcement_channel,rewards_claimed FROM pv_events WHERE id=1').fetchone()
+        if row and row[8]=='active' and row[7]<=int(time.time()):
+            with db() as c:
+                ended_at=int(time.time())
+                c.execute("UPDATE pv_events SET status='ended' WHERE id=1 AND status='active'")
+                c.execute("INSERT INTO pv_event_history(event_id,event_type,title,description,goal,progress,starts_at,ends_at,status) SELECT id,event_type,title,description,goal,progress,starts_at,?,'ended' FROM pv_events WHERE id=1 AND NOT EXISTS (SELECT 1 FROM pv_event_history WHERE event_id=1 AND ends_at=?)",(ended_at,ended_at))
+                row=c.execute('SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status,announcement_channel,rewards_claimed FROM pv_events WHERE id=1').fetchone()
+        if action in {'status','', 'join','rewards','leaderboard','claim','history'}:
+            if action=='history':
+                with db() as c: history=c.execute('SELECT title,progress,goal,starts_at,ends_at,status FROM pv_event_history ORDER BY archive_id DESC LIMIT 10').fetchall()
+                lines=[]
+                for title,progress,goal,started,ended,status in history:
+                    lines.append(f'**{title}** — {min(progress,goal):,}/{goal:,} points • {datetime.fromtimestamp(started,timezone.utc).strftime("%d %b %Y")} to {datetime.fromtimestamp(ended,timezone.utc).strftime("%d %b %Y")} • `{status}`')
+                e=discord.Embed(title='📚 Global Event Archives',description='\n'.join(lines) or 'No completed events have been archived yet.',color=discord.Color.blurple())
+                return await ctx.send(embed=e)
+            if not row or row[8] not in {'active','paused','ended'} or (row[8]=='active' and row[7]<=int(time.time())):
+                return await ctx.send(embed=discord.Embed(title='🌙 No active global event',description='The wilds are quiet for now. A developer can launch the next adventure; check back soon!',color=discord.Color.blurple()))
+            if action=='join':
+                with db() as c:c.execute('INSERT INTO pv_event_users(event_id,user_id,points,joined,claimed) VALUES(1,?,0,1,0) ON CONFLICT(event_id,user_id) DO UPDATE SET joined=1',(uid,))
+                return await ctx.send(embed=discord.Embed(title='🧭 You joined the event!',description=f'You are registered for **{row[2]}**. Qualifying successful gameplay actions will add contribution points automatically.',color=discord.Color.green()))
+            with db() as c:
+                user=c.execute('SELECT points,joined,claimed FROM pv_event_users WHERE event_id=1 AND user_id=?',(uid,)).fetchone()
+            points=user[0] if user else 0
+            if action=='leaderboard':
+                with db() as c: leaders=c.execute('SELECT user_id,points FROM pv_event_users WHERE event_id=1 AND joined=1 ORDER BY points DESC,user_id ASC LIMIT 10').fetchall()
+                e=discord.Embed(title=f'🏆 {row[2]} — Global Leaderboard',description='\n'.join(f'**{i}.** <@{u}> — **{pts:,} pts**' for i,(u,pts) in enumerate(leaders,1)) or 'No trainers have contributed yet.',color=discord.Color.gold());e.set_footer(text='Global rankings across all PokéVanta servers');return await ctx.send(embed=e)
+            if action=='rewards':
+                e=discord.Embed(title='🎁 Event Rewards',description='**Participation reward:** 100 VantaCoins if the event ends before the global goal is reached.\n**Goal completion reward:** 500 VantaCoins if the global target is reached.\n\nJoin with `!event join` and use `!event claim` when the event ends or reaches its goal.',color=discord.Color.gold());return await ctx.send(embed=e)
+            if action=='claim':
+                if row[8]!='ended' and row[5]<row[4]:return await ctx.send('⏳ Event rewards become claimable when the event ends or its goal is reached.')
+                if not user or not user[1]:return await ctx.send('Join the event with `!event join` and contribute before claiming rewards.')
+                if user[2]:return await ctx.send('✅ You have already claimed this event reward.')
+                reward=500 if row[5]>=row[4] else 100
+                with db() as c:c.execute('UPDATE pv_event_users SET claimed=1 WHERE event_id=1 AND user_id=? AND claimed=0',(uid,))
+                add_progress(uid,coins=reward)
+                return await ctx.send(embed=discord.Embed(title='🎉 Event reward claimed!',description=f'You received **{reward:,} {get_vantacoin_emoji()} VantaCoins** for participating in **{row[2]}**.',color=discord.Color.gold()))
+            return await ctx.send(embed=pv_event_embed(row,points))
+        if uid not in OWNER_IDS:return await ctx.send('🔒 Event management commands are restricted to PokéVanta developers.')
+        if action=='start':
+            parts=argument.split('|'); etype=(parts[0].strip().lower() if parts else 'rift')
+            valid={'rift':'🌌 The Mystery of the Rift','surge':'✨ Shiny Surge','invasion':'🔥 Legendary Invasion'}
+            if etype not in valid:return await ctx.send('Use `!event start rift`, `!event start surge`, or `!event start invasion`.')
+            goal=1000;duration=24;channel_id=ctx.channel.id
+            if len(parts)>1:
+                try:goal=max(100,min(1000000,int(parts[1])))
+                except ValueError:return await ctx.send('Goal must be a number between 100 and 1,000,000.')
+            if len(parts)>2:
+                try:duration=max(1,min(168,int(parts[2])))
+                except ValueError:return await ctx.send('Duration must be between 1 and 168 hours.')
+            title=valid[etype];desc={'rift':'Strange energy is spreading through the wild! Catch Pokémon and win battles to help stabilize the rift.','surge':'A wave of unusual energy has swept the region. Explore and collect Pokémon to contribute to the Shiny Surge!','invasion':'A legendary threat has appeared. Trainers everywhere must prove their strength and contribute to the global challenge!'}[etype]
+            with db() as c:
+                old=c.execute('SELECT status,ends_at FROM pv_events WHERE id=1').fetchone()
+                if old and old[0] in {'active','paused'} and old[1]>int(time.time()):return await ctx.send('⚠️ A global event is already active. Use `!event status` or end it first with `!event end`.')
+                c.execute('INSERT OR REPLACE INTO pv_events(id,event_type,title,description,goal,progress,starts_at,ends_at,status,announcement_channel,rewards_claimed) VALUES(1,?,?,?, ?,0,?,?,\'active\',?,0)',(etype,title,desc,goal,int(time.time()),int(time.time())+duration*3600,channel_id))
+                c.execute('DELETE FROM pv_event_users WHERE event_id=1')
+                fresh=c.execute('SELECT id,event_type,title,description,goal,progress,starts_at,ends_at,status,announcement_channel,rewards_claimed FROM pv_events WHERE id=1').fetchone()
+            e=pv_event_embed(fresh,0);e.title='🌠 A New Global Event Begins!';e.set_footer(text=f'Event launched by {ctx.author.display_name} • Join with !event join');await ctx.send(embed=e)
+            await self._announce(fresh,'🌠 A New Global Event Begins!',f'**{title}** has begun! Use `!event` to view progress and `!event join` to register.');return
+        if action=='end':
+            with db() as c:
+                if not row or row[8] not in {'active','paused'}:return await ctx.send('There is no active event to end.')
+                ended_at=int(time.time())
+                c.execute("UPDATE pv_events SET status='ended',ends_at=? WHERE id=1",(ended_at,))
+                c.execute("INSERT INTO pv_event_history(event_id,event_type,title,description,goal,progress,starts_at,ends_at,status) SELECT id,event_type,title,description,goal,progress,starts_at,?,'ended' FROM pv_events WHERE id=1",(ended_at,))
+            return await ctx.send(embed=discord.Embed(title='🏁 Global event ended',description=f'**{row[2]}** has ended. Eligible participants can use `!event claim`.',color=discord.Color.gold()))
+        if action=='pause':
+            now=int(time.time())
+            with db() as c:c.execute("UPDATE pv_events SET status='paused',paused_at=? WHERE id=1 AND status='active'",(now,))
+            return await ctx.send('⏸️ Global event paused. Its timer is frozen until `!event resume`.')
+        if action=='resume':
+            now=int(time.time())
+            with db() as c:
+                c.execute("UPDATE pv_events SET ends_at=ends_at+CASE WHEN paused_at IS NOT NULL THEN ?-paused_at ELSE 0 END,paused_at=NULL,status='active' WHERE id=1 AND status='paused'",(now,))
+            return await ctx.send('▶️ Global event resumed; the remaining time has been preserved.')
+        if action=='setgoal':
+            try:goal=max(100,min(1000000,int(argument.strip())))
+            except ValueError:return await ctx.send('Usage: `!event setgoal <100-1000000>`.')
+            with db() as c:cur=c.execute('UPDATE pv_events SET goal=? WHERE id=1',(goal,))
+            if cur.rowcount==0:return await ctx.send('No event exists. Start one with `!event start rift`.')
+            return await ctx.send(f'🎯 Global event goal updated to **{goal:,} points**.')
+        if action=='setduration':
+            try:hours=max(1,min(168,int(argument.strip())))
+            except ValueError:return await ctx.send('Usage: `!event setduration <hours>`.')
+            with db() as c:cur=c.execute('UPDATE pv_events SET ends_at=?,paused_at=NULL WHERE id=1',(int(time.time())+hours*3600,))
+            if cur.rowcount==0:return await ctx.send('No event exists. Start one with `!event start rift`.')
+            return await ctx.send(f'⏱️ Global event duration updated to **{hours} hours** from now.')
+        if action=='announce':
+            if not row:return await ctx.send('No event exists to announce.')
+            await self._announce(row,'🌌 Global Event Update',f'**{row[2]}** is underway! Use `!event` for progress.');return await ctx.send('📣 Event announcement sent to its configured channel, if available.')
+        if action=='status':return await ctx.send('No active event.')
+        return await ctx.send('Unknown event action. Use `!event` for status or developer actions: `start`, `end`, `pause`, `resume`, `setgoal`, `setduration`, `announce`.')
+
+    @commands.command(name='eventhelp')
+    async def eventhelp(self,ctx):
+        e=discord.Embed(title='🌌 PokéVanta Events & Missions',description='**Player commands**\n`!missions [daily|weekly]` · View objectives\n`!missionclaim` · Claim completed missions\n`!missionboard` · Global mission rankings\n`!event` · View the current global event\n`!event join` · Register for the event\n`!event rewards` · View rewards\n`!event leaderboard` · Global event rankings\n`!event claim` · Claim eligible event rewards\n`!event history` · Event archive\n\n**Developer commands**\n`!event start rift|surge|invasion` · Start a global event\n`!event end` · End it\n`!event pause` / `!event resume` · Pause or resume\n`!event setgoal <points>` · Change target\n`!event setduration <hours>` · Change remaining duration\n`!event announce` · Reannounce event',color=discord.Color.from_rgb(118,83,220))
+        e.set_footer(text='Global event data is stored in the configured database file')
+        await ctx.send(embed=e)
+
+
 class Bot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -5589,7 +5821,7 @@ class Bot(commands.Bot):
         intents.members = True  # Required for reliable member lists and join/leave events.
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
     async def setup_hook(self):
-        await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self))
+        await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self));await self.add_cog(EventsMissions(self))
         self.add_view(TicketPanelView(self))
         self.add_view(TicketCloseView(self, 0))
         await load_pokemon_list();await self.tree.sync()
