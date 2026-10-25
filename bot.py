@@ -219,16 +219,24 @@ TYPE_CHART = {
 
 @contextmanager
 def db():
-    """Provide a short-lived SQLite connection and always close it after use.
+    """Open a short-lived, consistently configured SQLite connection.
 
-    sqlite3.Connection's built-in context manager commits/rolls back but does
-    not close the connection. Since the bot uses ``with db() as c`` throughout,
-    explicitly closing here prevents hundreds of idle connections accumulating.
+    WAL allows readers while a writer is active. Keep transactions short, wait
+    briefly for normal contention, and always close the connection. SQLite still
+    permits only one writer at a time, so only one bot process should use this
+    database file at once.
     """
-    conn = sqlite3.connect(DB, timeout=10.0, isolation_level='DEFERRED')
+    conn = sqlite3.connect(
+        DB,
+        timeout=8.0,
+        isolation_level='DEFERRED',
+        cached_statements=256,
+    )
     try:
-        conn.execute('PRAGMA busy_timeout=10000')
+        conn.execute('PRAGMA busy_timeout=8000')
         conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         yield conn
         if conn.in_transaction:
             conn.commit()
@@ -267,14 +275,20 @@ def pv_candy_quest_progress(uid, kind, amount=1):
         c.execute(f'UPDATE pv_candy_quests SET {column}=MIN({column}+?,?) WHERE user_id=? AND day_key=?', (max(0,int(amount)), {'catches':5,'wins':3,'fish':3}[column], uid, day))
 
 def setup():
-    # WAL lets reads continue while a command writes; busy_timeout handles brief competing writes.
+    # Configure WAL once at startup. Explicitly close this connection; sqlite3's
+    # connection context manager commits/rolls back but does not close it.
+    _conn = None
     try:
-        with sqlite3.connect(DB, timeout=30.0) as _conn:
-            _conn.execute('PRAGMA busy_timeout=30000')
-            _conn.execute('PRAGMA journal_mode=WAL')
-            _conn.execute('PRAGMA synchronous=NORMAL')
+        _conn = sqlite3.connect(DB, timeout=8.0)
+        _conn.execute('PRAGMA busy_timeout=8000')
+        _conn.execute('PRAGMA journal_mode=WAL')
+        _conn.execute('PRAGMA synchronous=NORMAL')
+        _conn.execute('PRAGMA wal_autocheckpoint=1000')
     except sqlite3.Error as _db_error:
         print(f'[DATABASE WARNING] Could not enable WAL mode: {_db_error}')
+    finally:
+        if _conn is not None:
+            _conn.close()
     with db() as c:
         c.execute('CREATE TABLE IF NOT EXISTS players(user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 500, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, daily INTEGER DEFAULT 0, daily_streak INTEGER DEFAULT 0, started INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS game_logs(log_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, category TEXT NOT NULL, user_id INTEGER, guild_id INTEGER, command TEXT NOT NULL, details TEXT NOT NULL)')
@@ -1811,15 +1825,23 @@ class Game(commands.Cog):
             return await ctx.send('❌ I could not find that species in the fishing collection. Use `!fish inventory` to see your catches, then `!fish transfer <Pokémon name>`.')
         fish_key, fish_name, rarity, sell_value, weight, activity = match
         # The species list is loaded during startup; use it to obtain the canonical Pokédex ID.
-        species = next((item for item in POKEMON_LIST if item.get('name', '').lower() == fish_key), None)
-        if not species:
+        normalized_name = fish_key.replace('-', ' ').lower()
+        species = next((item for item in POKEMON_LIST if str(item.get('name', '')).replace('-', ' ').lower() == normalized_name and item.get('id') is not None), None)
+        dex_id = None
+        if species:
+            try:
+                dex_id = int(species.get('id'))
+            except (TypeError, ValueError):
+                dex_id = None
+        if dex_id is None:
             try:
                 details = await pokemon_data(fish_key)
-                dex_id = int(details['id'])
-            except Exception:
-                return await ctx.send('⚠️ Pokémon data is temporarily unavailable. Please try again shortly.')
-        else:
-            dex_id = int(species['id'])
+                raw_id = details.get('id') if isinstance(details, dict) else None
+                if raw_id is None:
+                    raw_id = details.get('dex_id') if isinstance(details, dict) else None
+                dex_id = int(raw_id)
+            except (Exception, TypeError, ValueError):
+                return await ctx.send('⚠️ Pokémon data did not include a valid Pokédex ID. Your fish is still in your Fish Basket; please try again shortly.')
         try:
             with db() as c:
                 row = c.execute('SELECT amount FROM pv_fish_inventory WHERE user_id=? AND fish_key=?', (uid, fish_key)).fetchone()
@@ -1831,8 +1853,7 @@ class Game(commands.Cog):
                     return await ctx.send('🧺 That catch is no longer available in your basket.')
                 c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,xp,shiny,hp,max_hp,held_item,status_condition) VALUES(?,?,?,?,?,?,?,?,?,?)', (uid, dex_id, fish_name.lower(), 5, 0, 0, 20, 20, '', ''))
                 instance_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
-                existing = c.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=? AND box_id IS NOT NULL', (uid,)).fetchone()[0]
-                c.execute('UPDATE pokemon SET box_id=? WHERE instance_id=?', (existing, instance_id))
+                existing = assign_box_id(c, uid, instance_id)
         except sqlite3.Error as exc:
             return await ctx.send(f'❌ Database issue while transferring your catch. Your fish should remain safe; please try again. (`{type(exc).__name__}`)')
         e = discord.Embed(title='📦 Pokémon Transferred to Your Box!', description=f'**{fish_name}** ({rarity}) has left your Fish Basket and joined your Pokémon collection as a normal Pokémon.\n\n**Box ID:** `{existing}` · **Level:** 5\nUse `!box` to view it and `!team` to manage your team.', color=discord.Color.from_rgb(126, 82, 220))
