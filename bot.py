@@ -228,12 +228,12 @@ def db():
     """
     conn = sqlite3.connect(
         DB,
-        timeout=8.0,
+        timeout=30.0,
         isolation_level='DEFERRED',
         cached_statements=256,
     )
     try:
-        conn.execute('PRAGMA busy_timeout=8000')
+        conn.execute('PRAGMA busy_timeout=30000')
         conn.execute('PRAGMA foreign_keys=ON')
         conn.execute('PRAGMA synchronous=NORMAL')
         conn.execute('PRAGMA temp_store=MEMORY')
@@ -279,8 +279,8 @@ def setup():
     # connection context manager commits/rolls back but does not close it.
     _conn = None
     try:
-        _conn = sqlite3.connect(DB, timeout=8.0)
-        _conn.execute('PRAGMA busy_timeout=8000')
+        _conn = sqlite3.connect(DB, timeout=30.0)
+        _conn.execute('PRAGMA busy_timeout=30000')
         _conn.execute('PRAGMA journal_mode=WAL')
         _conn.execute('PRAGMA synchronous=NORMAL')
         _conn.execute('PRAGMA wal_autocheckpoint=1000')
@@ -368,14 +368,31 @@ def assign_box_id(conn, uid, instance_id):
     return new_id
 
 def transfer_pokemon_owner(conn, instance_id, old_uid, new_uid):
-    """Transfer internal Pokémon identity while assigning a fresh ID in the recipient's box."""
-    if new_uid and int(new_uid)!=0:
-        row=conn.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=?',(new_uid,)).fetchone()
-        new_box_id=int(row[0] or 1)
-    else: new_box_id=None
-    for table in ('team','boss_party','raid_party'):
-        conn.execute(f'DELETE FROM {table} WHERE instance_id=?',(instance_id,))
-    conn.execute('UPDATE pokemon SET user_id=?,box_id=? WHERE instance_id=? AND user_id=?',(new_uid,new_box_id,instance_id,old_uid))
+    """Transfer a Pokémon and keep both affected player boxes contiguous.
+
+    Internal instance_id is never changed; only the user-facing box_id is
+    compacted, so teams and other internal references remain stable.
+    """
+    if new_uid and int(new_uid) != 0:
+        row = conn.execute(
+            'SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=?',
+            (new_uid,)
+        ).fetchone()
+        new_box_id = int(row[0] or 1)
+    else:
+        new_box_id = None
+    for table in ('team', 'boss_party', 'raid_party'):
+        conn.execute(f'DELETE FROM {table} WHERE instance_id=?', (instance_id,))
+    cur = conn.execute(
+        'UPDATE pokemon SET user_id=?,box_id=? WHERE instance_id=? AND user_id=?',
+        (new_uid, new_box_id, instance_id, old_uid)
+    )
+    if cur.rowcount:
+        if old_uid and int(old_uid) != 0:
+            compact_box_ids(conn, int(old_uid))
+        if new_uid and int(new_uid) != 0:
+            compact_box_ids(conn, int(new_uid))
+            new_box_id = get_box_id(conn, int(new_uid), instance_id)
     return new_box_id
 
 
@@ -1432,10 +1449,10 @@ class BoxView(TimedView):
         return True
     @discord.ui.button(label='Previous',emoji='⬅️',style=discord.ButtonStyle.secondary)
     async def previous(self,interaction,button):
-        self.page=max(0,self.page-1); self.update_buttons(); current=self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]; await ensure_box_pokemon_emojis(self.guild,current); await interaction.response.edit_message(embed=self.make_embed(),view=self)
+        self.page=max(0,self.page-1); self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(),view=self)
     @discord.ui.button(label='Next',emoji='➡️',style=discord.ButtonStyle.primary)
     async def next(self,interaction,button):
-        self.page=min(self.pages-1,self.page+1); self.update_buttons(); current=self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]; await ensure_box_pokemon_emojis(self.guild,current); await interaction.response.edit_message(embed=self.make_embed(),view=self)
+        self.page=min(self.pages-1,self.page+1); self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(),view=self)
 
 
 class DexView(TimedView):
@@ -1686,6 +1703,7 @@ class Game(commands.Cog):
         now = int(time.time())
         cooldown = 30
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
             c.execute('INSERT OR IGNORE INTO pv_fishing_cooldowns(user_id,last_cast) VALUES(?,0)', (uid,))
             last = c.execute('SELECT last_cast FROM pv_fishing_cooldowns WHERE user_id=?', (uid,)).fetchone()[0]
             if now - last < cooldown:
@@ -3049,6 +3067,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 if not c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=0',(pokemon_id,)).fetchone(): c.rollback(); return await ctx.send('❌ Listing could not be verified. Please contact an administrator.')
                 c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(price,ctx.author.id))
                 new_box_id=transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
+                new_box_id=get_box_id(c,ctx.author.id,pokemon_id)
                 c.execute("UPDATE market_listings SET status='sold',buyer_id=?,proceeds=? WHERE listing_id=? AND status='active'",(ctx.author.id,price,lid)); c.commit()
             e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** from <@{seller}>!',color=discord.Color.green())
             e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{new_box_id}`',inline=True)
@@ -4386,7 +4405,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             with db() as c:
                 c.execute('DELETE FROM team WHERE instance_id=?',(pokemon_id,))
                 c.execute('DELETE FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,member.id))
-            return f'Removed {"✨ Shiny " if row[2] else ""}**{row[1].title()}** Lv. {row[3]} (ID `{public_box_id}`) from {member.mention}.'
+                compact_box_ids(c, member.id)
+            return f'Removed {"✨ Shiny " if row[2] else ""}**{row[1].title()}** Lv. {row[3]} (ID `{public_box_id}`) from {member.mention}. Their remaining box IDs have been reordered.'
         await self.dev_confirmation(ctx,'Confirm Pokémon removal',f'Remove **{row[1].title()}** (ID `{public_box_id}`) from {member.mention}?',action)
 
     @commands.command(name='setupitememojis')
@@ -4794,8 +4814,6 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 for pid in ob['pokemon']: transfer_pokemon_owner(c,pid,b,a)
                 # Keep each visible box numbered 1..N after Pokémon leave/arrive.
                 # This changes only box_id; internal instance_id references stay intact.
-                compact_box_ids(c, a)
-                compact_box_ids(c, b)
         except (ValueError, sqlite3.Error) as exc:
             trade['confirmed'].clear(); await ctx.send(f'❌ Trade not completed: {exc}')
             return
