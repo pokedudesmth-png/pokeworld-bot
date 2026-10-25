@@ -1702,14 +1702,25 @@ class Game(commands.Cog):
         uid = ctx.author.id
         now = int(time.time())
         cooldown = 30
-        with db() as c:
-            c.execute('BEGIN IMMEDIATE')
-            c.execute('INSERT OR IGNORE INTO pv_fishing_cooldowns(user_id,last_cast) VALUES(?,0)', (uid,))
-            last = c.execute('SELECT last_cast FROM pv_fishing_cooldowns WHERE user_id=?', (uid,)).fetchone()[0]
-            if now - last < cooldown:
-                remaining = cooldown - (now - last)
-                return await ctx.send(f'🎣 Your line is still settling! Try again in **{remaining}s**.')
-            c.execute('UPDATE pv_fishing_cooldowns SET last_cast=? WHERE user_id=?', (now, uid))
+        # Keep the write transaction strictly database-only: never await Discord
+        # network I/O while holding SQLite's single-writer lock.
+        remaining = 0
+        try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                c.execute('INSERT OR IGNORE INTO pv_fishing_cooldowns(user_id,last_cast) VALUES(?,0)', (uid,))
+                row = c.execute('SELECT last_cast FROM pv_fishing_cooldowns WHERE user_id=?', (uid,)).fetchone()
+                last = int(row[0]) if row else 0
+                if now - last < cooldown:
+                    remaining = cooldown - (now - last)
+                else:
+                    c.execute('UPDATE pv_fishing_cooldowns SET last_cast=? WHERE user_id=?', (now, uid))
+        except sqlite3.OperationalError as exc:
+            if 'locked' in str(exc).lower() or 'busy' in str(exc).lower():
+                return await ctx.send('⚠️ The game database is busy right now. Please retry in a few seconds. If this keeps happening, make sure only one PokéVanta process is running against this database.')
+            raise
+        if remaining > 0:
+            return await ctx.send(f'🎣 Your line is still settling! Try again in **{remaining}s**.')
 
         # Chance-based fishing: most casts catch a Pokémon, while some have no bite
         # or the Pokémon escapes. A successful catch still uses the rarity-weighted table.
