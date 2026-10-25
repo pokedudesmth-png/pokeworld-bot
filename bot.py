@@ -1,4 +1,5 @@
 import os, random, sqlite3, asyncio, time, re, json, base64, inspect, io
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -216,12 +217,27 @@ TYPE_CHART = {
 'steel':{'fire':.5,'water':.5,'electric':.5,'ice':2,'rock':2,'steel':.5,'fairy':2}, 'fairy':{'fire':.5,'fighting':2,'poison':.5,'dragon':2,'dark':2,'steel':.5}}
 
 
+@contextmanager
 def db():
-    """Open a short-lived SQLite connection configured for concurrent bot commands."""
-    conn = sqlite3.connect(DB, timeout=30.0, isolation_level='DEFERRED')
-    conn.execute('PRAGMA busy_timeout=30000')
-    conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    """Provide a short-lived SQLite connection and always close it after use.
+
+    sqlite3.Connection's built-in context manager commits/rolls back but does
+    not close the connection. Since the bot uses ``with db() as c`` throughout,
+    explicitly closing here prevents hundreds of idle connections accumulating.
+    """
+    conn = sqlite3.connect(DB, timeout=10.0, isolation_level='DEFERRED')
+    try:
+        conn.execute('PRAGMA busy_timeout=10000')
+        conn.execute('PRAGMA foreign_keys=ON')
+        yield conn
+        if conn.in_transaction:
+            conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def pv_battle_cooldown_remaining(uid, battle_type='npc', now=None):
