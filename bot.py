@@ -1575,19 +1575,9 @@ class Game(commands.Cog):
             await ctx.send('⚠️ You cannot start a raid battle while a hunt or legendary battle is active. Finish that encounter first.')
             return False
 
-        # Lock unrelated commands while a hunt, NPC battle, raid, legendary fight, or PvP challenge is active.
-        # Encounter controls remain available so the player can finish or cancel the activity.
-        active_view = ACTIVE_VIEWS.get(uid)
-        active_activity = bool(hunt_active or legendary_active or raid_active or active_view is not None)
-        encounter_controls = {
-            'hint','i','clue','catch','c','guess','cancel','stop','quit',
-            'battle','fight','b','pvp','duel','challenge','chall','legendarybattle','lbattle','lgbattle','bossfight',
-            'raid','tradeaccept'
-        }
-        # `!raid` is allowed only for its active encounter controls; starting another raid is blocked above.
-        if active_activity and name not in encounter_controls:
-            await ctx.send('⏳ Finish or cancel your current hunt/battle first. Other commands are temporarily locked while it is active.')
-            return False
+        # IMPORTANT: An active encounter must not lock ordinary commands.
+        # Players can still use !box, !add, !daily, inventory, profile, etc.
+        # Only the mutual-exclusion checks above prevent starting conflicting encounters.
         # Prevent restarting the same activity while it is active.
         if is_hunt and hunt_active:
             await ctx.send('⚠️ You already have an active hunt. Finish it or use `!cancel` first.')
@@ -3517,16 +3507,32 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
     @commands.command(name='daily',aliases=['d','claim'],description='Claim your daily VantaCoin and Pokémon reward.')
     async def daily(self,ctx):
-        coins,xp,l,last,streak=get_player(ctx.author.id);now=int(time.time());uid=ctx.author.id
-        if now-last<86400:return await ctx.send(f'⏳ Come back in {(86400-now+last)//3600}h.')
-        if last and now-last<=172800: streak+=1
-        else: streak=1
+        uid=ctx.author.id
+        coins,xp,l,last,streak=get_player(uid)
+        now=int(time.time())
+        if last and now-last<86400:
+            remaining=max(0,86400-(now-last))
+            hours,seconds=divmod(remaining,3600)
+            minutes=(seconds//60)
+            return await ctx.send(f'⏳ Your daily reward is already claimed. Come back in **{hours}h {minutes}m**.')
+        if not POKEMON_LIST:
+            return await ctx.send('⚠️ The Pokémon list is still loading. Your daily reward has not been claimed; please try again shortly.')
+        if last and now-last<=172800:
+            streak+=1
+        else:
+            streak=1
         legendary=streak%50==0
         if legendary:
-            candidates=[x for x in POKEMON_LIST if x['name'] in LEGENDARY_NAMES]
+            candidates=[x for x in POKEMON_LIST if x.get('name') in LEGENDARY_NAMES]
         else:
-            candidates=[x for x in POKEMON_LIST if x['name'] not in LEGENDARY_NAMES]
-        pick=await pokemon_data(random.choice(candidates)['name'])
+            candidates=[x for x in POKEMON_LIST if x.get('name') not in LEGENDARY_NAMES]
+        # Avoid a crash if the API's loaded catalogue has no entries in one category.
+        if not candidates:
+            candidates=list(POKEMON_LIST)
+        try:
+            pick=await pokemon_data(random.choice(candidates)['name'])
+        except Exception:
+            return await ctx.send('⚠️ Could not load your daily Pokémon right now. No reward or streak was consumed; please try again shortly.')
         lvl=random.randint(10,30); mh=max_hp(pick,lvl)
         with db() as c:
             c.execute('UPDATE players SET coins=coins+?,daily=?,daily_streak=? WHERE user_id=?',(2000,now,streak,uid))
@@ -6263,42 +6269,14 @@ def pv_event_reward_tier(contribution):
 
 
 def pv_event_catalog_embed():
-    """Public reference for every configured event type and its real reward settings."""
     e = discord.Embed(
-        title='🌌 PokéVanta Global Event Guide',
-        description=(
-            'All event types currently supported by PokéVanta are listed below. '
-            "These are event templates; the active event's actual goal and end time are set when a developer launches it.\n\n"
-            '**How global events work:** use `!event join` to register, then complete successful hunts, catches, and NPC battle wins. '
-            'Each qualifying recorded action adds contribution to the shared global progress. Personal contribution is tracked only for joined trainers. '
-            'Rewards are based on your personal contribution, not just joining: at least 25 contribution points are required. Higher tiers unlock at 75, 150, and 300 points. When the event ends or the community goal is reached, eligible joined trainers can use `!event claim` once.'
-        ),
+        title='🌌 PokéVanta Events',
+        description='Choose an event for its complete rules, tasks, story, and rewards: `!eventinfo <event>`.\nUse `!event` to check the current event.',
         color=discord.Color.from_rgb(118, 83, 220),
     )
     for key, cfg in EVENT_TYPES.items():
-        value = (
-            f"{cfg['description']}\n"
-            f"**Maximum event reward (Elite tier):** 50 Event Tokens\n"
-            f"**Achievement:** {cfg['flavor']} at 150+ contribution; Elite Contributor at 300+. No badge for joining alone.\n"
-            '**If the global goal is reached:** an additional bonus of up to 50,000 VantaCoins + 250 MP, scaled to your contribution tier.'
-        )
-        e.add_field(name=f"{cfg['title']} · `{key}`", value=value, inline=False)
-    e.add_field(
-        name='📌 Shared rules and commands',
-        value=(
-            '`!events` / `!event info` — this complete event guide\n'
-            '`!event` — current event status, progress, and remaining time\n'
-            '`!event join` — register for the current event\n'
-            '`!event rewards` — rewards for the currently active/most recent event\n'
-            '`!event leaderboard` — top joined participants\n'
-            '`!event history` — recently archived events\n'
-            '`!event badges` — your earned achievements and leaderboard medals\n'
-            '`!eventhelp` — all player and developer event commands\n\n'
-            'Developers choose the actual global goal (100–1,000,000 points) and duration (1–168 hours) when starting an event. '
-            'Event Tokens are the main event currency. Earn 5/15/30/50 tokens at 25/75/150/300 contribution points, plus a community-clear bonus. Spend them in `!event shop`. '        ),
-        inline=False,
-    )
-    e.set_footer(text='Public information • anyone can view this guide; event management remains developer-only')
+        e.add_field(name=f"{cfg['title']} · `{key}`", value=cfg['description'], inline=False)
+    e.set_footer(text='Event keys: rift, surge, fossil, champion, angler, showdown')
     return e
 
 
@@ -6334,10 +6312,8 @@ def pv_event_embed(row, user_points=0):
     filled=min(12,pct//(100//12))
     bar='🟪'*filled+'▫️'*(12-filled)
     stage, upcoming = pv_event_stage(row[1], pct)
-    next_text = f"\n**Next chapter:** {upcoming[1]} at {upcoming[0]}%" if upcoming else '\n**All chapters unlocked!**'
-    e=discord.Embed(title=f'{row[2]}',description=f'{row[3]}\n\n**📍 Current chapter**\n{stage[1]}\n{stage[2]}\n\n**🌍 Community progress**\n{bar} **{progress:,}/{goal:,}** · **{pct}%**{next_text}\n\n**🧭 Your contribution:** `{user_points:,} points`\n**⏳ Time remaining:** `{hours}h {mins}m`',color=discord.Color.from_rgb(118,83,220))
-    e.add_field(name='🎁 Community milestones',value=f"{'✅' if pct >= 25 else '🔒'} **25%** — First community breakthrough\n{'✅' if pct >= 50 else '🔒'} **50%** — Halfway milestone\n{'✅' if pct >= 100 else '🔒'} **100%** — Final goal; eligible participants unlock a contribution-scaled bonus of up to **50,000 VantaCoins + 250 MP**",inline=False)
-    e.add_field(name='🗺️ Your next move',value='Use `!event join` to register, `!event rewards` to see the event-specific activities, and `!event leaderboard` to check the standings. Only qualifying actions after joining count.',inline=False)
+    next_text = f"\n**Next:** {upcoming[1]} at {upcoming[0]}%" if upcoming else '\n**All chapters unlocked!**'
+    e=discord.Embed(title=f'{row[2]}',description=f'{row[3]}\n\n**Chapter:** {stage[1]}\n{bar} **{progress:,}/{goal:,}** · **{pct}%**{next_text}\n**Your contribution:** `{user_points:,} pts` · **Time left:** `{hours}h {mins}m`\nJoin: `!event join` · Rewards: `!event rewards` · Info: `!eventinfo {row[1]}`',color=discord.Color.from_rgb(118,83,220))
     e.set_footer(text='PokéVanta • Global event progress is shared across participating servers')
     return pv_apply_event_image(e, row[1] if len(row) > 1 else None)
 
@@ -6489,8 +6465,10 @@ class EventsMissions(commands.Cog):
                 lines=[f'🏅 **{name}** — `{etype}` • <t:{earned}:d>' for name,etype,earned in badges]
                 e=discord.Embed(title=f'🏅 {ctx.author.display_name} — Event Achievements',description='\n'.join(lines) or 'No event achievements yet. Badges are earned for major contributions (150+ points), Elite contributions (300+), and verified top-three event finishes—not for simply joining.',color=discord.Color.gold())
                 return await ctx.send(embed=e)
+            if (not row or row[8] not in {'active','paused'} or (row[8]=='active' and row[7]<=int(time.time()))) and action in {'status', ''}:
+                return await ctx.send(embed=discord.Embed(title='🌙 No active global event',description='No event is running right now. Check `!events` for upcoming event types.',color=discord.Color.blurple()))
             if not row or row[8] not in {'active','paused','ended'} or (row[8]=='active' and row[7]<=int(time.time())):
-                return await ctx.send(embed=discord.Embed(title='🌙 No active global event',description='The wilds are quiet for now. A developer can launch the next adventure; check back soon!',color=discord.Color.blurple()))
+                return await ctx.send(embed=discord.Embed(title='🌙 No active global event',description='No event is running right now. Check `!events` for event types.',color=discord.Color.blurple()))
             if action=='join':
                 if row[8] != 'active' or row[7] <= int(time.time()):
                     return await ctx.send('🔒 You can only join an event while it is active. Wait for the next event announcement.')
@@ -6562,6 +6540,8 @@ class EventsMissions(commands.Cog):
                 achievement='\n'.join(f'🏅 {name}' for name in earned_badges) if earned_badges else 'No badge this time — badges are reserved for major contributions and verified top-three finishes.'
                 extra=f'\n**Community clear bonus:** +{token_bonus} Event Tokens' if token_bonus else '\n**Community clear bonus:** Not unlocked this time.'
                 return await ctx.send(embed=discord.Embed(title='🎉 Event reward claimed!',description=f'**Event:** {row[2]}\n**Contribution:** {contribution:,} points\n**Reward tier:** {tier_label}\n**Event Tokens earned:** +{total_tokens} 🪙\n{extra}\n**Spend your tokens:** `!event shop` · **Wallet:** `!event tokens`\n**Achievements:** {achievement}\nUse `!event badges` to view your permanent achievements.',color=discord.Color.gold()))
+            if action in {'status', ''} and row[8] not in {'active','paused'}:
+                return await ctx.send(embed=discord.Embed(title='🌙 No active global event',description='No event is running right now. Check `!events` for event types.',color=discord.Color.blurple()))
             return await ctx.send(embed=pv_event_embed(row,points))
         if uid not in OWNER_IDS:return await ctx.send('🔒 Event management commands are restricted to PokéVanta developers.')
         if action=='start':
@@ -6731,10 +6711,10 @@ class EventsMissions(commands.Cog):
     async def eventshop(self, ctx):
         """Browse the Event Token shop."""
         items = [
-            ('coin_pouch', '💰 VantaCoin Treasury', '500 tokens', 'Receive 1,000,000 VantaCoins'),
-            ('mp_bundle', '📘 Grand Mission Archive', '750 tokens', 'Receive 500 Mission Points'),
-            ('event_relic', '🔮 Event Relic', '250 tokens', 'Collect 10 relics and exchange them for one random Shiny Legendary Pokémon'),
-            ('champion_trophy', '🏆 Champion Trophy', '2,500 tokens', 'Premium permanent collectible for dedicated event grinders'),
+            ('coin_pouch', '💰 VantaCoin Treasury', '125 tokens', 'Receive 1,000,000 VantaCoins'),
+            ('mp_bundle', '📘 Grand Mission Archive', '200 tokens', 'Receive 500 Mission Points'),
+            ('event_relic', '🔮 Event Relic', '75 tokens', 'Collect 10 relics and exchange them for one random Shiny Legendary Pokémon'),
+            ('champion_trophy', '🏆 Champion Trophy', '625 tokens', 'Premium permanent collectible for dedicated event grinders'),
         ]
         e = discord.Embed(title='🛍️ PokéVanta Event Shop', description='Trade your hard-earned Event Tokens for useful rewards and limited event collectibles. Purchases are permanent and token spending is checked atomically.', color=discord.Color.from_rgb(118,83,220))
         for key, name, price, desc in items:
@@ -6747,10 +6727,10 @@ class EventsMissions(commands.Cog):
         """Buy an item from the Event Token shop."""
         item = item.strip().lower().replace(' ', '_')
         catalog = {
-            'coin_pouch': (500, '💰 VantaCoin Treasury', 'coins'),
-            'mp_bundle': (750, '📘 Grand Mission Archive', 'mp'),
-            'event_relic': (250, '🔮 Event Relic', 'collectible'),
-            'champion_trophy': (2500, '🏆 Champion Trophy', 'collectible'),
+            'coin_pouch': (125, '💰 VantaCoin Treasury', 'coins'),
+            'mp_bundle': (200, '📘 Grand Mission Archive', 'mp'),
+            'event_relic': (75, '🔮 Event Relic', 'collectible'),
+            'champion_trophy': (625, '🏆 Champion Trophy', 'collectible'),
         }
         if item not in catalog:
             return await ctx.send('❓ That item is not in the shop. Use `!event shop` to see available items and exact item keys.')
@@ -6832,10 +6812,43 @@ class EventsMissions(commands.Cog):
         e.add_field(name='Token balance', value=f'{int(wallet[0]) if wallet else 0:,} 🪙 Event Tokens', inline=False)
         await ctx.send(embed=e)
 
-    @commands.command(name='events', aliases=['eventinfo'])
+    @commands.command(name='events')
     async def events_catalog(self, ctx):
         """Show all global event types, descriptions, rewards, and participation rules."""
         await ctx.send(embed=pv_event_catalog_embed())
+
+    @commands.command(name='eventinfo', aliases=['eventdetails'])
+    async def eventinfo(self, ctx, *, event: str = ''):
+        key = event.strip().lower().replace(' ', '_').replace('-', '_')
+        aliases = {
+            'rift': 'rift', 'mystery_of_the_rift': 'rift', 'mystery_rift': 'rift',
+            'surge': 'surge', 'shiny_surge': 'surge',
+            'fossil': 'fossil', 'fossil_frenzy': 'fossil',
+            'champion': 'champion', 'champion_challenge': 'champion',
+            'angler': 'angler', 'grand_angler_tournament': 'angler', 'tournament': 'angler',
+            'showdown': 'showdown', 'vantacoin_showdown': 'showdown',
+        }
+        key = aliases.get(key, key)
+        cfg = EVENT_TYPES.get(key)
+        if not cfg:
+            return await ctx.send('Usage: `!eventinfo <rift|surge|fossil|champion|angler|showdown>`.')
+        activities = {
+            'rift': 'Successful hunts: +2 · Catches: +5 · NPC battle wins: +8',
+            'surge': 'Successful hunts: +2 · Catches: +3 · Shiny catches: +30 total',
+            'fossil': 'Fossil Pokémon catches: +25 total',
+            'champion': 'NPC battle wins: +10 · Legendary boss wins: +35',
+            'angler': 'Common fish: +3 · Uncommon: +7 · Rare: +15 · Epic: +30 · Legendary: +60',
+            'showdown': 'Completed VantaCoin mini-game: +10 · Win bonus: +15. Stake size does not affect points.',
+        }
+        stages = EVENT_STORY_STAGES.get(key, [])
+        stage_text = '\n'.join(f'`{threshold}%` {name} — {desc}' for threshold, name, desc in stages) or 'Story stages are not configured.'
+        e = discord.Embed(title=f"{cfg['title']} — Complete Info", description=cfg['description'], color=discord.Color.from_rgb(118,83,220))
+        e.add_field(name='🎯 How to earn contribution', value=activities[key] + '\nJoin first with `!event join`; only qualifying actions after joining count.', inline=False)
+        e.add_field(name='🎁 Rewards', value='25+ pts: 5 tokens · 75+ pts: 15 · 150+ pts: 30 · 300+ pts: 50.\nIf the community goal is reached: +20 Event Tokens and a contribution-scaled bonus of up to 50,000 VantaCoins + 250 MP.', inline=False)
+        e.add_field(name='🏅 Achievements', value=f"150+ pts: {cfg['flavor']} · 300+ pts: Elite Event Contributor · Top 3: permanent placement medal when claiming. Joining alone gives no badge.\nEvent template reward: {cfg['coins']:,} VantaCoins / {cfg['points']} points.", inline=False)
+        e.add_field(name='📖 Story chapters', value=stage_text[:1024], inline=False)
+        e.add_field(name='Commands', value='`!event` status · `!event rewards` tiers/tasks · `!event leaderboard` standings · `!event story` chapters · `!event claim` rewards · `!event badges` achievements', inline=False)
+        await ctx.send(embed=pv_apply_event_image(e, key))
 
     @commands.command(name='eventhelp')
     async def eventhelp(self,ctx):
@@ -6844,7 +6857,7 @@ class EventsMissions(commands.Cog):
 `!missionclaim` · Claim completed missions
 `!missionboard` · Global mission rankings
 `!mprewards` / `!mpclaim` · View and claim weekly MP milestones
-`!events` / `!event info` · Full guide to every event type and its rewards
+`!events` · Event list | `!eventinfo <event>` · Full details for one event
 `!event` · View the current global event
 `!event join` · Register for the event
 `!event rewards` · View rewards
