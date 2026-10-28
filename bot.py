@@ -6051,6 +6051,150 @@ class CarlStyleExtensions(commands.Cog):
             return await ctx.send('⚠️ I selected the winner(s), but could not post in the giveaway channel.')
         return await ctx.send(('🔄 Giveaway rerolled.' if reroll else '✅ Giveaway ended.') + f' Message ID: `{message_id}`')
 
+    @commands.command(name='nuke')
+    @commands.guild_only()
+    async def nuke_channel(self, ctx, channel: discord.TextChannel = None):
+        """Recreate one text channel after explicit confirmation. Usage: !nuke [#channel]."""
+        guild = ctx.guild
+        channel = channel or (ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None)
+        if channel is None or channel.guild.id != guild.id:
+            return await ctx.send('❌ Choose a text channel in this server. Usage: `!nuke [#channel]`')
+        perms = ctx.author.guild_permissions
+        configured_role_id = self.setting(guild.id, 'nuke_role_id')
+        if configured_role_id:
+            configured_role = guild.get_role(int(configured_role_id))
+            if configured_role is None:
+                self.setting(guild.id, 'nuke_role_id', '')
+                configured_role_id = None
+            elif not (perms.administrator or any(role.id == configured_role.id for role in getattr(ctx.author, 'roles', []))):
+                return await ctx.send(f'❌ Only members with {configured_role.mention} (or a server Administrator) can use `!nuke`.')
+        if not configured_role_id and not (perms.administrator or perms.manage_channels):
+            return await ctx.send('❌ You need **Manage Channels** or **Administrator** permission to use this command.')
+        bot_member = guild.me
+        if bot_member is None or not bot_member.guild_permissions.manage_channels:
+            return await ctx.send('❌ I need **Manage Channels** permission to recreate a channel.')
+        prompt = await ctx.send(
+            f'⚠️ **Confirm channel reset**\nThis will replace {channel.mention} with a fresh copy. '
+            'Messages in the old channel will not be copied and will be lost.\n'
+            'Type `confirm` within 20 seconds to continue, or `cancel` to stop.',
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
+        def check(message):
+            return (message.author.id == ctx.author.id and message.channel.id == ctx.channel.id
+                    and message.guild and message.guild.id == guild.id
+                    and message.content.lower().strip() in {'confirm', 'cancel'})
+        try:
+            response = await self.bot.wait_for('message', check=check, timeout=20.0)
+        except asyncio.TimeoutError:
+            return await prompt.edit(content='⌛ Channel reset cancelled: confirmation timed out.')
+        if response.content.lower().strip() != 'confirm':
+            return await prompt.edit(content='✅ Channel reset cancelled.')
+        try:
+            position = channel.position
+            new_channel = await channel.clone(reason=f'Channel reset requested by {ctx.author} ({ctx.author.id})')
+            await new_channel.edit(position=position, reason='Keep channel in its original position after reset')
+            await channel.delete(reason=f'Channel reset requested by {ctx.author} ({ctx.author.id})')
+            await new_channel.send(
+                f'♻️ Channel reset by {ctx.author.mention}. This is a fresh channel; previous messages were not copied.',
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+            )
+            await prompt.edit(content=f'✅ Successfully reset **#{new_channel.name}**. The old channel history was not copied.')
+            await self._log_admin_action(guild, 'Channel Reset', f'**Moderator:** {ctx.author.mention} (`{ctx.author.id}`)\n**Old channel:** #{channel.name} (`{channel.id}`)\n**New channel:** {new_channel.mention} (`{new_channel.id}`)')
+        except discord.Forbidden:
+            await prompt.edit(content='❌ I lack permission to clone, edit, delete, or send in that channel. Check my channel permissions.')
+        except discord.HTTPException as exc:
+            await prompt.edit(content=f'❌ Discord rejected the channel reset ({type(exc).__name__}). Check my channel permissions and try again.')
+
+    async def _log_admin_action(self, guild, title, description):
+        """Send a concise administrative audit entry to this server's configured !setlog channel."""
+        try:
+            log_id = self.setting(guild.id, 'log_channel')
+            log_channel = guild.get_channel(int(log_id)) if log_id else None
+            if log_channel:
+                embed = discord.Embed(title=f'🛡️ {title}', description=description[:3500],
+                                      color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+                embed.set_footer(text=f'Server: {guild.name} • {guild.id}')
+                await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except (ValueError, discord.HTTPException, AttributeError) as exc:
+            print(f'[ADMIN AUDIT LOG ERROR] {type(exc).__name__}: {exc}')
+
+    @commands.command(name='setnukerole')
+    @commands.guild_only()
+    async def set_nuke_role(self, ctx, *, role: str = None):
+        """Restrict !nuke to a specific role. Usage: !setnukerole @Role; !setnukerole off."""
+        if not (ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild):
+            return await ctx.send('❌ You need **Manage Server** or **Administrator** permission to configure the nuke role.')
+        if not role:
+            current = self.setting(ctx.guild.id, 'nuke_role_id')
+            current_role = ctx.guild.get_role(int(current)) if current and current.isdigit() else None
+            return await ctx.send(f'Current nuke role: {current_role.mention if current_role else "not configured"}. Usage: `!setnukerole @Role` or `!setnukerole off`.')
+        role_text = role.strip()
+        if role_text.lower() in {'off', 'disable', 'none'}:
+            self.setting(ctx.guild.id, 'nuke_role_id', '')
+            return await ctx.send('✅ Nuke role restriction disabled. `!nuke` now requires Manage Channels or Administrator.')
+        match = re.fullmatch(r'<@&(\d+)>', role_text)
+        target = ctx.guild.get_role(int(match.group(1))) if match else (ctx.guild.get_role(int(role_text)) if role_text.isdigit() else None)
+        if target is None:
+            matches = [r for r in ctx.guild.roles if r.name.casefold() == role_text.casefold()]
+            target = matches[0] if len(matches) == 1 else None
+        if target is None:
+            return await ctx.send('❌ I could not find that role. Use a role mention, role ID, or exact role name.')
+        if target.is_default() or target.managed:
+            return await ctx.send('❌ Choose a normal server role, not @everyone or an integration-managed role.')
+        self.setting(ctx.guild.id, 'nuke_role_id', target.id)
+        await ctx.send(f'✅ `!nuke` is now restricted to {target.mention} and server Administrators.', allowed_mentions=discord.AllowedMentions.none())
+        await self._log_admin_action(ctx.guild, 'Nuke Role Updated', f'**Changed by:** {ctx.author.mention} (`{ctx.author.id}`)\n**Allowed role:** {target.name} (`{target.id}`)')
+
+    @commands.command(name='rolewipe')
+    @commands.guild_only()
+    async def rolewipe_review(self, ctx):
+        """Review roles that the bot could manage; this command does not delete roles."""
+        if not (ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_roles):
+            return await ctx.send('❌ You need **Manage Roles** or **Administrator** permission to review roles.')
+        bot_member = ctx.guild.me
+        if not bot_member or not bot_member.guild_permissions.manage_roles:
+            return await ctx.send('❌ I need **Manage Roles** permission to inspect manageable roles.')
+        manageable = [r for r in reversed(ctx.guild.roles) if not r.is_default() and not r.managed and r < bot_member.top_role]
+        if not manageable:
+            return await ctx.send('No manageable roles found below my highest role.')
+        lines = [f'• {discord.utils.escape_markdown(r.name)} — `{r.id}`' for r in manageable[:40]]
+        extra = f'\n…and {len(manageable) - 40} more.' if len(manageable) > 40 else ''
+        embed = discord.Embed(title='🧾 Role Review (No Changes Made)',
+                              description='This is a review-only list. No roles were deleted.\n\n' + '\n'.join(lines) + extra,
+                              color=discord.Color.blurple())
+        embed.set_footer(text=f'{len(manageable)} manageable role(s) • Use !roledelete for an individual role')
+        await ctx.send(embed=embed)
+
+    @commands.command(name='serverraid')
+    @commands.guild_only()
+    async def serverraid_control(self, ctx, action: str = 'status', *, note: str = ''):
+        """Start/stop a logged, non-destructive server moderation drill. Usage: !serverraid start|stop|status [note]."""
+        if not (ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild):
+            return await ctx.send('❌ You need **Manage Server** or **Administrator** permission to control a server drill.')
+        action = action.lower().strip()
+        if action not in {'start', 'stop', 'status'}:
+            return await ctx.send('Usage: `!serverraid start [note]`, `!serverraid stop`, or `!serverraid status`.')
+        key = 'serverraid_active'
+        active = self.setting(ctx.guild.id, key) == '1'
+        if action == 'status':
+            return await ctx.send(f'🛡️ Server moderation drill is **{"ACTIVE" if active else "INACTIVE"}**. This does not delete channels or roles, mass-mention members, or change permissions.')
+        if action == 'start':
+            if active:
+                return await ctx.send('⚠️ A server moderation drill is already active. Use `!serverraid stop` to end it.')
+            self.setting(ctx.guild.id, key, '1')
+            msg = f'🛡️ **Server moderation drill started** by {ctx.author.mention}. No channels, roles, or member permissions were changed.'
+            if note:
+                msg += f'\n**Note:** {discord.utils.escape_markdown(note[:300])}'
+            await ctx.send(msg, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            await self._log_admin_action(ctx.guild, 'Server Drill Started', f'**Started by:** {ctx.author.mention} (`{ctx.author.id}`)\n**Note:** {discord.utils.escape_markdown(note[:500] or "None")}')
+        else:
+            if not active:
+                return await ctx.send('ℹ️ No server moderation drill is currently active.')
+            self.setting(ctx.guild.id, key, '0')
+            await ctx.send(f'✅ Server moderation drill stopped by {ctx.author.mention}. No channels or roles were changed.', allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            await self._log_admin_action(ctx.guild, 'Server Drill Stopped', f'**Stopped by:** {ctx.author.mention} (`{ctx.author.id}`)')
+
     @commands.command(name='giveaway', aliases=['gstart', 'giveawaystart', 'gstartgiveaway'])
     @commands.guild_only()
     async def giveaway_start(self, ctx, duration: str = None, winners: int = 1, *, prize: str = None):
