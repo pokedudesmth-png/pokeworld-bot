@@ -6051,6 +6051,20 @@ class CarlStyleExtensions(commands.Cog):
             return await ctx.send('⚠️ I selected the winner(s), but could not post in the giveaway channel.')
         return await ctx.send(('🔄 Giveaway rerolled.' if reroll else '✅ Giveaway ended.') + f' Message ID: `{message_id}`')
 
+    def _can_use_nuke_tools(self, ctx):
+        perms = ctx.author.guild_permissions
+        configured_role_id = self.setting(ctx.guild.id, 'nuke_role_id')
+        if configured_role_id:
+            configured_role = ctx.guild.get_role(int(configured_role_id))
+            if configured_role is None:
+                self.setting(ctx.guild.id, 'nuke_role_id', '')
+                configured_role_id = None
+            elif not (perms.administrator or any(role.id == configured_role.id for role in getattr(ctx.author, 'roles', []))):
+                return False, f'❌ Only members with {configured_role.mention} (or a server Administrator) can use this command.'
+        if not configured_role_id and not (perms.administrator or perms.manage_channels):
+            return False, '❌ You need **Manage Channels** or **Administrator** permission to use this command.'
+        return True, None
+
     @commands.command(name='nuke')
     @commands.guild_only()
     async def nuke_channel(self, ctx, channel: discord.TextChannel = None):
@@ -6168,260 +6182,116 @@ class CarlStyleExtensions(commands.Cog):
 
     @commands.command(name='serverraid')
     @commands.guild_only()
-    async def serverraid_control(self, ctx, action: str = 'preview', *, note: str = ''):
-        """Server renovation workflow. Usage: !serverraid preview|backup|start|stop|status|restore."""
+    async def serverraid_control(self, ctx, action: str = 'start', *, note: str = ''):
+        """Clean a small amount of recent user-message history across text channels. Usage: !serverraid start|stop|status."""
         guild = ctx.guild
         perms = ctx.author.guild_permissions
         if not (perms.administrator or perms.manage_guild):
-            return await ctx.send('❌ You need **Manage Server** or **Administrator** permission to manage server renovation.')
+            return await ctx.send('❌ You need **Manage Server** or **Administrator** permission to run serverraid.')
 
         action = action.lower().strip()
-        valid_actions = {'preview', 'backup', 'start', 'stop', 'status', 'restore'}
-        if action not in valid_actions:
-            return await ctx.send('Usage: `!serverraid preview|backup|start|stop|status|restore`.')
+        if action not in {'start', 'stop', 'status'}:
+            return await ctx.send('Usage: `!serverraid start`, `!serverraid stop`, or `!serverraid status`.')
 
-        backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'serverraid_backups')
-        backup_path = os.path.join(backup_dir, f'{guild.id}.json')
-        active_key = 'serverraid_active'
-
-        def serialize_overwrites(channel):
-            result = []
-            for target, overwrite in channel.overwrites.items():
-                if isinstance(target, discord.Role):
-                    target_type, target_name = 'role', target.name
-                else:
-                    # Member-specific overwrites are deliberately not restored to avoid stale member IDs.
-                    continue
-                allow, deny = overwrite.pair()
-                result.append({'role': target_name, 'allow': allow.value, 'deny': deny.value})
-            return result
-
-        def make_snapshot():
-            roles = []
-            for role in guild.roles:
-                if role.is_default() or role.managed:
-                    continue
-                roles.append({
-                    'name': role.name,
-                    'permissions': role.permissions.value,
-                    'colour': role.colour.value,
-                    'hoist': role.hoist,
-                    'mentionable': role.mentionable,
-                })
-            channels = []
-            for channel in guild.channels:
-                item = {
-                    'name': channel.name,
-                    'type': ('category' if isinstance(channel, discord.CategoryChannel)
-                             else 'text' if isinstance(channel, discord.TextChannel)
-                             else 'voice' if isinstance(channel, discord.VoiceChannel)
-                             else None),
-                    'position': channel.position,
-                    'overwrites': serialize_overwrites(channel),
-                }
-                if item['type'] is None:
-                    continue
-                if isinstance(channel, discord.CategoryChannel):
-                    pass
-                elif isinstance(channel, discord.TextChannel):
-                    item.update({
-                        'category': channel.category.name if channel.category else None,
-                        'topic': channel.topic,
-                        'nsfw': channel.nsfw,
-                        'slowmode_delay': channel.slowmode_delay,
-                    })
-                elif isinstance(channel, discord.VoiceChannel):
-                    item.update({
-                        'category': channel.category.name if channel.category else None,
-                        'bitrate': channel.bitrate,
-                        'user_limit': channel.user_limit,
-                    })
-                channels.append(item)
-            return {
-                'guild_id': guild.id,
-                'guild_name': guild.name,
-                'created_by': ctx.author.id,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-                'roles': roles,
-                'channels': channels,
-            }
-
-        async def save_snapshot():
-            os.makedirs(backup_dir, exist_ok=True)
-            snapshot = make_snapshot()
-            temp_path = backup_path + '.tmp'
-            with open(temp_path, 'w', encoding='utf-8') as backup_file:
-                json.dump(snapshot, backup_file, ensure_ascii=False, indent=2)
-            os.replace(temp_path, backup_path)
-            return snapshot
-
-        active = self.setting(guild.id, active_key) == '1'
-        if action == 'preview':
-            channel_counts = {'category': 0, 'text': 0, 'voice': 0}
-            for channel in guild.channels:
-                if isinstance(channel, discord.CategoryChannel):
-                    channel_counts['category'] += 1
-                elif isinstance(channel, discord.TextChannel):
-                    channel_counts['text'] += 1
-                elif isinstance(channel, discord.VoiceChannel):
-                    channel_counts['voice'] += 1
-            embed = discord.Embed(
-                title='🧰 Server Renovation Preview',
-                description='Review the current layout and save a structure backup before making renovation changes. Preview makes no server changes.',
-                color=discord.Color.blurple()
-            )
-            embed.add_field(name='Roles', value=str(sum(1 for r in guild.roles if not r.is_default() and not r.managed)), inline=True)
-            embed.add_field(name='Categories', value=str(channel_counts['category']), inline=True)
-            embed.add_field(name='Text channels', value=str(channel_counts['text']), inline=True)
-            embed.add_field(name='Voice channels', value=str(channel_counts['voice']), inline=True)
-            embed.add_field(name='Workflow', value='ACTIVE' if active else 'INACTIVE', inline=True)
-            embed.add_field(name='Backup', value='Available' if os.path.isfile(backup_path) else 'Not created yet', inline=True)
-            embed.set_footer(text='Commands: !serverraid backup • start • stop • status • restore')
-            return await ctx.send(embed=embed)
-
-        if action == 'backup':
-            try:
-                snapshot = await save_snapshot()
-            except (OSError, TypeError, ValueError) as exc:
-                return await ctx.send(f'❌ Could not save the server structure backup: `{type(exc).__name__}`.')
-            await ctx.send(
-                f'✅ Saved a structure backup for **{discord.utils.escape_markdown(guild.name)}**: '
-                f'`{len(snapshot["roles"])} roles` and `{len(snapshot["channels"])} channels` saved. '
-                'This backup stores layout/settings, not messages or member-specific permissions.'
-            )
-            await self._log_admin_action(guild, 'Server Structure Backup', f'**Created by:** {ctx.author.mention} (`{ctx.author.id}`)\n**Roles:** {len(snapshot["roles"])}\n**Channels:** {len(snapshot["channels"])}')
-            return
+        # Shared in-memory state lets !serverraid stop interrupt an active run.
+        if not hasattr(self, '_serverraid_cleanup_stop'):
+            self._serverraid_cleanup_stop = {}
+        if not hasattr(self, '_serverraid_cleanup_active'):
+            self._serverraid_cleanup_active = {}
+        stop_flags = self._serverraid_cleanup_stop
+        active_flags = self._serverraid_cleanup_active
+        guild_id = guild.id
 
         if action == 'status':
-            backup_state = 'available' if os.path.isfile(backup_path) else 'not created'
-            return await ctx.send(f'🧰 Server renovation workflow: **{"ACTIVE" if active else "INACTIVE"}**. Structure backup: **{backup_state}**. Use `!serverraid preview` to review the layout.')
-
-        if action == 'start':
-            if active:
-                return await ctx.send('⚠️ A renovation workflow is already active. Use `!serverraid status` or `!serverraid stop`.')
-            prompt = await ctx.send(
-                '⚠️ **Start server renovation workflow?**\n'
-                'This will save a backup of the current role/channel structure and mark renovation as active. '
-                'It will **not** mass-delete channels or roles.\n'
-                'Type `confirm` within 20 seconds to continue, or `cancel` to abort.'
-            )
-            def confirm_check(message):
-                return (message.author.id == ctx.author.id and message.channel.id == ctx.channel.id
-                        and message.guild and message.guild.id == guild.id
-                        and message.content.lower().strip() in {'confirm', 'cancel'})
-            try:
-                response = await self.bot.wait_for('message', check=confirm_check, timeout=20.0)
-            except asyncio.TimeoutError:
-                return await prompt.edit(content='⌛ Server renovation start cancelled: confirmation timed out.')
-            if response.content.lower().strip() != 'confirm':
-                return await prompt.edit(content='✅ Server renovation start cancelled.')
-            try:
-                snapshot = await save_snapshot()
-            except (OSError, TypeError, ValueError) as exc:
-                return await prompt.edit(content=f'❌ Could not save a backup, so renovation was not started (`{type(exc).__name__}`).')
-            self.setting(guild.id, active_key, '1')
-            await prompt.edit(content=f'✅ **Server renovation workflow started.** Backed up {len(snapshot["roles"])} roles and {len(snapshot["channels"])} channels. Use `!serverraid stop` when finished, or `!serverraid restore` to recreate missing structure from the backup.')
-            await self._log_admin_action(guild, 'Server Renovation Started', f'**Started by:** {ctx.author.mention} (`{ctx.author.id}`)\n**Note:** {discord.utils.escape_markdown(note[:500] or "None")}\n**Backup:** {os.path.basename(backup_path)}')
-            return
+            if active_flags.get(guild_id, False):
+                return await ctx.send('🧹 Serverraid cleanup is **running**. Use `!serverraid stop` to stop it.')
+            return await ctx.send('ℹ️ Serverraid cleanup is **not running**. Use `!serverraid start` to clean up to 25 recent user messages in each text channel.')
 
         if action == 'stop':
-            if not active:
-                return await ctx.send('ℹ️ No server renovation workflow is currently active.')
-            self.setting(guild.id, active_key, '0')
-            await ctx.send('✅ Server renovation workflow stopped. No channels or roles were removed.')
-            await self._log_admin_action(guild, 'Server Renovation Stopped', f'**Stopped by:** {ctx.author.mention} (`{ctx.author.id}`)')
-            return
+            if not active_flags.get(guild_id, False):
+                return await ctx.send('ℹ️ No serverraid cleanup is currently running.')
+            stop_flags[guild_id] = True
+            return await ctx.send('🛑 Stop requested. The cleanup will stop after the current channel finishes.')
 
-        if action == 'restore':
-            if not os.path.isfile(backup_path):
-                return await ctx.send('❌ No structure backup exists for this server. Run `!serverraid backup` first.')
-            bot_member = guild.me
-            if not bot_member:
-                return await ctx.send('❌ I could not verify my server permissions.')
-            if not (bot_member.guild_permissions.manage_roles and bot_member.guild_permissions.manage_channels):
-                return await ctx.send('❌ I need **Manage Roles** and **Manage Channels** permissions to restore structure.')
-            prompt = await ctx.send(
-                '⚠️ **Restore missing server structure?** This will only create roles/channels that are missing by name and type; '
-                'it will not delete or overwrite existing roles/channels. Member-specific permission overwrites and messages are not backed up.\n'
-                'Type `confirm` within 20 seconds, or `cancel`.'
-            )
-            def restore_check(message):
-                return (message.author.id == ctx.author.id and message.channel.id == ctx.channel.id
-                        and message.guild and message.guild.id == guild.id
-                        and message.content.lower().strip() in {'confirm', 'cancel'})
-            try:
-                response = await self.bot.wait_for('message', check=restore_check, timeout=20.0)
-            except asyncio.TimeoutError:
-                return await prompt.edit(content='⌛ Structure restore cancelled: confirmation timed out.')
-            if response.content.lower().strip() != 'confirm':
-                return await prompt.edit(content='✅ Structure restore cancelled.')
-            try:
-                with open(backup_path, 'r', encoding='utf-8') as backup_file:
-                    snapshot = json.load(backup_file)
-                if int(snapshot.get('guild_id', 0)) != guild.id:
-                    return await prompt.edit(content='❌ This backup belongs to a different server; restore was stopped.')
-                role_map = {role.name: role for role in guild.roles}
-                roles_created = 0
-                for role_data in snapshot.get('roles', []):
-                    if role_data['name'] in role_map:
-                        continue
-                    created = await guild.create_role(
-                        name=role_data['name'],
-                        permissions=discord.Permissions(int(role_data.get('permissions', 0))),
-                        colour=discord.Colour(int(role_data.get('colour', 0))),
-                        hoist=bool(role_data.get('hoist', False)),
-                        mentionable=bool(role_data.get('mentionable', False)),
-                        reason=f'Server structure restore requested by {ctx.author} ({ctx.author.id})'
+        if active_flags.get(guild_id, False):
+            return await ctx.send('⚠️ Serverraid cleanup is already running in this server. Use `!serverraid stop` to stop it.')
+
+        bot_member = guild.me
+        if bot_member is None:
+            return await ctx.send('❌ I could not verify my server permissions.')
+
+        channels = list(guild.text_channels)
+        if not channels:
+            return await ctx.send('ℹ️ This server has no text channels to clean.')
+
+        status = await ctx.send(
+            f'🧹 **Serverraid cleanup started.** Processing {len(channels)} text channels automatically; '
+            'up to **25 recent user messages per channel** will be removed. Use `!serverraid stop` to stop.'
+        )
+        active_flags[guild_id] = True
+        stop_flags[guild_id] = False
+        processed = 0
+        cleaned_channels = 0
+        deleted_total = 0
+        skipped = 0
+        failed = 0
+        try:
+            for index, channel in enumerate(channels, start=1):
+                if stop_flags.get(guild_id, False):
+                    break
+                channel_perms = channel.permissions_for(bot_member)
+                if not (channel_perms.view_channel and channel_perms.read_message_history and channel_perms.manage_messages):
+                    skipped += 1
+                    processed += 1
+                    continue
+                try:
+                    # Preserve bot messages (including this progress message) and only
+                    # remove a bounded number of recent user messages in each channel.
+                    deleted = await channel.purge(
+                        limit=50000,
+                        bulk=True,
+                        check=lambda message: message.author.bot is False,
+                        reason=f'Serverraid bounded cleanup requested by {ctx.author} ({ctx.author.id})'
                     )
-                    role_map[created.name] = created
-                    roles_created += 1
+                    deleted_total += len(deleted)
+                    if deleted:
+                        cleaned_channels += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    failed += 1
+                processed += 1
+                # Edit one progress message rather than spamming every channel.
+                if index == len(channels) or index % 5 == 0:
+                    try:
+                        await status.edit(content=(
+                            f'🧹 **Serverraid cleanup running:** {processed}/{len(channels)} channels checked. '
+                            f'Messages removed: **{deleted_total}** • Skipped: **{skipped}** • Errors: **{failed}**. '
+                            'Use `!serverraid stop` to stop after the current channel.'
+                        ))
+                    except discord.HTTPException:
+                        pass
+            stopped = stop_flags.get(guild_id, False)
+            final_state = 'stopped' if stopped else 'completed'
+            try:
+                await status.edit(content=(
+                    f'{"🛑" if stopped else "✅"} **Serverraid cleanup {final_state}.** '
+                    f'Channels checked: **{processed}/{len(channels)}** • Channels with messages removed: **{cleaned_channels}** '
+                    f'• Messages removed: **{deleted_total}** • Skipped (permissions): **{skipped}** • Errors: **{failed}**. '
+                    'This only removes up to 25 recent user messages per channel; channels, roles, and settings were left intact.'
+                ))
+            except discord.HTTPException:
+                pass
+            await self._log_admin_action(
+                guild,
+                'Serverraid Bounded Message Cleanup',
+                f'**Requested by:** {ctx.author} (`{ctx.author.id}`)\n'
+                f'**State:** {final_state}\n**Channels checked:** {processed}/{len(channels)}\n'
+                f'**Channels cleaned:** {cleaned_channels}\n**Messages removed:** {deleted_total}\n'
+                f'**Skipped:** {skipped}\n**Errors:** {failed}'
+            )
+        finally:
+            active_flags[guild_id] = False
+            stop_flags[guild_id] = False
 
-                channel_map = {}
-                channels_created = 0
-                channel_data_list = snapshot.get('channels', [])
-                # Create categories first so restored channels can be placed in them.
-                ordered = sorted(channel_data_list, key=lambda item: 0 if item.get('type') == 'category' else 1)
-                for item in ordered:
-                    kind = item.get('type')
-                    existing = next((ch for ch in guild.channels if ch.name == item.get('name') and
-                                     ((kind == 'category' and isinstance(ch, discord.CategoryChannel)) or
-                                      (kind == 'text' and isinstance(ch, discord.TextChannel)) or
-                                      (kind == 'voice' and isinstance(ch, discord.VoiceChannel)))), None)
-                    if existing:
-                        channel_map[item['name']] = existing
-                        continue
-                    overwrites = {}
-                    for overwrite_data in item.get('overwrites', []):
-                        role = role_map.get(overwrite_data.get('role'))
-                        if role:
-                            allow = discord.Permissions(int(overwrite_data.get('allow', 0)))
-                            deny = discord.Permissions(int(overwrite_data.get('deny', 0)))
-                            overwrites[role] = discord.PermissionOverwrite.from_pair(allow, deny)
-                    reason = f'Server structure restore requested by {ctx.author} ({ctx.author.id})'
-                    if kind == 'category':
-                        created = await guild.create_category(item['name'], overwrites=overwrites, reason=reason)
-                    else:
-                        category = channel_map.get(item.get('category'))
-                        if kind == 'text':
-                            created = await guild.create_text_channel(
-                                item['name'], category=category, overwrites=overwrites,
-                                topic=item.get('topic'), nsfw=bool(item.get('nsfw', False)),
-                                slowmode_delay=int(item.get('slowmode_delay', 0)), reason=reason
-                            )
-                        elif kind == 'voice':
-                            created = await guild.create_voice_channel(
-                                item['name'], category=category, overwrites=overwrites,
-                                bitrate=min(int(item.get('bitrate', 64000)), guild.bitrate_limit),
-                                user_limit=int(item.get('user_limit', 0)), reason=reason
-                            )
-                        else:
-                            continue
-                    channel_map[item['name']] = created
-                    channels_created += 1
-                await prompt.edit(content=f'✅ Restore complete: created **{roles_created} roles** and **{channels_created} channels/categories** that were missing. Existing structure was left unchanged.')
-                await self._log_admin_action(guild, 'Server Structure Restored', f'**Restored by:** {ctx.author.mention} (`{ctx.author.id}`)\n**Roles created:** {roles_created}\n**Channels/categories created:** {channels_created}')
-            except (discord.Forbidden, discord.HTTPException, OSError, ValueError, TypeError, KeyError) as exc:
-                await prompt.edit(content=f'⚠️ Restore stopped after a partial restore (`{type(exc).__name__}`). Check my role hierarchy and Manage Roles/Manage Channels permissions, then run `!serverraid preview` to review what remains.')
     @commands.command(name='giveaway', aliases=['gstart', 'giveawaystart', 'gstartgiveaway'])
     @commands.guild_only()
     async def giveaway_start(self, ctx, duration: str = None, winners: int = 1, *, prize: str = None):
