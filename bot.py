@@ -2288,6 +2288,7 @@ class Game(commands.Cog):
             'tag': 'Tags & Custom Commands', 'tags': 'Tags & Custom Commands', 'tagset': 'Tags & Custom Commands', 'tagdelete': 'Tags & Custom Commands', 'ccset': 'Tags & Custom Commands', 'ccdelete': 'Tags & Custom Commands',
             'mute': 'Moderation', 'unmute': 'Moderation', 'kick': 'Moderation', 'clear': 'Moderation', 'slowmode': 'Moderation', 'lock': 'Moderation', 'unlock': 'Moderation', 'warn': 'Moderation', 'warnings': 'Moderation', 'clearwarnings': 'Moderation', 'removewarn': 'Moderation', 'role': 'Moderation', 'dump': 'Moderation',
             'ping': 'Utilities',
+            'altlogs': 'Server Setup', 'altconfig': 'Server Setup', 'altlist': 'Server Setup', 'altreview': 'Server Setup', 'altcompare': 'Server Setup',
             'setwelcome': 'Server Setup', 'setgoodbye': 'Server Setup', 'setlog': 'Server Setup', 'setautorole': 'Server Setup', 'setstarboard': 'Server Setup', 'rradd': 'Server Setup', 'rrremove': 'Server Setup', 'automodword': 'Server Setup', 'automodwords': 'Server Setup', 'setnick': 'Server Setup', 'roleadd': 'Server Setup', 'roleremove': 'Server Setup', 'rolecreate': 'Server Setup', 'roledelete': 'Server Setup', 'announce': 'Server Setup',
             'banbot': 'Developer Controls', 'unbanbot': 'Developer Controls', 'ban': 'Developer Controls', 'unban': 'Developer Controls', 'coinsadd': 'Developer Controls', 'removecoins': 'Developer Controls', 'removepokemon': 'Developer Controls', 'pokemonadd': 'Developer Controls', 'shinyhunt': 'Developer Controls', 'pass': 'Developer Controls', 'setupitememojis': 'Developer Setup', 'setupvantacoin': 'Developer Setup'
         }
@@ -2389,6 +2390,11 @@ class Game(commands.Cog):
                     'role': 'Toggle a role for a member. Requires Manage Roles and respects role hierarchy.',
                     'dump': 'List usernames and user IDs of everyone with a role, without mentioning them.',
                     'ping': 'Show WebSocket latency and command response time.',
+                    'altlogs': 'Choose the channel for possible account-connection reports.',
+                    'altconfig': 'Enable, disable, or check the server alt-monitor settings.',
+                    'altlist': 'List recent possible account-connection reports.',
+                    'altreview': 'Review activity-pattern matches for one member.',
+                    'altcompare': 'Compare two members’ recent channel-and-hour activity overlap.',
                     'serverinfo': 'Show information about this server.',
                     'userinfo': 'Show information about a server member.',
                     'roll': 'Roll a random number.',
@@ -7132,6 +7138,301 @@ Shop economy: 500-token VantaCoin Treasury, 750-token MP bundle, 250-token Relic
         await ctx.send(embed=e)
 
 
+
+class AltMonitor(commands.Cog):
+    # Privacy-conscious monitor: stores activity aggregates only, never message content.
+    WINDOW_SECONDS = 30 * 86400
+    ALERT_COOLDOWN = 7 * 86400
+    MIN_SHARED_BUCKETS = 30
+    MIN_SHARED_DAYS = 10
+    MIN_OVERLAP_RATIO = 0.75
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.enabled_guilds = set()
+        self.scan_task = None
+        with db() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS pv_alt_settings(
+                guild_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0,
+                log_channel_id INTEGER, updated_by INTEGER, updated_at INTEGER NOT NULL DEFAULT 0)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS pv_alt_activity(
+                guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+                hour_bucket INTEGER NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(guild_id,user_id,channel_id,hour_bucket))''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_pv_alt_activity_time ON pv_alt_activity(guild_id,hour_bucket)')
+            c.execute('''CREATE TABLE IF NOT EXISTS pv_alt_members(
+                guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, account_created_at INTEGER NOT NULL,
+                first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+                PRIMARY KEY(guild_id,user_id))''')
+            c.execute('''CREATE TABLE IF NOT EXISTS pv_alt_alerts(
+                guild_id INTEGER NOT NULL, user_a INTEGER NOT NULL, user_b INTEGER NOT NULL,
+                shared_buckets INTEGER NOT NULL, shared_days INTEGER NOT NULL,
+                overlap_ratio REAL NOT NULL, last_alert_at INTEGER NOT NULL,
+                PRIMARY KEY(guild_id,user_a,user_b))''')
+            self.enabled_guilds = {int(r[0]) for r in c.execute('SELECT guild_id FROM pv_alt_settings WHERE enabled=1').fetchall()}
+
+    async def cog_load(self):
+        self.scan_task = asyncio.create_task(self._scan_loop())
+
+    def cog_unload(self):
+        if self.scan_task:
+            self.scan_task.cancel()
+
+    @staticmethod
+    def _now_bucket():
+        return int(time.time()) // 3600
+
+    def _remember_member(self, member):
+        if member.bot:
+            return
+        now = int(time.time())
+        created = int(member.created_at.timestamp())
+        with db() as c:
+            c.execute('''INSERT INTO pv_alt_members(guild_id,user_id,account_created_at,first_seen_at,last_seen_at)
+                VALUES(?,?,?,?,?) ON CONFLICT(guild_id,user_id) DO UPDATE SET
+                account_created_at=excluded.account_created_at,last_seen_at=excluded.last_seen_at''',
+                (member.guild.id, member.id, created, now, now))
+
+    async def _seed_guild_members(self, guild):
+        # Members intent + chunking makes long-standing members visible too; this is
+        # a current-member baseline, not access to historical messages or private data.
+        try:
+            await guild.chunk(cache=True)
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+        for member in list(guild.members):
+            try:
+                self._remember_member(member)
+            except sqlite3.Error as exc:
+                print(f'[ALT MONITOR] Could not save member baseline for guild {guild.id}: {exc}')
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        for guild in list(self.bot.guilds):
+            if guild.id in self.enabled_guilds:
+                await self._seed_guild_members(guild)
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member):
+        if not member.bot and member.guild.id in self.enabled_guilds:
+            try:
+                self._remember_member(member)
+            except sqlite3.Error as exc:
+                print(f'[ALT MONITOR] Member record failed: {exc}')
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if not message.guild or message.author.bot or message.guild.id not in self.enabled_guilds:
+            return
+        bucket = self._now_bucket()
+        try:
+            with db() as c:
+                c.execute('''INSERT INTO pv_alt_activity(guild_id,user_id,channel_id,hour_bucket,message_count)
+                    VALUES(?,?,?,?,1) ON CONFLICT(guild_id,user_id,channel_id,hour_bucket)
+                    DO UPDATE SET message_count=MIN(message_count+1,1000)''',
+                    (message.guild.id, message.author.id, message.channel.id, bucket))
+                c.execute('''INSERT INTO pv_alt_members(guild_id,user_id,account_created_at,first_seen_at,last_seen_at)
+                    VALUES(?,?,?,?,?) ON CONFLICT(guild_id,user_id) DO UPDATE SET last_seen_at=excluded.last_seen_at''',
+                    (message.guild.id, message.author.id, int(message.author.created_at.timestamp()), int(time.time()), int(time.time())))
+        except sqlite3.Error as exc:
+            print(f'[ALT MONITOR] Activity write failed in guild {message.guild.id}: {exc}')
+
+    async def _scan_loop(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                for guild_id in list(self.enabled_guilds):
+                    guild = self.bot.get_guild(guild_id)
+                    if guild:
+                        await self._scan_guild(guild)
+                with db() as c:
+                    cutoff = self._now_bucket() - (self.WINDOW_SECONDS // 3600)
+                    c.execute('DELETE FROM pv_alt_activity WHERE hour_bucket < ?', (cutoff,))
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f'[ALT MONITOR] Scheduled scan failed: {type(exc).__name__}: {exc}')
+                await asyncio.sleep(300)
+
+    def _guild_activity(self, guild_id, user_id=None):
+        cutoff = self._now_bucket() - (self.WINDOW_SECONDS // 3600)
+        with db() as c:
+            if user_id is None:
+                rows = c.execute('SELECT user_id,channel_id,hour_bucket FROM pv_alt_activity WHERE guild_id=? AND hour_bucket>=?', (guild_id, cutoff)).fetchall()
+            else:
+                rows = c.execute('SELECT user_id,channel_id,hour_bucket FROM pv_alt_activity WHERE guild_id=? AND hour_bucket>=? AND user_id=?', (guild_id, cutoff, user_id)).fetchall()
+        by_user = {}
+        for uid, channel_id, bucket in rows:
+            by_user.setdefault(int(uid), set()).add((int(channel_id), int(bucket)))
+        return by_user
+
+    async def _scan_guild(self, guild):
+        by_user = self._guild_activity(guild.id)
+        if len(by_user) < 2:
+            return
+        bucket_users = {}
+        for uid, buckets in by_user.items():
+            for bucket in buckets:
+                bucket_users.setdefault(bucket, []).append(uid)
+        pair_shared = {}
+        for bucket, users in bucket_users.items():
+            if len(users) > 80:
+                continue
+            users = sorted(set(users))
+            for i, uid_a in enumerate(users):
+                for uid_b in users[i+1:]:
+                    pair_shared[(uid_a, uid_b)] = pair_shared.get((uid_a, uid_b), 0) + 1
+        now = int(time.time())
+        for (uid_a, uid_b), shared in pair_shared.items():
+            if shared < self.MIN_SHARED_BUCKETS:
+                continue
+            a_buckets, b_buckets = by_user[uid_a], by_user[uid_b]
+            ratio = shared / max(1, min(len(a_buckets), len(b_buckets)))
+            shared_days = len({(bucket[1] * 3600) // 86400 for bucket in (a_buckets & b_buckets)})
+            if shared_days < self.MIN_SHARED_DAYS or ratio < self.MIN_OVERLAP_RATIO:
+                continue
+            with db() as c:
+                old = c.execute('SELECT last_alert_at FROM pv_alt_alerts WHERE guild_id=? AND user_a=? AND user_b=?', (guild.id, uid_a, uid_b)).fetchone()
+                if old and now - int(old[0]) < self.ALERT_COOLDOWN:
+                    continue
+                c.execute('''INSERT INTO pv_alt_alerts(guild_id,user_a,user_b,shared_buckets,shared_days,overlap_ratio,last_alert_at)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(guild_id,user_a,user_b) DO UPDATE SET
+                    shared_buckets=excluded.shared_buckets,shared_days=excluded.shared_days,
+                    overlap_ratio=excluded.overlap_ratio,last_alert_at=excluded.last_alert_at''',
+                    (guild.id, uid_a, uid_b, shared, shared_days, ratio, now))
+                setting = c.execute('SELECT log_channel_id FROM pv_alt_settings WHERE guild_id=? AND enabled=1', (guild.id,)).fetchone()
+            if not setting or not setting[0]:
+                continue
+            channel = guild.get_channel(int(setting[0]))
+            if not channel:
+                continue
+            member_a = guild.get_member(uid_a); member_b = guild.get_member(uid_b)
+            name_a = member_a.mention if member_a else f'`{uid_a}`'
+            name_b = member_b.mention if member_b else f'`{uid_b}`'
+            embed = discord.Embed(
+                title='🔎 Possible account connection detected',
+                description=(f'{name_a} and {name_b} have unusually overlapping activity patterns.\n\n'
+                             '**This is a review lead, not proof that the accounts belong to the same person.**'),
+                color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.add_field(name='Shared active channel-hours', value=f'**{shared}**', inline=True)
+            embed.add_field(name='Days with overlap', value=f'**{shared_days}** / 30', inline=True)
+            embed.add_field(name='Overlap ratio', value=f'**{ratio:.0%}**', inline=True)
+            embed.add_field(name='Window', value='Rolling 30 days; activity is grouped by channel and UTC hour. Message content is not stored.', inline=False)
+            try:
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(f'[ALT MONITOR] Could not post alert in guild {guild.id}: {exc}')
+
+    async def _require_manage(self, ctx):
+        if not ctx.guild:
+            await ctx.send('❌ This command can only be used inside a server.')
+            return False
+        if not ctx.author.guild_permissions.manage_guild and not ctx.author.guild_permissions.administrator:
+            await ctx.send('❌ You need **Manage Server** to configure or review alt-monitor reports.')
+            return False
+        return True
+
+    @commands.command(name='altlogs')
+    async def altlogs(self, ctx, channel: discord.TextChannel):
+        """Set the channel used for possible account-connection reports."""
+        if not await self._require_manage(ctx): return
+        with db() as c:
+            c.execute('''INSERT INTO pv_alt_settings(guild_id,enabled,log_channel_id,updated_by,updated_at)
+                VALUES(?,0,?,?,?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id=excluded.log_channel_id,
+                updated_by=excluded.updated_by,updated_at=excluded.updated_at''',
+                (ctx.guild.id, channel.id, ctx.author.id, int(time.time())))
+        await ctx.send(f'✅ Alt-monitor reports will be sent to {channel.mention}. Use `!altconfig on` to enable monitoring.')
+
+    @commands.command(name='altconfig')
+    async def altconfig(self, ctx, action: str = 'status'):
+        """Enable, disable, or view this server's alt-monitor settings."""
+        if not await self._require_manage(ctx): return
+        action = action.lower()
+        if action not in ('on', 'off', 'status'):
+            return await ctx.send('Usage: `!altconfig on`, `!altconfig off`, or `!altconfig status`')
+        with db() as c:
+            row = c.execute('SELECT enabled,log_channel_id FROM pv_alt_settings WHERE guild_id=?', (ctx.guild.id,)).fetchone()
+            if action == 'on':
+                if not row or not row[1]:
+                    return await ctx.send('❌ Set a report channel first with `!altlogs #channel`.')
+                c.execute('UPDATE pv_alt_settings SET enabled=1,updated_by=?,updated_at=? WHERE guild_id=?', (ctx.author.id, int(time.time()), ctx.guild.id))
+            elif action == 'off':
+                c.execute('''INSERT INTO pv_alt_settings(guild_id,enabled,updated_by,updated_at) VALUES(?,0,?,?)
+                    ON CONFLICT(guild_id) DO UPDATE SET enabled=0,updated_by=excluded.updated_by,updated_at=excluded.updated_at''',
+                    (ctx.guild.id, ctx.author.id, int(time.time())))
+        if action == 'on':
+            self.enabled_guilds.add(ctx.guild.id)
+            await self._seed_guild_members(ctx.guild)
+            return await ctx.send('✅ Alt monitoring is **enabled**. Existing members have been added to the baseline; new activity will be monitored from now on.')
+        if action == 'off':
+            self.enabled_guilds.discard(ctx.guild.id)
+            return await ctx.send('🛑 Alt monitoring is **disabled**. Existing reports and stored aggregate data are retained.')
+        with db() as c:
+            row = c.execute('SELECT enabled,log_channel_id FROM pv_alt_settings WHERE guild_id=?', (ctx.guild.id,)).fetchone()
+        enabled = bool(row and row[0]); channel = ctx.guild.get_channel(int(row[1])) if row and row[1] else None
+        await ctx.send(f'**Alt monitor:** {"Enabled" if enabled else "Disabled"}\n**Report channel:** {channel.mention if channel else "Not configured"}\n**Monitoring window:** Rolling 30 days')
+
+    @commands.command(name='altlist')
+    async def altlist(self, ctx):
+        """List the latest possible account-connection reports."""
+        if not await self._require_manage(ctx): return
+        with db() as c:
+            rows = c.execute('SELECT user_a,user_b,shared_buckets,shared_days,overlap_ratio,last_alert_at FROM pv_alt_alerts WHERE guild_id=? ORDER BY last_alert_at DESC LIMIT 15', (ctx.guild.id,)).fetchall()
+        if not rows:
+            return await ctx.send('No possible account-connection reports have been generated yet.')
+        lines=[]
+        for a,b,shared,days,ratio,when in rows:
+            lines.append(f'• <@{a}> ↔ <@{b}> — {shared} shared channel-hours, {days} days, {ratio:.0%} overlap • <t:{when}:R>')
+        embed=discord.Embed(title='🔎 Recent account-connection reports',description='\n'.join(lines),color=discord.Color.orange())
+        embed.set_footer(text='Signals are not proof of shared ownership. Review context before taking action.')
+        await ctx.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name='altcompare')
+    async def altcompare(self, ctx, first: discord.Member, second: discord.Member):
+        """Compare two members' recent channel/hour activity overlap."""
+        if not await self._require_manage(ctx): return
+        if first.bot or second.bot or first.id == second.id:
+            return await ctx.send('❌ Choose two different non-bot members.')
+        by_user=self._guild_activity(ctx.guild.id)
+        a=by_user.get(first.id,set()); b=by_user.get(second.id,set()); shared=a & b
+        days=len({(bucket[1]*3600)//86400 for bucket in shared})
+        ratio=len(shared)/max(1,min(len(a),len(b)))
+        embed=discord.Embed(title='🔍 Activity overlap review',description=f'{first.mention} compared with {second.mention}',color=discord.Color.blurple())
+        embed.add_field(name='Shared active channel-hours',value=str(len(shared)),inline=True)
+        embed.add_field(name='Days with overlap',value=f'{days} / 30',inline=True)
+        embed.add_field(name='Overlap ratio',value=f'{ratio:.0%}',inline=True)
+        embed.add_field(name='Individual active channel-hours',value=f'{len(a)} / {len(b)}',inline=False)
+        embed.set_footer(text='This compares only aggregate channel/hour activity. It cannot establish account ownership.')
+        await ctx.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name='altreview')
+    async def altreview(self, ctx, member: discord.Member):
+        """Show the closest activity-pattern matches for a member."""
+        if not await self._require_manage(ctx): return
+        if member.bot:
+            return await ctx.send('❌ Bot accounts are excluded from this review.')
+        by_user=self._guild_activity(ctx.guild.id)
+        target=by_user.get(member.id,set())
+        if not target:
+            return await ctx.send('ℹ️ There is not enough recorded activity for that member yet.')
+        matches=[]
+        for uid,buckets in by_user.items():
+            if uid==member.id: continue
+            shared=target & buckets
+            ratio=len(shared)/max(1,min(len(target),len(buckets)))
+            days=len({(bucket[1]*3600)//86400 for bucket in shared})
+            if len(shared): matches.append((len(shared),days,ratio,uid))
+        matches.sort(reverse=True)
+        if not matches:
+            return await ctx.send('No overlapping activity patterns found for that member in the current 30-day window.')
+        lines=[]
+        for shared,days,ratio,uid in matches[:10]:
+            lines.append(f'• <@{uid}> — {shared} shared channel-hours, {days} days, {ratio:.0%} overlap')
+        embed=discord.Embed(title=f'🔎 Activity review: {discord.utils.escape_markdown(str(member))}',description='\n'.join(lines),color=discord.Color.orange())
+        embed.set_footer(text='Ranked by shared active channel-hours. These are review leads, not alt-account accusations.')
+        await ctx.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+
 class Bot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -7139,7 +7440,7 @@ class Bot(commands.Bot):
         intents.members = True  # Required for reliable member lists and join/leave events.
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
     async def setup_hook(self):
-        await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self));await self.add_cog(EventsMissions(self))
+        await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self));await self.add_cog(EventsMissions(self));await self.add_cog(AltMonitor(self))
         self.add_view(TicketPanelView(self))
         self.add_view(TicketCloseView(self, 0))
         await load_pokemon_list();await self.tree.sync()
