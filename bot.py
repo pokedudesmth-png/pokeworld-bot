@@ -5060,6 +5060,8 @@ class CarlStyleExtensions(commands.Cog):
             CREATE TABLE IF NOT EXISTS cv_tags(guild_id INTEGER NOT NULL, name TEXT NOT NULL, response TEXT NOT NULL, author_id INTEGER NOT NULL, PRIMARY KEY(guild_id,name));
             CREATE TABLE IF NOT EXISTS cv_custom_commands(guild_id INTEGER NOT NULL, name TEXT NOT NULL, response TEXT NOT NULL, author_id INTEGER NOT NULL, PRIMARY KEY(guild_id,name));
             CREATE TABLE IF NOT EXISTS cv_warnings(id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, moderator_id INTEGER NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS cv_command_blacklist(guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, command_name TEXT NOT NULL, added_by INTEGER NOT NULL, added_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,command_name));
+            CREATE TABLE IF NOT EXISTS cv_nickname_history(guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, original_nick TEXT, changed_by INTEGER NOT NULL, changed_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,changed_by));
             CREATE TABLE IF NOT EXISTS cv_settings(guild_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(guild_id,key));
             CREATE TABLE IF NOT EXISTS cv_reaction_roles(guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, emoji TEXT NOT NULL, role_id INTEGER NOT NULL, PRIMARY KEY(guild_id,message_id,emoji));
             CREATE TABLE IF NOT EXISTS cv_reminders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, remind_at INTEGER NOT NULL, text TEXT NOT NULL, guild_id INTEGER NOT NULL DEFAULT 0, message_id INTEGER NOT NULL DEFAULT 0);
@@ -5129,6 +5131,126 @@ class CarlStyleExtensions(commands.Cog):
                 return row[0] if row else None
             c.execute('INSERT INTO cv_settings(guild_id,key,value) VALUES(?,?,?) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value',(guild_id,key,str(value)))
             return str(value)
+
+    @staticmethod
+    def _parse_blacklist_user_id(raw_user):
+        value = str(raw_user).strip()
+        match = re.fullmatch(r'<@!?(\d+)>', value)
+        if match:
+            value = match.group(1)
+        if not value.isdigit() or int(value) <= 0:
+            return None
+        return int(value)
+
+    def _resolve_blacklist_command(self, raw_name):
+        name = str(raw_name).strip().lower()
+        if name.startswith(PREFIX):
+            name = name[len(PREFIX):].strip()
+        command = self.bot.get_command(name)
+        if command is None or command.cog is not self:
+            return None
+        canonical = command.qualified_name.lower()
+        if canonical in {'blacklist', 'whitelist'}:
+            return None
+        return canonical
+
+    async def _cleanup_blacklisted_command(self, ctx, user_id, command_name):
+        """Reverse supported server-local effects previously performed by this user."""
+        guild = ctx.guild
+        guild_id = guild.id
+        notes = []
+        if command_name == 'warn':
+            with db() as c:
+                cur = c.execute('DELETE FROM cv_warnings WHERE guild_id=? AND moderator_id=?', (guild_id, user_id))
+            notes.append(f'removed {cur.rowcount} warning(s) previously issued by this user')
+
+        if command_name in {'nickfreeze', 'setnick'}:
+            with db() as c:
+                freezes = c.execute('SELECT user_id, original_nick FROM nick_freezes WHERE guild_id=? AND freezer_id=?',
+                                    (guild_id, user_id)).fetchall()
+                histories = c.execute('SELECT user_id, original_nick FROM cv_nickname_history WHERE guild_id=? AND changed_by=?',
+                                      (guild_id, user_id)).fetchall()
+            originals = {int(uid): original for uid, original in histories}
+            # A freeze's original nickname is authoritative, including setnick changes made while frozen.
+            for uid, original in freezes:
+                originals[int(uid)] = original
+            restored = 0
+            failed = 0
+            for affected_user_id, original_nick in originals.items():
+                member = guild.get_member(affected_user_id)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(affected_user_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        failed += 1
+                        continue
+                try:
+                    await member.edit(nick=original_nick,
+                                      reason=f'PokéVanta command blacklist cleanup by {ctx.author} ({ctx.author.id})')
+                except (discord.Forbidden, discord.HTTPException):
+                    failed += 1
+                    continue
+                with db() as c:
+                    c.execute('DELETE FROM nick_freezes WHERE guild_id=? AND user_id=? AND freezer_id=?',
+                              (guild_id, affected_user_id, user_id))
+                    c.execute('DELETE FROM cv_nickname_history WHERE guild_id=? AND user_id=? AND changed_by=?',
+                              (guild_id, affected_user_id, user_id))
+                restored += 1
+            notes.append(f'restored {restored} nickname(s) changed/frozen by this user')
+            if failed:
+                notes.append(f'{failed} nickname(s) could not be restored (check member access and Manage Nicknames hierarchy)')
+            if not originals:
+                notes.append('no saved nickname changes/freezes by this user were found')
+        return notes
+
+    @commands.command(name='blacklist', description='Developer-only: block a user from one utility/moderation command in this server.')
+    async def command_blacklist(self, ctx, user: str, *, command_name: str):
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ This command is restricted to configured PokéVanta developers.')
+        if not ctx.guild:
+            return await ctx.send('❌ Use this command inside the server where the restriction should apply.')
+        user_id = self._parse_blacklist_user_id(user)
+        if user_id is None:
+            return await ctx.send('⚠️ Provide a valid user mention or Discord user ID.')
+        if user_id in OWNER_IDS:
+            return await ctx.send('❌ Configured bot developers cannot be blacklisted.')
+        canonical = self._resolve_blacklist_command(command_name)
+        if canonical is None:
+            return await ctx.send('⚠️ Choose a command loaded by the Utility/Moderation tools in this bot. Pokémon game commands and `!banbot` cannot be blacklisted here.')
+        with db() as c:
+            already = c.execute('SELECT 1 FROM cv_command_blacklist WHERE guild_id=? AND user_id=? AND command_name=?',
+                                (ctx.guild.id, user_id, canonical)).fetchone()
+        if already:
+            return await ctx.send(f'ℹ️ <@{user_id}> is already blacklisted from `!{canonical}` in this server.', allowed_mentions=discord.AllowedMentions.none())
+        cleanup = await self._cleanup_blacklisted_command(ctx, user_id, canonical)
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO cv_command_blacklist(guild_id,user_id,command_name,added_by,added_at) VALUES(?,?,?,?,?)',
+                      (ctx.guild.id, user_id, canonical, ctx.author.id, int(time.time())))
+            added = c.execute('SELECT changes()').fetchone()[0]
+        if not added:
+            return await ctx.send(f'ℹ️ <@{user_id}> is already blacklisted from `!{canonical}` in this server.')
+        detail = (' Cleanup: ' + '; '.join(cleanup) + '.') if cleanup else ' No reversible stored effects were found to clean up.'
+        await ctx.send(f'🚫 <@{user_id}> is now blocked from using `!{canonical}` in **{ctx.guild.name}** only.{detail}', allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name='whitelist', description='Developer-only: restore a user’s access to a command in this server.')
+    async def command_whitelist(self, ctx, user: str, *, command_name: str):
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ This command is restricted to configured PokéVanta developers.')
+        if not ctx.guild:
+            return await ctx.send('❌ Use this command inside the server where the restriction applies.')
+        user_id = self._parse_blacklist_user_id(user)
+        if user_id is None:
+            return await ctx.send('⚠️ Provide a valid user mention or Discord user ID.')
+        canonical = self._resolve_blacklist_command(command_name)
+        if canonical is None:
+            return await ctx.send('⚠️ Choose a command loaded by the Utility/Moderation tools in this bot.')
+        with db() as c:
+            cur = c.execute('DELETE FROM cv_command_blacklist WHERE guild_id=? AND user_id=? AND command_name=?',
+                            (ctx.guild.id, user_id, canonical))
+        if cur.rowcount:
+            await ctx.send(f'✅ <@{user_id}> can use `!{canonical}` again in **{ctx.guild.name}**.', allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await ctx.send(f'ℹ️ <@{user_id}> was not blacklisted from `!{canonical}` in this server.', allowed_mentions=discord.AllowedMentions.none())
 
     @commands.hybrid_command(name='tag')
     async def tag(self, ctx, name: str = None, *, text: str = None):
@@ -5593,6 +5715,10 @@ class CarlStyleExtensions(commands.Cog):
             freeze = c.execute('SELECT freezer_id,locked_nick FROM nick_freezes WHERE guild_id=? AND user_id=?', (ctx.guild.id, member.id)).fetchone()
             if freeze and freeze[0] != ctx.author.id:
                 return await ctx.send(f'❌ {member.mention} has a nickname freeze. Only the member who used `!nickfreeze` can change their nickname with `!setnick`.')
+            # Keep the first pre-change nickname so a later command blacklist can restore it.
+            if not freeze:
+                c.execute('INSERT OR IGNORE INTO cv_nickname_history(guild_id,user_id,original_nick,changed_by,changed_at) VALUES(?,?,?,?,?)',
+                          (ctx.guild.id, member.id, member.nick, ctx.author.id, int(time.time())))
             # Update the enforced nickname before editing so the gateway event recognizes this as authorized.
             if freeze:
                 c.execute('UPDATE nick_freezes SET locked_nick=? WHERE guild_id=? AND user_id=?', (nickname, ctx.guild.id, member.id))
@@ -5602,10 +5728,14 @@ class CarlStyleExtensions(commands.Cog):
         except discord.Forbidden:
             if freeze:
                 with db() as c: c.execute('UPDATE nick_freezes SET locked_nick=? WHERE guild_id=? AND user_id=?', (freeze[1], ctx.guild.id, member.id))
+            else:
+                with db() as c: c.execute('DELETE FROM cv_nickname_history WHERE guild_id=? AND user_id=?', (ctx.guild.id, member.id))
             await ctx.send('❌ Discord denied the nickname change; check permissions and role hierarchy.')
         except discord.HTTPException as exc:
             if freeze:
                 with db() as c: c.execute('UPDATE nick_freezes SET locked_nick=? WHERE guild_id=? AND user_id=?', (freeze[1], ctx.guild.id, member.id))
+            else:
+                with db() as c: c.execute('DELETE FROM cv_nickname_history WHERE guild_id=? AND user_id=?', (ctx.guild.id, member.id))
             await ctx.send(f'❌ Nickname change failed: `{exc}`')
 
     @commands.hybrid_command(name='nickfreeze', description='Freeze a member nickname so only you can change it.')
@@ -5647,6 +5777,8 @@ class CarlStyleExtensions(commands.Cog):
             with db() as c:
                 c.execute('INSERT OR REPLACE INTO nick_freezes(guild_id,user_id,freezer_id,original_nick,locked_nick) VALUES(?,?,?,?,?)', (ctx.guild.id, member.id, freeze[0], freeze[1], member.nick))
             return await ctx.send(f'❌ Nickname reset failed: `{exc}`. The freeze is still active.')
+        with db() as c:
+            c.execute('DELETE FROM cv_nickname_history WHERE guild_id=? AND user_id=?', (ctx.guild.id, member.id))
         await ctx.send(f'✅ {member.mention}’s original nickname has been restored and the freeze removed.')
 
     @commands.hybrid_command(name='roleadd')
@@ -7138,6 +7270,23 @@ class Bot(commands.Bot):
         intents.message_content = True
         intents.members = True  # Required for reliable member lists and join/leave events.
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
+        self.add_check(self._check_command_blacklist)
+
+    async def _check_command_blacklist(self, ctx):
+        command = ctx.command
+        if not ctx.guild or not command or ctx.author.id in OWNER_IDS:
+            return True
+        if command.name in {'blacklist', 'whitelist'} or command.cog_name != 'CarlStyleExtensions':
+            return True
+        command_name = command.qualified_name.lower()
+        with db() as c:
+            row = c.execute('SELECT 1 FROM cv_command_blacklist WHERE guild_id=? AND user_id=? AND command_name=?',
+                            (ctx.guild.id, ctx.author.id, command_name)).fetchone()
+        if row:
+            await ctx.send(f'🚫 You are not allowed to use `!{command_name}` in this server.', allowed_mentions=discord.AllowedMentions.none())
+            return False
+        return True
+
     async def setup_hook(self):
         await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self));await self.add_cog(EventsMissions(self))
         self.add_view(TicketPanelView(self))
