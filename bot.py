@@ -6531,14 +6531,14 @@ MISSION_DEFS = {
     # High-difficulty objectives; activity is only counted when the corresponding
     # successful gameplay action is recorded by pv_record_activity.
     'daily': [
-        ('catch', '🌿 Wild Collector', 'Catch 20 Pokémon', 20, 7500, 35),
-        ('hunt', '🔎 Field Researcher', 'Complete 30 successful hunts', 30, 6250, 35),
-        ('win', '⚔️ Battle Ready', 'Win 12 NPC battles', 12, 12500, 45),
+        ('catch', '🌿 Wild Collector', 'Catch 20 Pokémon', 20, 7500, 35, 'oran-berry', 2),
+        ('hunt', '🔎 Field Researcher', 'Complete 30 successful hunts', 30, 6250, 35, 'potion', 3),
+        ('win', '⚔️ Battle Ready', 'Win 12 NPC battles', 12, 12500, 45, 'rare-candy', 1),
     ],
     'weekly': [
-        ('catch', '🎒 Master Collector', 'Catch 150 Pokémon', 150, 50000, 150),
-        ('hunt', '🌎 Wild Explorer', 'Complete 250 successful hunts', 250, 42500, 140),
-        ('win', '🏆 Battle Veteran', 'Win 60 NPC battles', 60, 75000, 180),
+        ('catch', '🎒 Master Collector', 'Catch 150 Pokémon', 150, 50000, 150, 'super-potion', 3),
+        ('hunt', '🌎 Wild Explorer', 'Complete 250 successful hunts', 250, 42500, 140, 'fast-tm', 1),
+        ('win', '🏆 Battle Veteran', 'Win 60 NPC battles', 60, 75000, 180, 'raid-pass', 2),
     ],
 }
 
@@ -6554,12 +6554,32 @@ def pv_mp_week_key(now=None):
 
 
 # Weekly Mission Point milestone rewards. Progress and claims roll over Monday 00:00 IST.
+# Each weekly milestone has a different reward identity, not just a larger coin payout.
+# Shape: (required MP, title, VantaCoins, XP, {inventory_item: quantity}).
 MP_REWARD_TIERS = [
-    (500, 25000, "🥉 Rookie Researcher"),
-    (1500, 75000, "🥈 Field Specialist"),
-    (3500, 200000, "🥇 Mission Expert"),
-    (7500, 500000, "👑 PokéVanta Strategist"),
+    (500, '🥉 Rookie Researcher', 8000, 50, {'potion': 2}),
+    (1500, '🥈 Field Specialist', 15000, 125, {'rare-candy': 2}),
+    (3500, '🥇 Mission Expert', 25000, 250, {'raid-pass': 2, 'super-potion': 1}),
+    (7500, '👑 PokéVanta Strategist', 40000, 500, {'elite-charged-tm': 1}),
 ]
+
+def pv_reward_bundle_text(bundle):
+    parts=[]
+    coins=int(bundle.get('coins',0)); xp=int(bundle.get('xp',0))
+    if coins: parts.append(f'{coins:,} VantaCoins')
+    if xp: parts.append(f'{xp:,} XP')
+    for item,qty in bundle.get('items',{}).items():
+        parts.append(f'{int(qty)} × {str(item).replace("-"," ").title()}')
+    return ' + '.join(parts) if parts else 'Special reward'
+
+
+def pv_grant_reward_bundle(uid, bundle):
+    # Grant a curated coins, XP, and item bundle using existing player inventory tables.
+    add_progress(uid, coins=int(bundle.get('coins',0)), xp=int(bundle.get('xp',0)))
+    for item,qty in bundle.get('items',{}).items():
+        if int(qty)>0:
+            change_item(uid, item, int(qty))
+
 
 EVENT_TYPES = {
     'rift': {
@@ -6757,11 +6777,11 @@ class EventsMissions(commands.Cog):
             for kind in ('daily','weekly'):
                 if period not in ('all',kind): continue
                 period_key=pv_period(kind); lines=[]
-                for key,title,desc,target,coins,points in MISSION_DEFS[kind]:
+                for key,title,desc,target,coins,points,item,item_qty in MISSION_DEFS[kind]:
                     row=c.execute('SELECT progress,claimed FROM pv_mission_progress WHERE user_id=? AND period=? AND mission_key=?',(ctx.author.id,period_key,key)).fetchone()
                     progress,claimed=row or (0,0)
                     mark='✅' if progress>=target and claimed else ('🎁' if progress>=target else '▫️')
-                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • {get_vantacoin_emoji()} {coins:,} VantaCoins + **{points} MP**'+(' • Claimed' if claimed else ''))
+                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • {get_vantacoin_emoji()} {coins:,} VantaCoins + **{points} MP** + **{item_qty} × {item.replace("-"," ").title()}**'+(' • Claimed' if claimed else ''))
                 sections.append((f'📅 {kind.title()} missions', '\n\n'.join(lines)))
         e=discord.Embed(title='📜 Trainer Mission Board',description='Complete real gameplay objectives to earn VantaCoins and Mission Points. Claim each completed mission once.',color=discord.Color.from_rgb(65,160,125))
         for title,value in sections:e.add_field(name=title,value=value,inline=False)
@@ -6770,22 +6790,25 @@ class EventsMissions(commands.Cog):
 
     @commands.command(name='missionclaim')
     async def missionclaim(self,ctx):
-        uid=ctx.author.id; pv_ensure_missions(uid); total_coins=total_points=claimed=0
+        uid=ctx.author.id; pv_ensure_missions(uid); total_coins=total_points=claimed=0; item_rewards={}
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
             for kind in ('daily','weekly'):
                 period_key=pv_period(kind)
-                for key,title,desc,target,coins,points in MISSION_DEFS[kind]:
+                for key,title,desc,target,coins,points,item,item_qty in MISSION_DEFS[kind]:
                     row=c.execute('SELECT progress,claimed FROM pv_mission_progress WHERE user_id=? AND period=? AND mission_key=?',(uid,period_key,key)).fetchone()
                     if row and row[0]>=target and not row[1]:
                         c.execute('UPDATE pv_mission_progress SET claimed=1 WHERE user_id=? AND period=? AND mission_key=?',(uid,period_key,key))
-                        total_coins+=coins;total_points+=points;claimed+=1
+                        total_coins+=coins;total_points+=points;claimed+=1;item_rewards[item]=item_rewards.get(item,0)+item_qty
             if total_points:
                 c.execute('INSERT INTO pv_mission_points(user_id,points) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET points=points+excluded.points',(uid,total_points))
                 week_key = pv_mp_week_key()
                 c.execute('INSERT INTO pv_mp_weekly_points(user_id,week_key,points) VALUES(?,?,?) ON CONFLICT(user_id,week_key) DO UPDATE SET points=points+excluded.points',(uid,week_key,total_points))
         if not claimed:return await ctx.send(embed=discord.Embed(title='🎁 No rewards to claim',description='Finish a mission first, or you may have already claimed every completed reward. Use `!missions` to check progress.',color=discord.Color.orange()))
         add_progress(uid,coins=total_coins)
-        e=discord.Embed(title='🎉 Mission rewards claimed!',description=f'**Missions completed:** {claimed}\n**VantaCoins:** +{total_coins:,} {get_vantacoin_emoji()}\n**Mission Points:** +{total_points} MP',color=discord.Color.gold())
+        for reward_item,reward_qty in item_rewards.items(): change_item(uid,reward_item,reward_qty)
+        item_text='\n'.join(f'• **{qty} × {item.replace("-"," ").title()}**' for item,qty in item_rewards.items())
+        e=discord.Embed(title='🎉 Mission rewards claimed!',description=f'**Missions completed:** {claimed}\n**VantaCoins:** +{total_coins:,} {get_vantacoin_emoji()}\n**Mission Points:** +{total_points} MP\n**Bonus items:**\n{item_text or "None"}',color=discord.Color.gold())
         e.set_footer(text='Keep going, Trainer — new objectives are waiting!')
         await ctx.send(embed=e)
 
@@ -6798,9 +6821,10 @@ class EventsMissions(commands.Cog):
             claimed = {r[0] for r in c.execute('SELECT tier FROM pv_mp_weekly_reward_claims WHERE user_id=? AND week_key=?',(uid,week_key)).fetchall()}
         points = int(row[0]) if row else 0
         lines = []
-        for tier,(need,coins,title) in enumerate(MP_REWARD_TIERS,1):
+        for tier,(need,title,coins,xp,items) in enumerate(MP_REWARD_TIERS,1):
             status = '✅ Claimed this week' if tier in claimed else ('🎁 Ready to claim' if points >= need else f'🔒 Need {need-points:,} more MP')
-            lines.append(f'{status} — **{title}**\n`{points:,}/{need:,} weekly MP` → **{coins:,} VantaCoins**')
+            bundle={'coins':coins,'xp':xp,'items':items}
+            lines.append(f'{status} — **{title}**\n`{points:,}/{need:,} weekly MP` → {pv_reward_bundle_text(bundle)}')
         e = discord.Embed(title='🏅 Weekly Mission Point Rewards',description=f'**Your weekly Mission Points:** `{points:,} MP`\n**Current reward week:** `{week_key}` (IST)\n\n'+'\n\n'.join(lines),color=discord.Color.gold())
         e.add_field(name='How it works',value='Earn MP by completing and claiming daily/weekly missions and eligible event rewards. Use `!mpclaim` to claim every unlocked tier. Progress and tier claims reset automatically every Monday at **00:00 IST (UTC+05:30)**; your lifetime MP leaderboard total is preserved.',inline=False)
         e.set_footer(text='Weekly rewards can be earned again next week. Each tier pays once per week.')
@@ -6810,21 +6834,26 @@ class EventsMissions(commands.Cog):
     async def mpclaim(self,ctx):
         uid = ctx.author.id
         week_key = pv_mp_week_key()
-        total = 0
+        total_coins = total_xp = 0
+        item_rewards = {}
         rewards = []
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
             row = c.execute('SELECT points FROM pv_mp_weekly_points WHERE user_id=? AND week_key=?',(uid,week_key)).fetchone()
             points = int(row[0]) if row else 0
-            for tier,(need,coins,title) in enumerate(MP_REWARD_TIERS,1):
+            for tier,(need,title,coins,xp,items) in enumerate(MP_REWARD_TIERS,1):
                 if points >= need:
                     cur = c.execute('INSERT OR IGNORE INTO pv_mp_weekly_reward_claims(user_id,week_key,tier,claimed_at) VALUES(?,?,?,?)',(uid,week_key,tier,int(time.time())))
                     if cur.rowcount:
-                        total += coins
-                        rewards.append(f'• **{title}** — +{coins:,} VantaCoins')
+                        total_coins += coins; total_xp += xp
+                        for item,qty in items.items(): item_rewards[item]=item_rewards.get(item,0)+qty
+                        rewards.append(f'• **{title}** — {pv_reward_bundle_text({"coins":coins,"xp":xp,"items":items})}')
         if not rewards:
             return await ctx.send('🔒 No new weekly Mission Point reward is ready. Check `!mprewards` for this week’s progress. Rewards reset Monday at 00:00 IST (UTC+05:30).')
-        add_progress(uid,coins=total)
-        e = discord.Embed(title='🎉 Weekly Mission Rewards Claimed!',description='\n'.join(rewards)+f'\n\n**Total reward:** +{total:,} {get_vantacoin_emoji()} VantaCoins',color=discord.Color.gold())
+        add_progress(uid,coins=total_coins,xp=total_xp)
+        for item,qty in item_rewards.items(): change_item(uid,item,qty)
+        item_text=', '.join(f'{qty} × {item.replace("-"," ").title()}' for item,qty in item_rewards.items()) or 'None'
+        e = discord.Embed(title='🎉 Weekly Mission Rewards Claimed!',description='\n'.join(rewards)+f'\n\n**Total coins:** +{total_coins:,} {get_vantacoin_emoji()} · **Total XP:** +{total_xp:,}\n**Bonus items:** {item_text}',color=discord.Color.gold())
         e.set_footer(text=f'Claimed for week {week_key} IST • New weekly progress starts Monday 00:00 IST')
         await ctx.send(embed=e)
 
@@ -7595,17 +7624,21 @@ class MMORPG(commands.Cog):
         'galar': ['Thornveil Hollow', 'Glimmerdeep Mine'],
         'paldea': ['Forgotten Canopy', 'Crystalwind Hollow'],
     }
+    # Daily exploration tasks each award a different useful supply, not just coins/XP.
+    # Shape: (description, target, coins, XP, bonus_item, bonus_quantity).
     DAILY_EXPLORATION_MISSIONS = {
-        'trailblazer': ('Explore 3 times', 3, 450, 35),
-        'type_scholar': ('Answer a Type Master quiz correctly', 1, 500, 45),
-        'cave_solver': ('Attempt a mystery cave puzzle', 1, 650, 60),
+        'trailblazer': ('Explore 3 times', 3, 350, 25, 'oran-berry', 2),
+        'type_scholar': ('Answer a Type Master quiz correctly', 1, 500, 40, 'rare-candy', 1),
+        'cave_solver': ('Attempt a mystery cave puzzle', 1, 300, 60, 'super-potion', 1),
     }
+    # Each Legendary story arc has its own themed reward bundle.
+    # Shape: (title, region, goal, guardian, reward_bundle).
     QUESTS = {
-        'sky_awakening': ('The Sky’s Awakening', 'hoenn', 12, 'Rayquaza', 25000),
-        'creation_trio': ('Echoes of Creation', 'sinnoh', 18, 'Dialga', 40000),
-        'guardian_trial': ('Guardians of the Brass Tower', 'johto', 15, 'Lugia', 30000),
-        'abyssal_awaken': ('The Abyssal Awakening', 'hoenn', 20, 'Kyogre', 45000),
-        'unova_legend': ('The Dragon’s Truth', 'unova', 18, 'Reshiram', 40000),
+        'sky_awakening': ('The Sky’s Awakening', 'hoenn', 12, 'Rayquaza', {'coins':12000,'xp':220,'items':{'fast-tm':1,'oran-berry':3}}),
+        'creation_trio': ('Echoes of Creation', 'sinnoh', 18, 'Dialga', {'coins':18000,'xp':300,'items':{'charged-tm':1,'rare-candy':2}}),
+        'guardian_trial': ('Guardians of the Brass Tower', 'johto', 15, 'Lugia', {'coins':10000,'xp':260,'items':{'super-potion':3,'raid-pass':1}}),
+        'abyssal_awaken': ('The Abyssal Awakening', 'hoenn', 20, 'Kyogre', {'coins':22000,'xp':400,'items':{'elite-charged-tm':1,'rare-candy':3}}),
+        'unova_legend': ('The Dragon’s Truth', 'unova', 18, 'Reshiram', {'coins':16000,'xp':340,'items':{'raid-pass':2,'full-restore':1}}),
     }
     MEGA_STONES = {
         'venusaur': 'venusaurite', 'charizard': 'charizardite', 'blastoise': 'blastoisinite',
@@ -7631,8 +7664,10 @@ class MMORPG(commands.Cog):
     def _ensure_daily_exploration(self, uid):
         day = self._day_key()
         with db() as c:
-            for key, (_, target, coins, xp) in self.DAILY_EXPLORATION_MISSIONS.items():
-                c.execute('INSERT OR IGNORE INTO pv_explore_daily(user_id,day_key,mission_key,progress,target,claimed,reward_coins,reward_xp) VALUES(?,?,?,0,?,0,?,?)', (uid,day,key,target,coins,xp))
+            for key, (_, target, coins, xp, item, qty) in self.DAILY_EXPLORATION_MISSIONS.items():
+                c.execute('INSERT OR IGNORE INTO pv_explore_daily(user_id,day_key,mission_key,progress,target,claimed,reward_coins,reward_xp,reward_item,reward_qty) VALUES(?,?,?,0,?,0,?,?,?,?)', (uid,day,key,target,coins,xp,item,qty))
+                # Refresh today's unclaimed reward definition after an update; never alter a reward already claimed.
+                c.execute('UPDATE pv_explore_daily SET reward_coins=?,reward_xp=?,reward_item=?,reward_qty=? WHERE user_id=? AND day_key=? AND mission_key=? AND claimed=0', (coins,xp,item,qty,uid,day,key))
         return day
 
     def _daily_progress(self, uid, mission_key, amount=1):
@@ -7678,6 +7713,10 @@ class MMORPG(commands.Cog):
             CREATE TABLE IF NOT EXISTS pv_type_daily(user_id INTEGER NOT NULL,day_key TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,day_key));
             CREATE INDEX IF NOT EXISTS idx_pv_explore_daily_user_day ON pv_explore_daily(user_id,day_key);
             ''')
+        with db() as c:
+            daily_cols={r[1] for r in c.execute('PRAGMA table_info(pv_explore_daily)').fetchall()}
+            if 'reward_item' not in daily_cols: c.execute("ALTER TABLE pv_explore_daily ADD COLUMN reward_item TEXT NOT NULL DEFAULT ''")
+            if 'reward_qty' not in daily_cols: c.execute('ALTER TABLE pv_explore_daily ADD COLUMN reward_qty INTEGER NOT NULL DEFAULT 0')
 
     def _species_id(self, species):
         try: return int(str(species.get('url','')).rstrip('/').split('/')[-1])
@@ -7910,12 +7949,12 @@ class MMORPG(commands.Cog):
     async def exploremissions(self, ctx):
         day = self._ensure_daily_exploration(ctx.author.id)
         with db() as c:
-            rows = c.execute('SELECT mission_key,progress,target,claimed,reward_coins,reward_xp FROM pv_explore_daily WHERE user_id=? AND day_key=? ORDER BY mission_key', (ctx.author.id,day)).fetchall()
+            rows = c.execute('SELECT mission_key,progress,target,claimed,reward_coins,reward_xp,reward_item,reward_qty FROM pv_explore_daily WHERE user_id=? AND day_key=? ORDER BY mission_key', (ctx.author.id,day)).fetchall()
         lines=[]
-        for key,progress,target,claimed,coins,xp in rows:
+        for key,progress,target,claimed,coins,xp,item,qty in rows:
             label=self.DAILY_EXPLORATION_MISSIONS[key][0]
             status='✅ Claimed' if claimed else '🎁 Ready to claim' if progress>=target else '⏳ In progress'
-            lines.append(f'**{label}**\n`{key}` · **{progress}/{target}** · {status}\nReward: {coins:,} VantaCoins + {xp} XP')
+            lines.append(f'**{label}**\n`{key}` · **{progress}/{target}** · {status}\nReward: {coins:,} VantaCoins + {xp} XP + {qty} × {item.replace("-"," ").title()}')
         embed=discord.Embed(title='📅 Daily Exploration Missions',description='\n\n'.join(lines),color=discord.Color.blurple())
         embed.set_footer(text='Resets daily at 00:00 India Standard Time • !explorem claim <mission_key>')
         await ctx.send(embed=embed)
@@ -7928,17 +7967,18 @@ class MMORPG(commands.Cog):
         day=self._ensure_daily_exploration(ctx.author.id)
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            row=c.execute('SELECT progress,target,claimed,reward_coins,reward_xp FROM pv_explore_daily WHERE user_id=? AND day_key=? AND mission_key=?',(ctx.author.id,day,key)).fetchone()
+            row=c.execute('SELECT progress,target,claimed,reward_coins,reward_xp,reward_item,reward_qty FROM pv_explore_daily WHERE user_id=? AND day_key=? AND mission_key=?',(ctx.author.id,day,key)).fetchone()
             if not row:
                 return await ctx.send('❌ Daily mission could not be loaded. Try again.')
-            progress,target,claimed,coins,xp=row
+            progress,target,claimed,coins,xp,item,qty=row
             if claimed:
                 return await ctx.send('✅ You already claimed this mission reward today.')
             if progress<target:
                 return await ctx.send(f'⏳ Mission not complete yet: **{progress}/{target}**.')
             c.execute('UPDATE pv_explore_daily SET claimed=1 WHERE user_id=? AND day_key=? AND mission_key=? AND claimed=0',(ctx.author.id,day,key))
         add_progress(ctx.author.id,coins=coins,xp=xp)
-        await ctx.send(f'🎉 **Daily mission claimed!**\nYou received **{coins:,} VantaCoins** and **{xp} XP**.')
+        if item and qty>0: change_item(ctx.author.id,item,qty)
+        await ctx.send(f'🎉 **Daily mission claimed!**\nYou received **{coins:,} VantaCoins**, **{xp} XP**, and **{qty} × {item.replace("-"," ").title() if item else "no bonus item"}**.')
 
     @commands.command(name='cave')
     async def cave(self, ctx):
@@ -8132,26 +8172,56 @@ class MMORPG(commands.Cog):
             c.execute('INSERT INTO pv_mega_active(user_id,instance_id,activated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET instance_id=excluded.instance_id,activated_at=excluded.activated_at',(uid,iid,int(time.time())))
         await ctx.send(f'🌟 **{row[0].title()}** is prepared for Mega Evolution! Its next supported NPC/legendary/raid battle will receive the Mega boost. The transformation expires after that battle.')
 
+    def _resolve_quest_key(self, value):
+        """Accept a player-facing quest number, internal key, or exact title."""
+        raw=str(value or '').strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            index=int(raw)-1
+            keys=list(self.QUESTS)
+            return keys[index] if 0 <= index < len(keys) else None
+        lowered=raw.casefold().replace('-', ' ').replace('_', ' ')
+        for key,(title,region,goal,legendary,reward) in self.QUESTS.items():
+            if lowered in {key.casefold(), key.casefold().replace('_',' '), title.casefold()}:
+                return key
+        return None
+
+    def _quest_number(self, key):
+        return list(self.QUESTS).index(key)+1
+
     @commands.group(name='quests', invoke_without_command=True)
     async def quests(self,ctx):
         lines=[]
         with db() as c:
-            for key,(title,region,goal,legendary,reward) in self.QUESTS.items():
+            for number,(key,(title,region,goal,legendary,reward)) in enumerate(self.QUESTS.items(),1):
                 row=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
                 progress,claimed=row if row else (0,0)
-                lines.append(f'**{title}** · {region.title()} · {min(progress,goal)}/{goal} exploration steps · {"Claimed" if claimed else "Ready to claim" if progress>=goal else "In progress"}')
-        await ctx.send(embed=discord.Embed(title='📜 Legendary Questlines',description='\n'.join(lines)+'\n\nUse `!quest <quest_key>` for details, `!quest claim <quest_key>` to claim it, then `!quest summon <quest_key>` to challenge its Legendary guardian.',color=discord.Color.gold()))
+                status='Reward claimed' if claimed else 'Ready to claim' if progress>=goal else 'In progress'
+                lines.append(f'**#{number} · {title}**\nRegion: **{region.title()}** · Progress: **{min(progress,goal)}/{goal}** · {status}\nGuardian: **{legendary}**\nReward: {pv_reward_bundle_text(reward)}')
+        description='\n\n'.join(lines) or 'No questlines are available right now.'
+        description+='\n\n**How to play**\n`!quest <number>` — view a quest\n`!quest claim <number>` — claim its reward\n`!quest summon <number>` — summon its Legendary guardian\n\nYou progress by travelling to the listed region and using `!explore`.'
+        await ctx.send(embed=discord.Embed(title='📜 Legendary Questlines',description=description,color=discord.Color.gold()))
 
     @commands.command(name='quest')
     async def quest(self,ctx,action_or_key:str='list',*,argument:str=''):
-        if action_or_key.lower() in {'list','all'}:return await self.quests(ctx)
-        if action_or_key.lower()=='summon':
-            key=argument.lower().strip()
-            if key not in self.QUESTS:return await ctx.send('❌ Unknown quest key. Use `!quests`.')
-            title,region,goal,legendary,reward=self.QUESTS[key]
+        action=action_or_key.lower().strip()
+        if action in {'list','all'}:
+            return await self.quests(ctx)
+        if action in {'summon','claim'}:
+            key=self._resolve_quest_key(argument)
+            if key is None:
+                return await ctx.send('❌ I could not identify that quest. Use `!quests` and enter its **number**. Example: `!quest claim 1`.')
+        else:
+            key=self._resolve_quest_key(action_or_key)
+            if key is None:
+                return await ctx.send('❌ I could not identify that quest. Use `!quests` and enter its **number**. Example: `!quest 1`.')
+        title,region,goal,legendary,reward=self.QUESTS[key]
+        number=self._quest_number(key)
+        if action=='summon':
             with db() as c:
                 progress=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
-                if not progress or not progress[1]:return await ctx.send(f'🔒 Complete and claim **{title}** before summoning its Legendary guardian.')
+                if not progress or not progress[1]:return await ctx.send(f'🔒 Complete and claim **#{number} · {title}** before summoning its Legendary guardian. Use `!quest claim {number}` after completing it.')
                 if c.execute('SELECT 1 FROM boss_encounters WHERE user_id=?',(ctx.author.id,)).fetchone():return await ctx.send('You already have a Legendary encounter. Finish it before summoning another.')
                 if c.execute('SELECT 1 FROM raid_encounters WHERE user_id=? UNION SELECT 1 FROM encounters WHERE user_id=?',(ctx.author.id,ctx.author.id)).fetchone():return await ctx.send('Finish your current hunt or raid before summoning a quest guardian.')
             try: data=await pokemon_data(legendary.lower())
@@ -8159,31 +8229,26 @@ class MMORPG(commands.Cog):
             with db() as c:
                 c.execute('INSERT INTO boss_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,0)',(ctx.author.id,data['id'],data['name'],0))
                 c.execute('DELETE FROM boss_party WHERE user_id=?',(ctx.author.id,))
-            return await ctx.send(f'🌌 **{legendary} has answered your quest!**\nBuild a three-Pokémon guardian squad with `!add <Pokémon ID>`, then challenge it with `!legendarybattle`. The encounter uses PokéVanta’s existing Legendary battle system and rewards.')
-        if action_or_key.lower()=='claim':
-            key=argument.lower().strip()
-            if key not in self.QUESTS:return await ctx.send('❌ Unknown quest key. Use `!quests`.')
-            title,region,goal,legendary,reward=self.QUESTS[key]
+            return await ctx.send(f'🌌 **{legendary} has answered Quest #{number}: {title}!**\nBuild a three-Pokémon guardian squad with `!add <Pokémon ID>`, then challenge it with `!legendarybattle`.')
+        if action=='claim':
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
                 row=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
-                if not row or row[0]<goal:return await ctx.send(f'🔒 **{title}** needs {goal} exploration steps in its story arc.')
+                if not row or row[0]<goal:return await ctx.send(f'🔒 **Quest #{number} · {title}** needs {goal} exploration steps in **{region.title()}**. Current progress: **{min(row[0],goal) if row else 0}/{goal}**.')
                 if row[1]:return await ctx.send('You already claimed this quest reward.')
                 c.execute('UPDATE pv_quest_progress SET claimed=1 WHERE user_id=? AND quest_key=?',(ctx.author.id,key))
                 region_order=list(self.REGIONS)
                 if region in region_order and region_order.index(region)+1<len(region_order):
                     next_region=region_order[region_order.index(region)+1]
                     c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(ctx.author.id,next_region,int(time.time())))
-            add_progress(ctx.author.id,coins=reward,xp=250)
+            pv_grant_reward_bundle(ctx.author.id,reward)
             await self._guild_contribute(ctx.author.id,20)
-            return await ctx.send(f'🏆 **{title} completed!**\nYou earned **{reward:,} VantaCoins + 250 XP**. Legendary encounter clue unlocked: **{legendary}**. (Questline rewards do not automatically grant a Legendary.)')
-        key=action_or_key.lower().strip()
-        if key not in self.QUESTS:return await ctx.send('❌ Unknown quest. Use `!quests` to see available questlines.')
-        title,region,goal,legendary,reward=self.QUESTS[key]
-        progress=self._travel(ctx.author.id)
+            return await ctx.send(f'🏆 **Quest #{number} · {title} completed!**\n**Your reward:** {pv_reward_bundle_text(reward)}\n**Next step:** summon **{legendary}** with `!quest summon {number}`.')
         with db() as c:row=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
         amount=row[0] if row else 0
-        await ctx.send(embed=discord.Embed(title=f'📜 {title}',description=f'**Region:** {region.title()}\n**Legendary:** {legendary}\n**Objective:** Explore {goal} times (current progress {min(amount,goal)}/{goal}).\n**Reward:** {reward:,} VantaCoins + 250 XP\n\nTravel to {region.title()} and explore to progress. Claim with `!quest claim {key}`, then summon the guardian with `!quest summon {key}`.',color=discord.Color.gold()))
+        claimed=bool(row[1]) if row else False
+        status='Reward claimed' if claimed else 'Ready to claim' if amount>=goal else 'In progress'
+        await ctx.send(embed=discord.Embed(title=f'📜 Quest #{number} · {title}',description=f'**Region:** {region.title()}\n**Legendary guardian:** {legendary}\n**Objective:** Explore {goal} times in {region.title()}.\n**Progress:** {min(amount,goal)}/{goal}\n**Status:** {status}\n**Reward:** {pv_reward_bundle_text(reward)}\n\n**What to do:** Travel to **{region.title()}** and use `!explore` until the objective is complete. Then use `!quest claim {number}` to collect your reward, followed by `!quest summon {number}` to call the guardian.',color=discord.Color.gold()))
 
     @commands.group(name='guild', invoke_without_command=True)
     async def guild(self,ctx):
