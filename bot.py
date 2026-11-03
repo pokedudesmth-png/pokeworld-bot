@@ -226,14 +226,15 @@ def db():
     permits only one writer at a time, so only one bot process should use this
     database file at once.
     """
+    _db_started = time.monotonic()
     conn = sqlite3.connect(
         DB,
-        timeout=30.0,
+        timeout=5.0,
         isolation_level='DEFERRED',
         cached_statements=256,
     )
     try:
-        conn.execute('PRAGMA busy_timeout=30000')
+        conn.execute('PRAGMA busy_timeout=5000')
         conn.execute('PRAGMA foreign_keys=ON')
         conn.execute('PRAGMA synchronous=NORMAL')
         conn.execute('PRAGMA temp_store=MEMORY')
@@ -246,6 +247,9 @@ def db():
         raise
     finally:
         conn.close()
+        _db_elapsed = time.monotonic() - _db_started
+        if _db_elapsed >= 0.75:
+            print(f'[SLOW DATABASE] operation={_db_elapsed:.2f}s database={os.path.basename(DB)}')
 
 
 def pv_battle_cooldown_remaining(uid, battle_type='npc', now=None):
@@ -279,8 +283,8 @@ def setup():
     # connection context manager commits/rolls back but does not close it.
     _conn = None
     try:
-        _conn = sqlite3.connect(DB, timeout=30.0)
-        _conn.execute('PRAGMA busy_timeout=30000')
+        _conn = sqlite3.connect(DB, timeout=5.0)
+        _conn.execute('PRAGMA busy_timeout=5000')
         _conn.execute('PRAGMA journal_mode=WAL')
         _conn.execute('PRAGMA synchronous=NORMAL')
         _conn.execute('PRAGMA wal_autocheckpoint=1000')
@@ -2282,7 +2286,7 @@ class Game(commands.Cog):
             'ccdelete', 'eventimage', 'eventtoken', 'eventitem', 'gamelogs'
         }
         categories = {
-            'start': 'Adventure', 'profile': 'Adventure', 'regions': 'Exploration & Quests', 'region': 'Exploration & Quests', 'travel': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
+            'start': 'Adventure', 'profile': 'Adventure', 'regions': 'Exploration & Quests', 'region': 'Exploration & Quests', 'travel': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'hidden': 'Exploration & Quests', 'cave': 'Exploration & Quests', 'typemaster': 'Exploration & Quests', 'typequiz': 'Exploration & Quests', 'explorem': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
             'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
             'select': 'Teams & Battles', 'setteam': 'Teams & Battles', 'team': 'Teams & Battles', 'legendarybattle': 'Teams & Battles', 'battle': 'Teams & Battles', 'challenge': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies',
@@ -2405,7 +2409,7 @@ class Game(commands.Cog):
                     'regions': 'View the nine-region world atlas and your unlocks.',
                     'region': 'View or travel to an unlocked Pokémon region.',
                     'travel': 'Travel between discovered locations in your current region.',
-                    'explore': 'Explore your current location for Pokémon, eggs, items and VantaCoins.',
+                    'explore': 'Explore your current location for Pokémon, eggs, items, VantaCoins, interactive Pokémon riddles and treasure-search mini-games.',
                     'egg': 'Claim a starter egg, view egg commands or hatch an incubated egg.',
                     'eggs': 'View your egg collection and incubation progress.',
                     'dungeon': 'Explore persistent multi-floor Mystery Dungeon runs.',
@@ -2433,7 +2437,7 @@ class Game(commands.Cog):
                     'regions': 'View the world atlas, region unlocks and your exploration progress.',
                     'region': 'View your current region or details about an unlocked region.',
                     'travel': 'Travel to a known location in your current region.',
-                    'explore': 'Explore your current location for Pokémon, eggs, VantaCoins and items. Exploration also incubates eggs and advances regional questlines.',
+                    'explore': 'Explore your current location for Pokémon, eggs, VantaCoins and items. Find interactive Pokémon riddles and treasure-search mini-games; exploration also incubates eggs and advances regional questlines.',
                     'eggs': 'View your unhatched eggs, their region and incubation progress.',
                 }
                 desc = known_descriptions.get(command.qualified_name.lower(), known_descriptions.get(root_name, f'{root_name.replace("_", " ").capitalize()} command. See its usage above for the required arguments.'))
@@ -7307,6 +7311,267 @@ Shop economy: 500-token VantaCoin Treasury, 750-token MP bundle, 250-token Relic
 # PokéVanta MMORPG expansion. New systems use additive pv_* tables and the
 # existing pokemon / inventory / players tables. No legacy tables are replaced.
 # ---------------------------------------------------------------------------
+
+
+class ExploreMiniGameView(discord.ui.View):
+    """One-shot, trainer-owned exploration mini-game with safe reward handling."""
+    def __init__(self, cog, ctx, game):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.ctx = ctx
+        self.game = game
+        self.finished = False
+        if game['kind'] == 'riddle':
+            for index, option in enumerate(game['options']):
+                button = discord.ui.Button(label=option[:80], style=discord.ButtonStyle.primary)
+                async def choose(interaction, picked=index):
+                    await self.resolve(interaction, picked)
+                button.callback = choose
+                self.add_item(button)
+        else:
+            for index, label in enumerate(('Open the mossy chest', 'Open the stone chest', 'Open the wooden chest')):
+                button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
+                async def choose(interaction, picked=index):
+                    await self.resolve(interaction, picked)
+                button.callback = choose
+                self.add_item(button)
+
+    async def resolve(self, interaction, picked):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message(
+                'This discovery belongs to the trainer who started the exploration.',
+                ephemeral=True,
+            )
+        if self.finished:
+            return await interaction.response.send_message('This exploration event has already been completed.', ephemeral=True)
+
+        self.finished = True
+        for child in self.children:
+            child.disabled = True
+
+        uid = self.ctx.author.id
+        if self.game['kind'] == 'riddle':
+            if picked == self.game['answer']:
+                coins = random.randint(900, 1800)
+                add_progress(uid, coins=coins, xp=40)
+                result = (
+                    f'✅ Correct! **{self.game["explanation"]}**\n'
+                    f'You earned **{coins:,} VantaCoins** and **40 XP**.'
+                )
+                title = '🧠 Riddle Solved!'
+                color = discord.Color.gold()
+            else:
+                add_progress(uid, coins=100, xp=5)
+                correct = self.game['options'][self.game['answer']]
+                result = (
+                    f'Not quite! The answer was **{correct}**.\n'
+                    'The wandering researcher gives you **100 VantaCoins** and **5 XP** for trying.'
+                )
+                title = '📚 The Researcher Reveals the Answer'
+                color = discord.Color.blurple()
+        else:
+            if picked == self.game['treasure']:
+                coins = random.randint(700, 1700)
+                add_progress(uid, coins=coins, xp=25)
+                bonus = ''
+                if random.random() < 0.35:
+                    item = random.choice(('potion', 'super-potion', 'oran-berry', 'rare-candy'))
+                    change_item(uid, item, 1)
+                    bonus = f'\n🎒 Bonus find: **1 × {item.replace("-", " ").title()}**!'
+                result = f'🎉 You found the hidden stash: **{coins:,} VantaCoins** and **25 XP**!{bonus}'
+                title = '🗝️ Treasure Found!'
+                color = discord.Color.gold()
+            else:
+                add_progress(uid, coins=100, xp=5)
+                result = 'The chest is empty, but you find **100 VantaCoins** and gain **5 XP** tucked beneath it.'
+                title = '📦 An Empty Chest'
+                color = discord.Color.blurple()
+
+        embed = discord.Embed(title=title, description=result, color=color)
+        embed.set_footer(text='Exploration event completed • Explore again after your cooldown')
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        for child in self.children:
+            child.disabled = True
+        try:
+            if getattr(self, 'message', None):
+                await self.message.edit(
+                    embed=discord.Embed(
+                        title='🍃 The moment has passed',
+                        description='The clues faded away before you could investigate them.',
+                        color=discord.Color.dark_grey(),
+                    ),
+                    view=self,
+                )
+        except discord.HTTPException:
+            pass
+
+
+class AdventureStoryView(discord.ui.View):
+    """Trainer-owned branching story. Every choice resolves once and pays once."""
+    def __init__(self, ctx, story):
+        super().__init__(timeout=75)
+        self.ctx, self.story, self.finished = ctx, story, False
+        for index, choice in enumerate(story['choices']):
+            button = discord.ui.Button(label=choice['label'][:80], style=discord.ButtonStyle.primary)
+            async def choose(interaction, picked=index):
+                await self.resolve(interaction, picked)
+            button.callback = choose
+            self.add_item(button)
+
+    async def resolve(self, interaction, picked):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message('Only the trainer who discovered this story can choose its path.', ephemeral=True)
+        if self.finished:
+            return await interaction.response.send_message('This story has already reached its ending.', ephemeral=True)
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        outcome = self.story['choices'][picked]
+        add_progress(self.ctx.author.id, coins=outcome['coins'], xp=outcome['xp'])
+        bonus = ''
+        if outcome.get('item'):
+            change_item(self.ctx.author.id, outcome['item'], 1)
+            bonus = f"\n🎒 Found: **1 × {outcome['item'].replace('-', ' ').title()}**"
+        embed = discord.Embed(
+            title=outcome['title'],
+            description=f"{outcome['text']}\n\n💰 **+{outcome['coins']:,} VantaCoins** · ✨ **+{outcome['xp']} XP**{bonus}",
+            color=discord.Color.green() if outcome['coins'] >= 500 else discord.Color.blurple(),
+        )
+        embed.set_footer(text='Story completed • Your choice has been saved')
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        try:
+            if getattr(self, 'message', None):
+                await self.message.edit(content='⌛ The trail has gone quiet. This story has expired.', view=self)
+        except discord.HTTPException:
+            pass
+
+
+class CavePuzzleView(discord.ui.View):
+    """One-attempt cave puzzle with a trainer-only, one-time reward."""
+    def __init__(self, cog, ctx, puzzle, day_key):
+        super().__init__(timeout=75)
+        self.cog, self.ctx, self.puzzle, self.day_key, self.finished = cog, ctx, puzzle, day_key, False
+        for index, label in enumerate(puzzle['options']):
+            button = discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary)
+            async def choose(interaction, picked=index):
+                await self.resolve(interaction, picked)
+            button.callback = choose
+            self.add_item(button)
+
+    async def resolve(self, interaction, picked):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message('This cave puzzle belongs to the trainer who entered it.', ephemeral=True)
+        if self.finished:
+            return await interaction.response.send_message('This puzzle has already been solved or attempted.', ephemeral=True)
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        uid = self.ctx.author.id
+        if picked == self.puzzle['answer']:
+            coins, xp = random.randint(900, 1500), 70
+            add_progress(uid, coins=coins, xp=xp)
+            bonus = ''
+            if random.random() < 0.30:
+                item = random.choice(('rare-candy', 'super-potion', 'oran-berry'))
+                change_item(uid, item, 1)
+                bonus = f"\n🎒 Bonus: **1 × {item.replace('-', ' ').title()}**"
+            self.cog._daily_progress(uid, 'cave_clear')
+            with db() as c:
+                c.execute('UPDATE pv_cave_daily SET completed=1 WHERE user_id=? AND day_key=?', (uid, self.day_key))
+            desc = f"✅ {self.puzzle['explanation']}\n\nYou earned **{coins:,} VantaCoins** and **{xp} XP**.{bonus}"
+            title, color = '💎 Cave Puzzle Solved!', discord.Color.gold()
+        else:
+            add_progress(uid, coins=100, xp=10)
+            desc = f"The mechanism resets. The answer was **{self.puzzle['options'][self.puzzle['answer']]}**.\nYou still earned **100 VantaCoins** and **10 XP** for trying."
+            title, color = '🪨 The Cave Remains Sealed', discord.Color.dark_grey()
+            with db() as c:
+                c.execute('UPDATE pv_cave_daily SET completed=1 WHERE user_id=? AND day_key=?', (uid, self.day_key))
+        embed = discord.Embed(title=title, description=desc, color=color)
+        embed.set_footer(text='One cave puzzle attempt per day')
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        try:
+            if getattr(self, 'message', None):
+                await self.message.edit(content='⌛ The cave mechanism has gone dormant. Try again tomorrow.', view=self)
+        except discord.HTTPException:
+            pass
+
+
+class TypeMasterView(discord.ui.View):
+    """One-question Pokémon type-immunity quiz."""
+    def __init__(self, cog, ctx, quiz):
+        super().__init__(timeout=60)
+        self.cog, self.ctx, self.quiz, self.finished = cog, ctx, quiz, False
+        for index, label in enumerate(quiz['options']):
+            button = discord.ui.Button(label=label.title(), style=discord.ButtonStyle.primary)
+            async def choose(interaction, picked=index):
+                await self.resolve(interaction, picked)
+            button.callback = choose
+            self.add_item(button)
+
+    async def resolve(self, interaction, picked):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message('Only the trainer who started this quiz can answer.', ephemeral=True)
+        if self.finished:
+            return await interaction.response.send_message('This quiz question has already been answered.', ephemeral=True)
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        uid = self.ctx.author.id
+        correct = picked == self.quiz['answer']
+        if correct:
+            day = self.cog._day_key()
+            with db() as c:
+                c.execute('INSERT OR IGNORE INTO pv_type_daily(user_id,day_key,completed) VALUES(?,?,0)', (uid, day))
+                first = c.execute('UPDATE pv_type_daily SET completed=1 WHERE user_id=? AND day_key=? AND completed=0', (uid, day)).rowcount
+            if first:
+                coins, xp = 500, 45
+                add_progress(uid, coins=coins, xp=xp)
+                self.cog._daily_progress(uid, 'type_quiz')
+                reward = f'You earned **{coins:,} VantaCoins** and **{xp} XP**.'
+            else:
+                reward = 'You already claimed today’s Type Master reward, but your type knowledge is sharp!'
+            title, color = '⚡ Type Master: Correct!', discord.Color.gold()
+            desc = f"**{self.quiz['options'][self.quiz['answer']].title()}** is immune to {self.quiz['attack'].title()}-type moves.\n{reward}"
+        else:
+            add_progress(uid, coins=75, xp=5)
+            title, color = '📘 Type Master: Not Quite!', discord.Color.blurple()
+            desc = f"The correct answer is **{self.quiz['options'][self.quiz['answer']].title()}**. It takes no damage from {self.quiz['attack'].title()}-type moves. You earned **75 VantaCoins** and **5 XP** for participating."
+        embed = discord.Embed(title=title, description=desc, color=color)
+        embed.set_footer(text='A Type Master reward can be claimed once per day')
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        try:
+            if getattr(self, 'message', None):
+                await self.message.edit(content='⌛ The quiz timed out. Try Type Master again when you are ready.', view=self)
+        except discord.HTTPException:
+            pass
+
+
 class MMORPG(commands.Cog):
     REGIONS = {
         'kanto': (1,151, ['Pallet Town','Viridian Forest','Mt. Moon','Cerulean Cape','Power Plant','Seafoam Islands','Victory Road']),
@@ -7318,6 +7583,22 @@ class MMORPG(commands.Cog):
         'alola': (722,809, ['Iki Town','Verdant Cavern','Lush Jungle','Vast Poni Canyon','Haina Desert','Resolution Cave','Altar of the Sunne']),
         'galar': (810,905, ['Postwick','Slumbering Weald','Glimwood Tangle','Galar Mine','Crown Tundra','Dynamax Adventure','Energy Plant']),
         'paldea': (906,1025, ['Cabo Poco','South Province','Tagtree Thicket','Asado Desert','Glaseado Mountain','Area Zero','Zero Lab']),
+    }
+    HIDDEN_LOCATIONS = {
+        'kanto': ['Whispering Glade', 'Moonlit Grotto'],
+        'johto': ['Bellflower Hollow', 'Silverleaf Spring'],
+        'hoenn': ['Cloudfall Basin', 'Emberroot Cavern'],
+        'sinnoh': ['Starlit Hollow', 'Frostglass Shrine'],
+        'unova': ['Echoing Burrow', 'Obsidian Garden'],
+        'kalos': ['Prismwild Grove', 'Duskpetal Ruins'],
+        'alola': ['Lunafall Cove', 'Sunken Star Pool'],
+        'galar': ['Thornveil Hollow', 'Glimmerdeep Mine'],
+        'paldea': ['Forgotten Canopy', 'Crystalwind Hollow'],
+    }
+    DAILY_EXPLORATION_MISSIONS = {
+        'trailblazer': ('Explore 3 times', 3, 450, 35),
+        'type_scholar': ('Answer a Type Master quiz correctly', 1, 500, 45),
+        'cave_solver': ('Attempt a mystery cave puzzle', 1, 650, 60),
     }
     QUESTS = {
         'sky_awakening': ('The Sky’s Awakening', 'hoenn', 12, 'Rayquaza', 25000),
@@ -7343,6 +7624,23 @@ class MMORPG(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+
+    def _day_key(self):
+        return datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d')
+
+    def _ensure_daily_exploration(self, uid):
+        day = self._day_key()
+        with db() as c:
+            for key, (_, target, coins, xp) in self.DAILY_EXPLORATION_MISSIONS.items():
+                c.execute('INSERT OR IGNORE INTO pv_explore_daily(user_id,day_key,mission_key,progress,target,claimed,reward_coins,reward_xp) VALUES(?,?,?,0,?,0,?,?)', (uid,day,key,target,coins,xp))
+        return day
+
+    def _daily_progress(self, uid, mission_key, amount=1):
+        if mission_key not in self.DAILY_EXPLORATION_MISSIONS:
+            return
+        day = self._ensure_daily_exploration(uid)
+        with db() as c:
+            c.execute('UPDATE pv_explore_daily SET progress=MIN(target,progress+?) WHERE user_id=? AND day_key=? AND mission_key=?', (max(0,int(amount)),uid,day,mission_key))
 
     async def cog_check(self, ctx):
         if GAMEPLAY_MAINTENANCE_ENABLED:
@@ -7374,6 +7672,11 @@ class MMORPG(commands.Cog):
             CREATE TABLE IF NOT EXISTS pv_mega_stones(user_id INTEGER NOT NULL,stone TEXT NOT NULL,quantity INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,stone));
             CREATE TABLE IF NOT EXISTS pv_mega_active(user_id INTEGER PRIMARY KEY,instance_id INTEGER NOT NULL,activated_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS pv_mega_history(user_id INTEGER NOT NULL,instance_id INTEGER NOT NULL,used_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS pv_hidden_locations(user_id INTEGER NOT NULL,region TEXT NOT NULL,location TEXT NOT NULL,unlocked_at INTEGER NOT NULL,PRIMARY KEY(user_id,region,location));
+            CREATE TABLE IF NOT EXISTS pv_explore_daily(user_id INTEGER NOT NULL,day_key TEXT NOT NULL,mission_key TEXT NOT NULL,progress INTEGER NOT NULL DEFAULT 0,target INTEGER NOT NULL,claimed INTEGER NOT NULL DEFAULT 0,reward_coins INTEGER NOT NULL,reward_xp INTEGER NOT NULL,PRIMARY KEY(user_id,day_key,mission_key));
+            CREATE TABLE IF NOT EXISTS pv_cave_daily(user_id INTEGER NOT NULL,day_key TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,day_key));
+            CREATE TABLE IF NOT EXISTS pv_type_daily(user_id INTEGER NOT NULL,day_key TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,day_key));
+            CREATE INDEX IF NOT EXISTS idx_pv_explore_daily_user_day ON pv_explore_daily(user_id,day_key);
             ''')
 
     def _species_id(self, species):
@@ -7438,7 +7741,12 @@ class MMORPG(commands.Cog):
         region, current, explored = self._travel(ctx.author.id)
         places=self.REGIONS[region][2]
         match=next((x for x in places if x.lower()==destination.lower().strip()),None)
-        if not match: return await ctx.send(f'❌ That location is not in {region.title()}. Available: '+', '.join(places))
+        if not match:
+            with db() as c:
+                hidden=c.execute('SELECT location FROM pv_hidden_locations WHERE user_id=? AND region=?',(ctx.author.id,region)).fetchall()
+            match=next((r[0] for r in hidden if r[0].lower()==destination.lower().strip()),None)
+        if not match:
+            return await ctx.send(f'❌ That location is not available in {region.title()}. Use `!hidden` to see discovered places. Known locations: '+', '.join(places))
         with db() as c: c.execute('UPDATE pv_travel SET location=?,updated_at=? WHERE user_id=?',(match,int(time.time()),ctx.author.id))
         await ctx.send(f'🧭 You travelled to **{match}, {region.title()}**. Use `!explore` to search the area.')
 
@@ -7448,24 +7756,108 @@ class MMORPG(commands.Cog):
         if GAMEPLAY_MAINTENANCE_ENABLED: return await ctx.send('🛠️ PokéVanta gameplay is under maintenance.')
         region, location, explored=self._travel(uid)
         now=int(time.time())
+        explore_cooldown_remaining = 0
+        newly_unlocked = []
         with db() as c:
+            # Serialize the cooldown check/update. Without this lock, two nearly
+            # simultaneous !explore messages could both receive rewards.
+            c.execute('BEGIN IMMEDIATE')
             c.execute('INSERT OR IGNORE INTO pv_explore_cooldowns(user_id,last_explore) VALUES(?,0)',(uid,))
             last=c.execute('SELECT last_explore FROM pv_explore_cooldowns WHERE user_id=?',(uid,)).fetchone()[0]
-            if now-last<25: return await ctx.send(f'⏳ The area is quiet. Explore again in **{25-(now-last)}s**.')
-            c.execute('UPDATE pv_explore_cooldowns SET last_explore=? WHERE user_id=?',(now,uid))
-            c.execute('UPDATE pv_travel SET explored=explored+1,updated_at=? WHERE user_id=?',(now,uid))
-            c.execute('UPDATE pv_eggs SET progress=MIN(progress+1,required) WHERE user_id=? AND hatched=0',(uid,))
-            c.execute('INSERT INTO pv_region_progress(user_id,region,explorations) VALUES(?,?,1) ON CONFLICT(user_id,region) DO UPDATE SET explorations=explorations+1',(uid,region))
-            region_steps=c.execute('SELECT explorations FROM pv_region_progress WHERE user_id=? AND region=?',(uid,region)).fetchone()[0]
-            quest_keys=[k for k,v in self.QUESTS.items() if v[1]==region]
-            for quest_key in quest_keys:
-                c.execute('INSERT INTO pv_quest_progress(user_id,quest_key,progress) VALUES(?,?,1) ON CONFLICT(user_id,quest_key) DO UPDATE SET progress=progress+1',(uid,quest_key))
-            if region_steps>=20:
-                region_order=list(self.REGIONS)
-                next_index=region_order.index(region)+1
-                if next_index<len(region_order):
-                    c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(uid,region_order[next_index],now))
+            if now-last<25:
+                explore_cooldown_remaining = 25-(now-last)
+            else:
+                c.execute('UPDATE pv_explore_cooldowns SET last_explore=? WHERE user_id=?',(now,uid))
+                c.execute('UPDATE pv_travel SET explored=explored+1,updated_at=? WHERE user_id=?',(now,uid))
+                c.execute('UPDATE pv_eggs SET progress=MIN(progress+1,required) WHERE user_id=? AND hatched=0',(uid,))
+                c.execute('INSERT INTO pv_region_progress(user_id,region,explorations) VALUES(?,?,1) ON CONFLICT(user_id,region) DO UPDATE SET explorations=explorations+1',(uid,region))
+                region_steps=c.execute('SELECT explorations FROM pv_region_progress WHERE user_id=? AND region=?',(uid,region)).fetchone()[0]
+                hidden_locations=self.HIDDEN_LOCATIONS.get(region, [])
+                newly_unlocked=[]
+                for threshold, hidden_name in ((8, hidden_locations[0] if hidden_locations else None),(16, hidden_locations[1] if len(hidden_locations)>1 else None)):
+                    if hidden_name and region_steps >= threshold:
+                        cur_hidden=c.execute('INSERT OR IGNORE INTO pv_hidden_locations(user_id,region,location,unlocked_at) VALUES(?,?,?,?)',(uid,region,hidden_name,now))
+                        if cur_hidden.rowcount:
+                            newly_unlocked.append(hidden_name)
+                quest_keys=[k for k,v in self.QUESTS.items() if v[1]==region]
+                for quest_key in quest_keys:
+                    c.execute('INSERT INTO pv_quest_progress(user_id,quest_key,progress) VALUES(?,?,1) ON CONFLICT(user_id,quest_key) DO UPDATE SET progress=progress+1',(uid,quest_key))
+                if region_steps>=20:
+                    region_order=list(self.REGIONS)
+                    next_index=region_order.index(region)+1
+                    if next_index<len(region_order):
+                        c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(uid,region_order[next_index],now))
+        if explore_cooldown_remaining:
+            return await ctx.send(f'⏳ The area is quiet. Explore again in **{explore_cooldown_remaining}s**.')
         await self._guild_contribute(uid,1)
+        self._daily_progress(uid, 'trailblazer')
+        if newly_unlocked:
+            await ctx.send('🗝️ **A hidden location has been discovered!**\n' + '\n'.join(f'• **{place}** — use `!travel {place}` to visit it' for place in newly_unlocked))
+
+        # Some explorations become interactive discoveries instead of resolving
+        # immediately. Buttons are private to the initiating trainer and can pay
+        # out only once.
+        if random.random() < 0.12:
+            stories = [
+                {'title':'📜 The Lost Field Journal','description':f'A weathered journal lies beside the trail in **{location}**. Its owner may still be nearby. What do you do?', 'choices':[
+                    {'label':'Return it to the researcher','title':'🤝 A Grateful Researcher','text':'A nearby researcher recognizes the journal and rewards your honesty.', 'coins':650,'xp':45,'item':'oran-berry'},
+                    {'label':'Study its field notes','title':'🔎 Useful Discoveries','text':'The notes reveal a safer path and a few forgotten supplies.', 'coins':450,'xp':65,'item':'potion'},
+                    {'label':'Follow the marked trail','title':'🌿 A Quiet Discovery','text':'The journal map leads you to a peaceful clearing with a small reward.', 'coins':800,'xp':35,'item':None},
+                ]},
+                {'title':'🌉 The Old Wooden Bridge','description':f'You find a creaking bridge over a clear stream near **{location}**. A small pack is visible on the other side.', 'choices':[
+                    {'label':'Cross slowly','title':'🧭 Safe Passage','text':'You cross carefully and recover the abandoned travel pack.', 'coins':700,'xp':40,'item':'super-potion'},
+                    {'label':'Search the stream bank','title':'💧 Riverside Find','text':'You spot useful supplies tucked between smooth stones.', 'coins':500,'xp':55,'item':'oran-berry'},
+                    {'label':'Mark the bridge on your map','title':'🗺️ Helpful Cartography','text':'Your map gains a useful landmark. Future travellers will thank you.', 'coins':850,'xp':50,'item':None},
+                ]},
+                {'title':'🐾 Strange Footprints','description':f'Unusual tracks cross the path in **{location}**. They lead in three directions. Which trail do you follow?', 'choices':[
+                    {'label':'Follow the tiny tracks','title':'🍃 A Gentle Encounter','text':'You discover a hidden berry patch and leave the area undisturbed.', 'coins':400,'xp':70,'item':'oran-berry'},
+                    {'label':'Inspect the rocky trail','title':'⛰️ Rocky Cache','text':'A forgotten supply pouch is wedged beneath a boulder.', 'coins':900,'xp':30,'item':'potion'},
+                    {'label':'Look for signs nearby','title':'🔍 Ranger’s Reward','text':'Your careful observation helps a ranger locate a lost supply crate.', 'coins':600,'xp':60,'item':'super-potion'},
+                ]},
+            ]
+            story = random.choice(stories)
+            view = AdventureStoryView(ctx, story)
+            embed = discord.Embed(title=story['title'], description=story['description']+'\n\n**Choose how to continue:**', color=discord.Color.blurple())
+            message = await ctx.send(embed=embed, view=view)
+            view.message = message
+            return
+
+        if random.random() < 0.18:
+            if random.random() < 0.55:
+                riddles = [
+                    ('Which Pokémon evolves from Eevee with a Water Stone?',
+                     ['Jolteon', 'Vaporeon', 'Flareon', 'Espeon'], 1,
+                     'Vaporeon evolves from Eevee when exposed to a Water Stone.'),
+                    ('Which type is completely immune to Electric-type moves?',
+                     ['Grass', 'Ground', 'Dragon', 'Water'], 1,
+                     'Ground-type Pokémon are immune to Electric-type moves.'),
+                    ('Which Pokémon is #001 in the National Pokédex?',
+                     ['Pikachu', 'Charmander', 'Bulbasaur', 'Squirtle'], 2,
+                     'Bulbasaur is #001 in the National Pokédex.'),
+                    ('Which region is home to Pallet Town?',
+                     ['Johto', 'Hoenn', 'Kanto', 'Sinnoh'], 2,
+                     'Pallet Town is the starting town in the Kanto region.'),
+                ]
+                question, options, answer, explanation = random.choice(riddles)
+                game = {'kind':'riddle', 'options':options, 'answer':answer, 'explanation':explanation}
+                view = ExploreMiniGameView(self, ctx, game)
+                embed = discord.Embed(
+                    title='🧑‍🔬 A Researcher Needs Your Help!',
+                    description=f'While exploring **{location}**, you meet a Pokémon researcher.\n\n**{question}**\nChoose your answer below. You have 60 seconds!',
+                    color=discord.Color.blurple(),
+                )
+            else:
+                game = {'kind':'treasure', 'treasure':random.randrange(3)}
+                view = ExploreMiniGameView(self, ctx, game)
+                embed = discord.Embed(
+                    title='🗝️ Three Chests in the Clearing',
+                    description=f'You discover three old chests hidden near **{location}**. One contains a forgotten supply stash.\n\nChoose a chest before the trail disappears!',
+                    color=discord.Color.gold(),
+                )
+            message = await ctx.send(embed=embed, view=view)
+            view.message = message
+            return
+
         roll=random.random()
         if roll < .16:
             egg_type=random.choices(['common','regional','rare'],[70,25,5])[0]
@@ -7473,21 +7865,120 @@ class MMORPG(commands.Cog):
             with db() as c:
                 cur=c.execute('INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,?,?,?,?,?)',(uid,egg_type,region,required,now,'exploration'))
                 egg_id=cur.lastrowid
-            return await ctx.send(f'🥚 **Egg discovered!** You found a **{egg_type.title()} Egg** in {location}.\nEgg ID: `{egg_id}` · Incubation: **0/{required} exploration steps**. Keep exploring to hatch it with `!egg hatch {egg_id}`.')
+            discovery = random.choice(['Something glimmers beneath the roots...', 'A warm egg is tucked safely inside an old nest!', 'You hear a faint tapping from a patch of moss...'])
+            return await ctx.send(f'🥚 **{discovery}**\nYou discovered a **{egg_type.title()} Egg** in {location}!\nEgg ID: `{egg_id}` · Incubation: **0/{required} exploration steps**. Keep exploring to hatch it with `!egg hatch {egg_id}`.')
         if roll < .55:
             pool=self._pool(region)
             species=random.choice(pool)['name']
             level=random.randint(5,25)
             shiny=random.randint(1,1000)==1
             data,bid=await self._award_pokemon(uid,species,shiny,level)
-            add_progress(uid,coins=random.randint(100,350),xp=20)
-            return await ctx.send(f'🌿 **Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}` · +20 XP · +100–350 VantaCoins')
+            coins=random.randint(100,350)
+            add_progress(uid,coins=coins,xp=20)
+            flavor = random.choice([
+                'Rustling leaves reveal a surprise!',
+                'A wild Pokémon steps out from the tall grass!',
+                'You hear a cry nearby and spot a new Pokémon!',
+                'Your careful exploration leads to a rare encounter!',
+            ])
+            return await ctx.send(f'🌿 **{flavor}**\n**Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}` · +20 XP · +{coins:,} VantaCoins')
         if roll < .78:
             coins=random.randint(250,900); add_progress(uid,coins=coins,xp=10)
             return await ctx.send(f'💎 You discovered a hidden supply cache in **{location}**!\nYou found **{coins:,} VantaCoins** and gained **10 XP**.')
         item=random.choice(['potion','super-potion','rare-candy','oran-berry'])
         change_item(uid,item,1)
-        await ctx.send(f'🎒 You searched **{location}** and found **1 × {item.replace("-"," ").title()}**!')
+        flavor = random.choice([
+            'A hidden supply pouch was caught in the branches!',
+            'You discover a forgotten travel pack!',
+            'A helpful item was left behind near the trail!',
+            'You spot a supply crate tucked behind a rock!',
+        ])
+        await ctx.send(f'🎒 **{flavor}**\nYou searched **{location}** and found **1 × {item.replace("-"," ").title()}**!')
+
+    @commands.command(name='hidden')
+    async def hidden(self, ctx):
+        region = self._travel(ctx.author.id)[0]
+        with db() as c:
+            rows = c.execute('SELECT location,unlocked_at FROM pv_hidden_locations WHERE user_id=? AND region=? ORDER BY unlocked_at,location', (ctx.author.id,region)).fetchall()
+            steps = c.execute('SELECT explorations FROM pv_region_progress WHERE user_id=? AND region=?', (ctx.author.id,region)).fetchone()
+        if not rows:
+            return await ctx.send(f'🗝️ No hidden locations discovered in **{region.title()}** yet. Keep exploring! First secret areas begin unlocking after 8 exploration steps.')
+        lines = [f'🌟 **{row[0]}** — discovered <t:{row[1]}:R> · `!travel {row[0]}`' for row in rows]
+        await ctx.send(embed=discord.Embed(title=f'🗝️ Hidden Locations · {region.title()}', description='\n'.join(lines), color=discord.Color.gold()))
+
+    @commands.group(name='explorem', invoke_without_command=True)
+    async def exploremissions(self, ctx):
+        day = self._ensure_daily_exploration(ctx.author.id)
+        with db() as c:
+            rows = c.execute('SELECT mission_key,progress,target,claimed,reward_coins,reward_xp FROM pv_explore_daily WHERE user_id=? AND day_key=? ORDER BY mission_key', (ctx.author.id,day)).fetchall()
+        lines=[]
+        for key,progress,target,claimed,coins,xp in rows:
+            label=self.DAILY_EXPLORATION_MISSIONS[key][0]
+            status='✅ Claimed' if claimed else '🎁 Ready to claim' if progress>=target else '⏳ In progress'
+            lines.append(f'**{label}**\n`{key}` · **{progress}/{target}** · {status}\nReward: {coins:,} VantaCoins + {xp} XP')
+        embed=discord.Embed(title='📅 Daily Exploration Missions',description='\n\n'.join(lines),color=discord.Color.blurple())
+        embed.set_footer(text='Resets daily at 00:00 India Standard Time • !explorem claim <mission_key>')
+        await ctx.send(embed=embed)
+
+    @exploremissions.command(name='claim')
+    async def exploremission_claim(self, ctx, mission_key: str):
+        key=mission_key.lower().strip()
+        if key not in self.DAILY_EXPLORATION_MISSIONS:
+            return await ctx.send('❌ Choose `trailblazer`, `type_scholar`, or `cave_solver`. View `!explorem` for details.')
+        day=self._ensure_daily_exploration(ctx.author.id)
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT progress,target,claimed,reward_coins,reward_xp FROM pv_explore_daily WHERE user_id=? AND day_key=? AND mission_key=?',(ctx.author.id,day,key)).fetchone()
+            if not row:
+                return await ctx.send('❌ Daily mission could not be loaded. Try again.')
+            progress,target,claimed,coins,xp=row
+            if claimed:
+                return await ctx.send('✅ You already claimed this mission reward today.')
+            if progress<target:
+                return await ctx.send(f'⏳ Mission not complete yet: **{progress}/{target}**.')
+            c.execute('UPDATE pv_explore_daily SET claimed=1 WHERE user_id=? AND day_key=? AND mission_key=? AND claimed=0',(ctx.author.id,day,key))
+        add_progress(ctx.author.id,coins=coins,xp=xp)
+        await ctx.send(f'🎉 **Daily mission claimed!**\nYou received **{coins:,} VantaCoins** and **{xp} XP**.')
+
+    @commands.command(name='cave')
+    async def cave(self, ctx):
+        uid=ctx.author.id
+        day=self._day_key()
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO pv_cave_daily(user_id,day_key,completed) VALUES(?,?,0)',(uid,day))
+            completed=c.execute('SELECT completed FROM pv_cave_daily WHERE user_id=? AND day_key=?',(uid,day)).fetchone()[0]
+            if completed:
+                return await ctx.send('🪨 You have already attempted today’s mystery cave. Return after the daily reset!')
+            # Reserve today's attempt before displaying the puzzle, preventing duplicate concurrent entries.
+            c.execute('UPDATE pv_cave_daily SET completed=2 WHERE user_id=? AND day_key=? AND completed=0',(uid,day))
+        self._daily_progress(uid, 'cave_clear')
+        puzzles=[
+            {'question':'I have cities but no houses, forests but no trees, and rivers but no water. What am I?','options':['A map','A mirror','A clock','A book'],'answer':0,'explanation':'A map can show cities, forests and rivers without containing the real things.'},
+            {'question':'What gets wetter the more it dries?','options':['A towel','A candle','A shadow','A stone'],'answer':0,'explanation':'A towel absorbs water while drying something else.'},
+            {'question':'What has many keys but cannot open a single door?','options':['A piano','A treasure chest','A compass','A lantern'],'answer':0,'explanation':'A piano has keys used to play music.'},
+        ]
+        puzzle=random.choice(puzzles)
+        correct_answer=puzzle['options'][puzzle['answer']]
+        random.shuffle(puzzle['options'])
+        puzzle['answer']=puzzle['options'].index(correct_answer)
+        view=CavePuzzleView(self,ctx,puzzle,day)
+        embed=discord.Embed(title='🕯️ Mystery Cave: Ancient Mechanism',description=f'An inscription glows on the cavern wall:\n\n**{puzzle["question"]}**\n\nChoose the answer to unlock the chamber. You have 75 seconds.',color=discord.Color.dark_purple())
+        message=await ctx.send(embed=embed,view=view)
+        view.message=message
+
+    @commands.command(name='typemaster', aliases=['typequiz'])
+    async def typemaster(self, ctx):
+        immune_types=[attack for attack, defenders in TYPE_CHART.items() if any(multiplier==0 for multiplier in defenders.values())]
+        attack=random.choice(immune_types)
+        answer_type=random.choice([defender for defender,multiplier in TYPE_CHART[attack].items() if multiplier==0])
+        wrong_pool=[t for t in TYPE_CHART if t!=answer_type and TYPE_CHART[attack].get(t,1)!=0]
+        options=random.sample(wrong_pool,3)+[answer_type]
+        random.shuffle(options)
+        quiz={'attack':attack,'options':options,'answer':options.index(answer_type)}
+        view=TypeMasterView(self,ctx,quiz)
+        embed=discord.Embed(title='⚡ Type Master Challenge',description=f'**Which Pokémon type is completely immune to {attack.title()}-type moves?**\n\nChoose one answer. You have 60 seconds. A correct answer earns a daily reward.',color=discord.Color.blurple())
+        message=await ctx.send(embed=embed,view=view)
+        view.message=message
 
     async def _guild_contribute(self, uid, points):
         week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
@@ -7535,11 +8026,12 @@ class MMORPG(commands.Cog):
         if egg_type=='rare': pool=[x for x in pool if x['name'] not in LEGENDARY_NAMES]
         species=random.choice(pool)['name']
         shiny=random.randint(1,250 if egg_type in {'rare','legendary'} else 1000)==1
-        try:data,bid=await self._award_pokemon(uid,species,shiny,random.randint(10,30))
+        level=random.randint(10,30)
+        try:data,bid=await self._award_pokemon(uid,species,shiny,level)
         except Exception:
             with db() as c:c.execute('UPDATE pv_eggs SET hatched=0 WHERE egg_id=? AND user_id=?',(egg_id,uid))
             return await ctx.send('⚠️ Pokémon data could not be loaded. Your egg is safe; try again shortly.')
-        await ctx.send(f'🎉 **Your {egg_type.title()} Egg hatched!**\n{("✨ " if shiny else "")}**{display_name(data)}** joined your collection at Lv. 10–30.\nPokémon ID: `{bid}`')
+        await ctx.send(f'🎉 **Your {egg_type.title()} Egg hatched!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}`')
 
     @commands.group(name='dungeon', invoke_without_command=True)
     async def dungeon(self,ctx):
@@ -7742,9 +8234,9 @@ class MMORPG(commands.Cog):
     async def guild_contribute(self,ctx,amount:int):
         if amount<100 or amount>100000:return await ctx.send('Contribution must be between 100 and 100,000 VantaCoins.')
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
             row=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
             if not row:return await ctx.send('Join a guild first.')
-            c.execute('BEGIN IMMEDIATE')
             wallet=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
             if not wallet or wallet[0]<amount:return await ctx.send('You do not have enough VantaCoins.')
             c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(amount,ctx.author.id))
@@ -7789,6 +8281,23 @@ class Bot(commands.Bot):
         self.add_view(TicketPanelView(self))
         self.add_view(TicketCloseView(self, 0))
         await load_pokemon_list();await self.tree.sync()
+        self._pv_loop_monitor_task = asyncio.create_task(self._pv_monitor_event_loop())
+
+    async def _pv_monitor_event_loop(self):
+        loop = asyncio.get_running_loop()
+        interval = 5.0
+        expected = loop.time() + interval
+        while not self.is_closed():
+            await asyncio.sleep(interval)
+            now = loop.time()
+            lag = max(0.0, now - expected)
+            if lag >= 1.0:
+                print(f'[EVENT LOOP LAG] delayed_by={lag:.2f}s; likely blocking sync work or host CPU pressure')
+            expected = now + interval
+
+    async def on_command(self, ctx):
+        ctx._pv_command_started = time.monotonic()
+
     async def on_ready(self):
         print(f'Logged in as {self.user}')
         print(f'Loaded {len(POKEMON_LIST)} Pokémon species.')
@@ -7826,6 +8335,12 @@ class Bot(commands.Bot):
         await self.process_commands(message)
     async def on_command_completion(self, ctx):
         """Log moderation actions to this server's !setlog channel; ignore routine commands."""
+        started = getattr(ctx, '_pv_command_started', None)
+        if started is not None:
+            elapsed = time.monotonic() - started
+            if elapsed >= 2.0:
+                name = ctx.command.qualified_name if ctx.command else 'unknown'
+                print(f'[SLOW COMMAND] command=!{name} duration={elapsed:.2f}s author_id={ctx.author.id}')
         if not ctx.guild or not getattr(ctx, 'command', None):
             return
         command_name = ctx.command.qualified_name.lower().split()[-1]
@@ -7933,7 +8448,9 @@ class Bot(commands.Bot):
             return
 
         import traceback
-        print(f'\n[PokéVanta command error] command=!{name} | author_id={getattr(ctx.author, "id", "unknown")} | guild_id={getattr(ctx.guild, "id", "DM")}')
+        _started = getattr(ctx, '_pv_command_started', None)
+        _elapsed = f' | elapsed={time.monotonic() - _started:.2f}s' if _started is not None else ''
+        print(f'\n[PokéVanta command error] command=!{name}{_elapsed} | author_id={getattr(ctx.author, "id", "unknown")} | guild_id={getattr(ctx.guild, "id", "DM")}')
         traceback.print_exception(type(original), original, original.__traceback__)
         try:
             await ctx.send('❌ This command failed unexpectedly. The full error has been printed in Termux. Please send the traceback to the bot maintainer.',
