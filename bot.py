@@ -983,6 +983,10 @@ class NPCBattleView(TimedView):
         elif random.randint(1,100)>(move.get('accuracy') or 100): msg=f'💨 **{move["name"].title()}** missed!\n{battle_commentary(self.row[3], move, 0)}'
         else:
             dmg,eff,crit=calc_damage(p,self.enemy,move,self.row[4])
+            with db() as mega_conn:
+                mega_active=mega_conn.execute('SELECT instance_id FROM pv_mega_active WHERE user_id=?',(self.uid,)).fetchone()
+                mega_boost=bool(mega_active and int(mega_active[0])==int(self.row[0]))
+            if mega_boost: dmg=int(dmg*1.25)
             dmg=int(dmg*held_damage_multiplier(held,move,eff))
             if self.raid: dmg=max(1,int(dmg*0.65))  # Raid bosses have raid-scale durability.
             # Simple species abilities with direct battle impact; Pokédex displays the full ability list.
@@ -1006,6 +1010,7 @@ class NPCBattleView(TimedView):
             elif eff==0:msg+=' No effect!'
             msg += '\n' + battle_commentary(self.row[3], move, dmg, eff, crit, inflicted if inflicted and not status_msg == '' else '')
         if self.enemy_hp<=0:
+            with db() as mega_conn: mega_conn.execute('DELETE FROM pv_mega_active WHERE user_id=?',(self.uid,))
             # Commit the active Pokémon's final HP/status on every completed battle,
             # regardless of whether the encounter was a regular, legendary, or raid battle.
             with db() as c:
@@ -1093,6 +1098,7 @@ class NPCBattleView(TimedView):
                 for item in list(self.children): self.remove_item(item)
                 await self.build()
                 return await self.update_battle(inter, content=f'💥 **{self.row[3].title()} fainted!**\n{msg}\nUse **Switch Pokémon** and select a healthy teammate. Moves are unavailable until you switch.',view=self)
+            with db() as mega_conn: mega_conn.execute('DELETE FROM pv_mega_active WHERE user_id=?',(self.uid,))
             if self.raid:
                 with db() as c:
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
@@ -2273,10 +2279,10 @@ class Game(commands.Cog):
             'add', 'remove', 'pokemonadd', 'shinyhunt', 'pass', 'banbot', 'unbanbot',
             'ban', 'unban', 'coinsadd', 'removecoins', 'removepokemon',
             'setupitememojis', 'setupvantacoin', 'tagset', 'tagdelete', 'ccset',
-            'ccdelete'
+            'ccdelete', 'eventimage', 'eventtoken', 'eventitem', 'gamelogs'
         }
         categories = {
-            'start': 'Adventure', 'profile': 'Adventure', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
+            'start': 'Adventure', 'profile': 'Adventure', 'regions': 'Exploration & Quests', 'region': 'Exploration & Quests', 'travel': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
             'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
             'select': 'Teams & Battles', 'setteam': 'Teams & Battles', 'team': 'Teams & Battles', 'legendarybattle': 'Teams & Battles', 'battle': 'Teams & Battles', 'challenge': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies',
@@ -2289,16 +2295,16 @@ class Game(commands.Cog):
             'mute': 'Moderation', 'unmute': 'Moderation', 'kick': 'Moderation', 'clear': 'Moderation', 'slowmode': 'Moderation', 'lock': 'Moderation', 'unlock': 'Moderation', 'warn': 'Moderation', 'warnings': 'Moderation', 'clearwarnings': 'Moderation', 'removewarn': 'Moderation', 'role': 'Moderation', 'dump': 'Moderation',
             'ping': 'Utilities',
             'setwelcome': 'Server Setup', 'setgoodbye': 'Server Setup', 'setlog': 'Server Setup', 'setautorole': 'Server Setup', 'setstarboard': 'Server Setup', 'rradd': 'Server Setup', 'rrremove': 'Server Setup', 'automodword': 'Server Setup', 'automodwords': 'Server Setup', 'setnick': 'Server Setup', 'roleadd': 'Server Setup', 'roleremove': 'Server Setup', 'rolecreate': 'Server Setup', 'roledelete': 'Server Setup', 'announce': 'Server Setup',
-            'banbot': 'Developer Controls', 'unbanbot': 'Developer Controls', 'ban': 'Developer Controls', 'unban': 'Developer Controls', 'coinsadd': 'Developer Controls', 'removecoins': 'Developer Controls', 'removepokemon': 'Developer Controls', 'pokemonadd': 'Developer Controls', 'shinyhunt': 'Developer Controls', 'pass': 'Developer Controls', 'setupitememojis': 'Developer Setup', 'setupvantacoin': 'Developer Setup'
+            'banbot': 'Developer Controls', 'unbanbot': 'Developer Controls', 'ban': 'Developer Controls', 'unban': 'Developer Controls', 'coinsadd': 'Developer Controls', 'removecoins': 'Developer Controls', 'removepokemon': 'Developer Controls', 'pokemonadd': 'Developer Controls', 'shinyhunt': 'Developer Controls', 'pass': 'Developer Controls', 'eventimage': 'Developer Controls', 'eventtoken': 'Developer Controls', 'eventitem': 'Developer Controls', 'gamelogs': 'Developer Controls', 'devhelp': 'Developer Controls', 'setupitememojis': 'Developer Setup', 'setupvantacoin': 'Developer Setup'
         }
         category_aliases = {
             'box': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'pokedex': 'Box & Pokédex', 'pokemon': 'Box & Pokédex',
-            'adventure': 'Adventure', 'event': 'Fishing & Events', 'events': 'Fishing & Events', 'fishing': 'Fishing & Events', 'angler': 'Fishing & Events', 'hunt': 'Adventure', 'battle': 'Teams & Battles', 'teams': 'Teams & Battles',
+            'adventure': 'Adventure', 'exploration': 'Exploration & Quests', 'world': 'Exploration & Quests', 'event': 'Fishing & Events', 'events': 'Fishing & Events', 'fishing': 'Fishing & Events', 'angler': 'Fishing & Events', 'hunt': 'Adventure', 'battle': 'Teams & Battles', 'teams': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies', 'candyquest': 'Raids & Candies', 'candytrail': 'Raids & Candies', 'trade': 'Trading', 'shop': 'Coins & Shop', 'market': 'Coins & Shop', 'm': 'Coins & Shop', 'coins': 'Coins & Shop',
             'items': 'Inventory & Items', 'inventory': 'Inventory & Items', 'utility': 'Utilities', 'utilities': 'Utilities', 'fun': 'Utilities',
             'tags': 'Tags & Custom Commands', 'custom': 'Tags & Custom Commands', 'mod': 'Moderation', 'moderation': 'Moderation',
             'config': 'Server Setup', 'setup': 'Server Setup', 'server': 'Server Setup', 'dev': 'Developer Controls', 'developer': 'Developer Controls',
-            'developer setup': 'Developer Setup', 'giveaway': 'Giveaways', 'giveawaystart': 'Giveaways', 'gstart': 'Giveaways', 'giveawayend': 'Giveaways', 'gend': 'Giveaways', 'giveawayreroll': 'Giveaways', 'greroll': 'Giveaways', 'removewarn': 'Moderation', 'removewarning': 'Moderation', 'delwarn': 'Moderation', 'rwarn': 'Moderation'
+            'developer setup': 'Developer Setup', 'exploration': 'Exploration & Quests', 'world': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'giveaway': 'Giveaways', 'giveawaystart': 'Giveaways', 'gstart': 'Giveaways', 'giveawayend': 'Giveaways', 'gend': 'Giveaways', 'giveawayreroll': 'Giveaways', 'greroll': 'Giveaways', 'removewarn': 'Moderation', 'removewarning': 'Moderation', 'delwarn': 'Moderation', 'rwarn': 'Moderation'
         }
         requested = (category or '').strip().lower()
         requested_category = category_aliases.get(requested)
@@ -2396,8 +2402,41 @@ class Game(commands.Cog):
                     'poll': 'Create a poll for server members.',
                     'leaderboard': 'Show the top trainers by VantaCoins.',
                     'fix': 'Developer-only tool to reset common stuck game interactions.',
+                    'regions': 'View the nine-region world atlas and your unlocks.',
+                    'region': 'View or travel to an unlocked Pokémon region.',
+                    'travel': 'Travel between discovered locations in your current region.',
+                    'explore': 'Explore your current location for Pokémon, eggs, items and VantaCoins.',
+                    'egg': 'Claim a starter egg, view egg commands or hatch an incubated egg.',
+                    'eggs': 'View your egg collection and incubation progress.',
+                    'dungeon': 'Explore persistent multi-floor Mystery Dungeon runs.',
+                    'mega': 'Manage Mega Stones and prepare a temporary Mega Evolution.',
+                    'quest': 'View or claim a legendary questline objective.',
+                    'quests': 'View all legendary questlines and their progress.',
+                    'guild': 'Create, join, view and contribute to multiplayer Trainer Guilds.',
+                    'egg claim': 'Claim your one-time Starter Egg. Additional eggs can be discovered through exploration and dungeons.',
+                    'egg hatch': 'Hatch an egg after it has reached its required incubation progress.',
+                    'dungeon list': 'Browse the four Mystery Dungeons and their floor counts.',
+                    'dungeon enter': 'Enter a Mystery Dungeon. You need at least one healthy Pokémon on your selected team.',
+                    'dungeon status': 'Check your saved Mystery Dungeon run and current floor.',
+                    'dungeon explore': 'Advance one floor in your active Mystery Dungeon and earn floor rewards.',
+                    'dungeon leave': 'Leave your active Mystery Dungeon while keeping rewards already earned.',
+                    'mega stones': 'View the Mega Stones in your collection.',
+                    'mega activate': 'Use a matching Mega Stone to prepare a temporary Mega boost for a supported battle.',
+                    'quests': 'View all five Legendary Questlines and your regional exploration progress.',
+                    'quest': 'View a quest, claim its completed objective, or summon its Legendary guardian.',
+                    'guild create': 'Create a new Trainer Guild. You can belong to only one guild at a time.',
+                    'guild join': 'Join an existing Trainer Guild by its name.',
+                    'guild leave': 'Leave your current Trainer Guild. Guild leaders must transfer leadership if members remain.',
+                    'guild info': 'View your guild level, XP, leader and member list.',
+                    'guild contribute': 'Contribute 100–100,000 VantaCoins to your guild in exchange for guild XP.',
+                    'guild leaderboard': 'View the top Trainer Guilds by level and XP.',
+                    'regions': 'View the world atlas, region unlocks and your exploration progress.',
+                    'region': 'View your current region or details about an unlocked region.',
+                    'travel': 'Travel to a known location in your current region.',
+                    'explore': 'Explore your current location for Pokémon, eggs, VantaCoins and items. Exploration also incubates eggs and advances regional questlines.',
+                    'eggs': 'View your unhatched eggs, their region and incubation progress.',
                 }
-                desc = known_descriptions.get(root_name, f'{root_name.replace("_", " ").capitalize()} command. See its usage above for the required arguments.')
+                desc = known_descriptions.get(command.qualified_name.lower(), known_descriptions.get(root_name, f'{root_name.replace("_", " ").capitalize()} command. See its usage above for the required arguments.'))
             alias_list = [f'!{a}' for a in getattr(command, 'aliases', []) if a]
             alias_text = f" (aliases: {', '.join(alias_list)})" if alias_list else ''
             access = ' **[BOT DEVELOPERS ONLY]**' if is_dev else ''
@@ -2417,7 +2456,7 @@ class Game(commands.Cog):
                     'Box & Pokédex': '`!help box`', 'Adventure': '`!help adventure`',
                     'Teams & Battles': '`!help battle`', 'Raids & Candies': '`!help raid`',
                     'Trading': '`!help trade`', 'Coins & Shop': '`!help shop`',
-                    'Inventory & Items': '`!help items`', 'Fishing & Events': '`!help event`', 'Utilities': '`!help utilities`',
+                    'Inventory & Items': '`!help items`', 'Exploration & Quests': '`!help exploration`', 'Fishing & Events': '`!help event`', 'Utilities': '`!help utilities`',
                     'Tags & Custom Commands': '`!help tags`', 'Moderation': '`!help moderation`',
                     'Server Setup': '`!help setup`', 'Developer Controls': '`!help developer`',
                     'Developer Setup': '`!help developer setup`', 'Giveaways': '`!help giveaways`'
@@ -7264,6 +7303,463 @@ Shop economy: 500-token VantaCoin Treasury, 750-token MP bundle, 250-token Relic
         await ctx.send(embed=e)
 
 
+# ---------------------------------------------------------------------------
+# PokéVanta MMORPG expansion. New systems use additive pv_* tables and the
+# existing pokemon / inventory / players tables. No legacy tables are replaced.
+# ---------------------------------------------------------------------------
+class MMORPG(commands.Cog):
+    REGIONS = {
+        'kanto': (1,151, ['Pallet Town','Viridian Forest','Mt. Moon','Cerulean Cape','Power Plant','Seafoam Islands','Victory Road']),
+        'johto': (152,251, ['New Bark Town','Ilex Forest','Ruins of Alph','Lake of Rage','Burned Tower','Whirl Islands','Mt. Silver']),
+        'hoenn': (252,386, ['Littleroot Town','Petalburg Woods','Granite Cave','Mt. Chimney','Meteor Falls','Seafloor Cavern','Sky Pillar']),
+        'sinnoh': (387,493, ['Twinleaf Town','Eterna Forest','Mt. Coronet','Fuego Ironworks','Lake Acuity','Turnback Cave','Spear Pillar']),
+        'unova': (494,649, ['Nuvema Town','Pinwheel Forest','Chargestone Cave','Desert Resort','Dragonspiral Tower','Relic Castle','Giant Chasm']),
+        'kalos': (650,721, ['Vaniville Town','Santalune Forest','Reflection Cave','Frost Cavern','Lost Hotel','Sea Spirit’s Den','Victory Road']),
+        'alola': (722,809, ['Iki Town','Verdant Cavern','Lush Jungle','Vast Poni Canyon','Haina Desert','Resolution Cave','Altar of the Sunne']),
+        'galar': (810,905, ['Postwick','Slumbering Weald','Glimwood Tangle','Galar Mine','Crown Tundra','Dynamax Adventure','Energy Plant']),
+        'paldea': (906,1025, ['Cabo Poco','South Province','Tagtree Thicket','Asado Desert','Glaseado Mountain','Area Zero','Zero Lab']),
+    }
+    QUESTS = {
+        'sky_awakening': ('The Sky’s Awakening', 'hoenn', 12, 'Rayquaza', 25000),
+        'creation_trio': ('Echoes of Creation', 'sinnoh', 18, 'Dialga', 40000),
+        'guardian_trial': ('Guardians of the Brass Tower', 'johto', 15, 'Lugia', 30000),
+        'abyssal_awaken': ('The Abyssal Awakening', 'hoenn', 20, 'Kyogre', 45000),
+        'unova_legend': ('The Dragon’s Truth', 'unova', 18, 'Reshiram', 40000),
+    }
+    MEGA_STONES = {
+        'venusaur': 'venusaurite', 'charizard': 'charizardite', 'blastoise': 'blastoisinite',
+        'alakazam': 'alakazite', 'gengar': 'gengarite', 'kangaskhan': 'kangaskhanite',
+        'pinsir': 'pinsirite', 'gyarados': 'gyaradosite', 'aerodactyl': 'aerodactylite',
+        'mewtwo': 'mewtwonite', 'ampharos': 'ampharosite', 'scizor': 'scizorite',
+        'heracross': 'heracronite', 'houndoom': 'houndoominite', 'tyranitar': 'tyranitarite',
+        'blaziken': 'blazikenite', 'gardevoir': 'gardevoirite', 'mawile': 'mawilite',
+        'aggron': 'aggronite', 'medicham': 'medichamite', 'manectric': 'manectite',
+        'banette': 'banettite', 'absol': 'absolite', 'garchomp': 'garchompite',
+        'lucario': 'lucarionite', 'abomasnow': 'abomasite', 'metagross': 'metagrossite',
+        'salamence': 'salamencite', 'kangaskhan': 'kangaskhanite', 'sableye': 'sablenite',
+        'sharpedo': 'sharpedonite', 'camerupt': 'cameruptite', 'altaria': 'altarianite',
+        'lopunny': 'lopunnite', 'gallade': 'galladite', 'audino': 'audinite',
+    }
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    async def cog_check(self, ctx):
+        if GAMEPLAY_MAINTENANCE_ENABLED:
+            await ctx.send('🛠️ **PokéVanta is currently under maintenance.** Please try again later.')
+            return False
+        with db() as c:
+            row=c.execute('SELECT started FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
+        if not row or not row[0]:
+            await ctx.send('🧭 Start your adventure first with `!start`.')
+            return False
+        return True
+
+    async def cog_load(self):
+        with db() as c:
+            c.executescript('''
+            CREATE TABLE IF NOT EXISTS pv_travel(user_id INTEGER PRIMARY KEY, region TEXT NOT NULL DEFAULT 'kanto', location TEXT NOT NULL DEFAULT 'Pallet Town', explored INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS pv_region_unlocks(user_id INTEGER NOT NULL, region TEXT NOT NULL, unlocked_at INTEGER NOT NULL, PRIMARY KEY(user_id,region));
+            CREATE TABLE IF NOT EXISTS pv_region_progress(user_id INTEGER NOT NULL, region TEXT NOT NULL, explorations INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,region));
+            CREATE TABLE IF NOT EXISTS pv_explore_cooldowns(user_id INTEGER PRIMARY KEY, last_explore INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS pv_eggs(egg_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, egg_type TEXT NOT NULL, region TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0, required INTEGER NOT NULL, created_at INTEGER NOT NULL, source TEXT NOT NULL DEFAULT 'exploration', hatched INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS idx_pv_eggs_user ON pv_eggs(user_id,hatched,egg_id);
+            CREATE TABLE IF NOT EXISTS pv_egg_claims(user_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS pv_quest_progress(user_id INTEGER NOT NULL, quest_key TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0, claimed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,quest_key));
+            CREATE TABLE IF NOT EXISTS pv_dungeon_runs(user_id INTEGER PRIMARY KEY, dungeon TEXT NOT NULL, floor INTEGER NOT NULL DEFAULT 1, max_floor INTEGER NOT NULL DEFAULT 10, started_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'active');
+            CREATE TABLE IF NOT EXISTS pv_dungeon_history(run_id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,dungeon TEXT NOT NULL,floor_reached INTEGER NOT NULL,result TEXT NOT NULL,finished_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS pv_guilds(guild_id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE,owner_id INTEGER NOT NULL,level INTEGER NOT NULL DEFAULT 1,xp INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS pv_guild_members(user_id INTEGER PRIMARY KEY,guild_id INTEGER NOT NULL,role TEXT NOT NULL DEFAULT 'member',joined_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS pv_guild_contributions(user_id INTEGER NOT NULL,guild_id INTEGER NOT NULL,week_key TEXT NOT NULL,points INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,guild_id,week_key));
+            CREATE TABLE IF NOT EXISTS pv_mega_stones(user_id INTEGER NOT NULL,stone TEXT NOT NULL,quantity INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,stone));
+            CREATE TABLE IF NOT EXISTS pv_mega_active(user_id INTEGER PRIMARY KEY,instance_id INTEGER NOT NULL,activated_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS pv_mega_history(user_id INTEGER NOT NULL,instance_id INTEGER NOT NULL,used_at INTEGER NOT NULL);
+            ''')
+
+    def _species_id(self, species):
+        try: return int(str(species.get('url','')).rstrip('/').split('/')[-1])
+        except (ValueError, IndexError, AttributeError): return 0
+
+    def _pool(self, region, legendary=False):
+        lo, hi, _ = self.REGIONS[region]
+        items = [x for x in POKEMON_LIST if lo <= self._species_id(x) <= hi]
+        if legendary:
+            items = [x for x in items if x.get('name','') in LEGENDARY_NAMES]
+        else:
+            items = [x for x in items if x.get('name','') not in LEGENDARY_NAMES]
+        return items or POKEMON_LIST
+
+    async def _award_pokemon(self, uid, species_name, shiny=False, level=10):
+        data = await pokemon_data(species_name)
+        level = max(1, min(300, int(level)))
+        hp = max_hp(data, level)
+        with db() as c:
+            cur = c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',
+                            (uid, data['id'], data['name'], level, int(shiny), hp, hp))
+            iid = cur.lastrowid
+            bid = assign_box_id(c, uid, iid)
+        return data, bid
+
+    def _travel(self, uid):
+        with db() as c:
+            c.execute("INSERT OR IGNORE INTO pv_travel(user_id,region,location) VALUES(?,'kanto','Pallet Town')", (uid,))
+            c.execute("INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,'kanto',?)", (uid,int(time.time())))
+            return c.execute('SELECT region,location,explored FROM pv_travel WHERE user_id=?',(uid,)).fetchone()
+
+    @commands.command(name='regions')
+    async def regions(self, ctx):
+        current = self._travel(ctx.author.id)[0]
+        with db() as c: unlocked={r[0] for r in c.execute('SELECT region FROM pv_region_unlocks WHERE user_id=?',(ctx.author.id,)).fetchall()}
+        lines = []
+        for key, (_,_,places) in self.REGIONS.items():
+            mark = '🟢' if key == current else '🔓' if key in unlocked else '🔒'
+            lines.append(f'{mark} **{key.title()}** — {len(places)} exploration locations')
+        e=discord.Embed(title='🌍 PokéVanta World Atlas',description='\n'.join(lines),color=discord.Color.blurple())
+        e.set_footer(text='Regions unlock in order. Use !region and !travel to explore.')
+        await ctx.send(embed=e)
+
+    @commands.command(name='region')
+    async def region(self, ctx, *, name: str = ''):
+        region, location, explored = self._travel(ctx.author.id)
+        if name:
+            key=name.lower().strip()
+            if key not in self.REGIONS: return await ctx.send('❌ Unknown region. Use `!regions`.')
+            with db() as c: is_unlocked=c.execute('SELECT 1 FROM pv_region_unlocks WHERE user_id=? AND region=?',(ctx.author.id,key)).fetchone()
+            if not is_unlocked: return await ctx.send(f'🔒 **{key.title()}** is locked. Complete the regional exploration objective or questline to unlock it.')
+            region=key; location=self.REGIONS[key][2][0]
+            with db() as c: c.execute('UPDATE pv_travel SET region=?,location=? WHERE user_id=?',(region,location,ctx.author.id))
+        lo,hi,places=self.REGIONS[region]
+        e=discord.Embed(title=f'🗺️ {region.title()} Region',description=f'**Current location:** {location}\n**Pokémon species range:** #{lo}–#{hi}\n**Explorations:** {explored}\n\n**Known locations**\n'+'\n'.join(f'• {x}' for x in places),color=discord.Color.blurple())
+        e.set_footer(text='Use !travel <location> to move and !explore to discover the area.')
+        await ctx.send(embed=e)
+
+    @commands.command(name='travel')
+    async def travel(self, ctx, *, destination: str):
+        region, current, explored = self._travel(ctx.author.id)
+        places=self.REGIONS[region][2]
+        match=next((x for x in places if x.lower()==destination.lower().strip()),None)
+        if not match: return await ctx.send(f'❌ That location is not in {region.title()}. Available: '+', '.join(places))
+        with db() as c: c.execute('UPDATE pv_travel SET location=?,updated_at=? WHERE user_id=?',(match,int(time.time()),ctx.author.id))
+        await ctx.send(f'🧭 You travelled to **{match}, {region.title()}**. Use `!explore` to search the area.')
+
+    @commands.command(name='explore')
+    async def explore(self, ctx):
+        uid=ctx.author.id
+        if GAMEPLAY_MAINTENANCE_ENABLED: return await ctx.send('🛠️ PokéVanta gameplay is under maintenance.')
+        region, location, explored=self._travel(uid)
+        now=int(time.time())
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO pv_explore_cooldowns(user_id,last_explore) VALUES(?,0)',(uid,))
+            last=c.execute('SELECT last_explore FROM pv_explore_cooldowns WHERE user_id=?',(uid,)).fetchone()[0]
+            if now-last<25: return await ctx.send(f'⏳ The area is quiet. Explore again in **{25-(now-last)}s**.')
+            c.execute('UPDATE pv_explore_cooldowns SET last_explore=? WHERE user_id=?',(now,uid))
+            c.execute('UPDATE pv_travel SET explored=explored+1,updated_at=? WHERE user_id=?',(now,uid))
+            c.execute('UPDATE pv_eggs SET progress=MIN(progress+1,required) WHERE user_id=? AND hatched=0',(uid,))
+            c.execute('INSERT INTO pv_region_progress(user_id,region,explorations) VALUES(?,?,1) ON CONFLICT(user_id,region) DO UPDATE SET explorations=explorations+1',(uid,region))
+            region_steps=c.execute('SELECT explorations FROM pv_region_progress WHERE user_id=? AND region=?',(uid,region)).fetchone()[0]
+            quest_keys=[k for k,v in self.QUESTS.items() if v[1]==region]
+            for quest_key in quest_keys:
+                c.execute('INSERT INTO pv_quest_progress(user_id,quest_key,progress) VALUES(?,?,1) ON CONFLICT(user_id,quest_key) DO UPDATE SET progress=progress+1',(uid,quest_key))
+            if region_steps>=20:
+                region_order=list(self.REGIONS)
+                next_index=region_order.index(region)+1
+                if next_index<len(region_order):
+                    c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(uid,region_order[next_index],now))
+        await self._guild_contribute(uid,1)
+        roll=random.random()
+        if roll < .16:
+            egg_type=random.choices(['common','regional','rare'],[70,25,5])[0]
+            required={'common':3,'regional':5,'rare':8}[egg_type]
+            with db() as c:
+                cur=c.execute('INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,?,?,?,?,?)',(uid,egg_type,region,required,now,'exploration'))
+                egg_id=cur.lastrowid
+            return await ctx.send(f'🥚 **Egg discovered!** You found a **{egg_type.title()} Egg** in {location}.\nEgg ID: `{egg_id}` · Incubation: **0/{required} exploration steps**. Keep exploring to hatch it with `!egg hatch {egg_id}`.')
+        if roll < .55:
+            pool=self._pool(region)
+            species=random.choice(pool)['name']
+            level=random.randint(5,25)
+            shiny=random.randint(1,1000)==1
+            data,bid=await self._award_pokemon(uid,species,shiny,level)
+            add_progress(uid,coins=random.randint(100,350),xp=20)
+            return await ctx.send(f'🌿 **Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}` · +20 XP · +100–350 VantaCoins')
+        if roll < .78:
+            coins=random.randint(250,900); add_progress(uid,coins=coins,xp=10)
+            return await ctx.send(f'💎 You discovered a hidden supply cache in **{location}**!\nYou found **{coins:,} VantaCoins** and gained **10 XP**.')
+        item=random.choice(['potion','super-potion','rare-candy','oran-berry'])
+        change_item(uid,item,1)
+        await ctx.send(f'🎒 You searched **{location}** and found **1 × {item.replace("-"," ").title()}**!')
+
+    async def _guild_contribute(self, uid, points):
+        week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+        with db() as c:
+            row=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(uid,)).fetchone()
+            if not row:return
+            gid=row[0]
+            c.execute('INSERT INTO pv_guild_contributions(user_id,guild_id,week_key,points) VALUES(?,?,?,?) ON CONFLICT(user_id,guild_id,week_key) DO UPDATE SET points=points+excluded.points',(uid,gid,week,points))
+            c.execute('UPDATE pv_guilds SET xp=xp+? WHERE guild_id=?',(points,gid))
+            c.execute('UPDATE pv_guilds SET level=1+CAST(xp/1000 AS INTEGER) WHERE guild_id=?',(gid,))
+
+    @commands.group(name='egg', invoke_without_command=True)
+    async def egg(self, ctx):
+        await ctx.send('🥚 **PokéVanta Egg System**\n`!egg claim` · Claim your one-time starter egg\n`!eggs` · View eggs\n`!egg hatch <egg ID>` · Hatch a fully incubated egg\nEggs are discovered through exploration and dungeon rewards. Explore to incubate them; no breeding is involved.')
+
+    @egg.command(name='claim')
+    async def egg_claim(self,ctx):
+        uid=ctx.author.id
+        with db() as c:
+            if c.execute('SELECT 1 FROM pv_egg_claims WHERE user_id=?',(uid,)).fetchone():return await ctx.send('❌ Your one-time starter egg has already been claimed. Find more eggs through `!explore` and dungeons.')
+            c.execute('INSERT INTO pv_egg_claims(user_id,claimed_at) VALUES(?,?)',(uid,int(time.time())))
+            cur=c.execute("INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,'starter','kanto',2,?,'starter')",(uid,int(time.time())))
+        await ctx.send(f'🎁 You received a **Starter Egg**! Egg ID: `{cur.lastrowid}`. It needs **2 exploration steps** to hatch.')
+
+    @commands.command(name='eggs')
+    async def eggs(self,ctx):
+        with db() as c: rows=c.execute('SELECT egg_id,egg_type,region,progress,required,source FROM pv_eggs WHERE user_id=? AND hatched=0 ORDER BY egg_id',(ctx.author.id,)).fetchall()
+        if not rows:return await ctx.send('🥚 You have no unhatched eggs. Discover one with `!explore`.')
+        lines=[f'`{r[0]}` **{r[1].title()} Egg** · {r[2].title()} · Incubation **{r[3]}/{r[4]}** · {"Ready to hatch" if r[3]>=r[4] else "Incubating"}' for r in rows]
+        await ctx.send(embed=discord.Embed(title='🥚 Egg Storage',description='\n'.join(lines),color=discord.Color.gold()))
+
+    @egg.command(name='hatch')
+    async def egg_hatch(self,ctx,egg_id:int):
+        uid=ctx.author.id
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT egg_type,region,progress,required,hatched FROM pv_eggs WHERE egg_id=? AND user_id=?',(egg_id,uid)).fetchone()
+            if not row:return await ctx.send('❌ That egg ID is not yours.')
+            if row[4]:return await ctx.send('❌ That egg has already hatched.')
+            if row[2]<row[3]:return await ctx.send(f'⏳ This egg needs **{row[3]-row[2]}** more exploration steps. Current progress: {row[2]}/{row[3]}.')
+            c.execute('UPDATE pv_eggs SET hatched=1 WHERE egg_id=? AND user_id=? AND hatched=0',(egg_id,uid))
+        egg_type,region,_,_,_=row
+        pool=self._pool(region,legendary=(egg_type=='legendary'))
+        if egg_type=='starter': pool=[x for x in pool if x['name'] in {'bulbasaur','charmander','squirtle'}] or pool
+        if egg_type=='rare': pool=[x for x in pool if x['name'] not in LEGENDARY_NAMES]
+        species=random.choice(pool)['name']
+        shiny=random.randint(1,250 if egg_type in {'rare','legendary'} else 1000)==1
+        try:data,bid=await self._award_pokemon(uid,species,shiny,random.randint(10,30))
+        except Exception:
+            with db() as c:c.execute('UPDATE pv_eggs SET hatched=0 WHERE egg_id=? AND user_id=?',(egg_id,uid))
+            return await ctx.send('⚠️ Pokémon data could not be loaded. Your egg is safe; try again shortly.')
+        await ctx.send(f'🎉 **Your {egg_type.title()} Egg hatched!**\n{("✨ " if shiny else "")}**{display_name(data)}** joined your collection at Lv. 10–30.\nPokémon ID: `{bid}`')
+
+    @commands.group(name='dungeon', invoke_without_command=True)
+    async def dungeon(self,ctx):
+        await ctx.send('🏰 **Mystery Dungeons**\n`!dungeon list` · Browse dungeons\n`!dungeon enter <name>` · Start a run (requires a selected team)\n`!dungeon explore` · Advance one floor\n`!dungeon status` · View progress\n`!dungeon leave` · End the run and keep earned rewards\nEvery floor is saved, so a restart will not erase your run.')
+
+    @dungeon.command(name='list')
+    async def dungeon_list(self,ctx):
+        await ctx.send(embed=discord.Embed(title='🏰 Mystery Dungeon Atlas',description='🌲 **Verdant Labyrinth** — 5 floors · beginner\n🌋 **Ember Mountain** — 10 floors · intermediate\n🌌 **Abyssal Rift** — 15 floors · advanced\n🕰️ **Temporal Tower** — 20 floors · expert\nUse `!dungeon enter <name>`.',color=discord.Color.dark_purple()))
+
+    @dungeon.command(name='enter')
+    async def dungeon_enter(self,ctx,*,name:str):
+        uid=ctx.author.id; key=name.lower().strip().replace(' ','_')
+        aliases={'verdant':'verdant_labyrinth','verdant_labyrinth':'verdant_labyrinth','ember':'ember_mountain','ember_mountain':'ember_mountain','abyssal':'abyssal_rift','abyssal_rift':'abyssal_rift','temporal':'temporal_tower','temporal_tower':'temporal_tower'}
+        key=aliases.get(key)
+        if not key:return await ctx.send('❌ Choose Verdant Labyrinth, Ember Mountain, Abyssal Rift or Temporal Tower.')
+        maxfloors={'verdant_labyrinth':5,'ember_mountain':10,'abyssal_rift':15,'temporal_tower':20}[key]
+        with db() as c:
+            if c.execute('SELECT 1 FROM pv_dungeon_runs WHERE user_id=?',(uid,)).fetchone():return await ctx.send('⚠️ You already have an active dungeon. Use `!dungeon status` or `!dungeon leave`.')
+            team=c.execute('SELECT COUNT(*) FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? AND p.hp>0',(uid,)).fetchone()[0]
+            if team<1:return await ctx.send('❌ Select at least one healthy Pokémon with `!select` before entering.')
+            c.execute('INSERT INTO pv_dungeon_runs(user_id,dungeon,floor,max_floor,started_at,state) VALUES(?,?,1,?,?,\'active\')',(uid,key,maxfloors,int(time.time())))
+        await ctx.send(f'🚪 You entered **{key.replace("_"," ").title()}**. Your run is saved. Use `!dungeon explore` to begin floor 1.')
+
+    @dungeon.command(name='status')
+    async def dungeon_status(self,ctx):
+        with db() as c:r=c.execute('SELECT dungeon,floor,max_floor,started_at FROM pv_dungeon_runs WHERE user_id=?',(ctx.author.id,)).fetchone()
+        if not r:return await ctx.send('You are not currently in a dungeon. Use `!dungeon list`.')
+        await ctx.send(f'🏰 **{r[0].replace("_"," ").title()}** · Floor **{r[1]}/{r[2]}**\nRun started <t:{r[3]}:R>. Progress is saved.')
+
+    @dungeon.command(name='explore')
+    async def dungeon_explore(self,ctx):
+        uid=ctx.author.id
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            r=c.execute('SELECT dungeon,floor,max_floor FROM pv_dungeon_runs WHERE user_id=? AND state=\'active\'',(uid,)).fetchone()
+            if not r:return await ctx.send('❌ You are not in a dungeon. Use `!dungeon enter <name>`.')
+            key,floor,maxfloors=r
+            region_row=c.execute('SELECT region FROM pv_travel WHERE user_id=?',(uid,)).fetchone()
+            active_region=region_row[0] if region_row else 'kanto'
+            c.execute('UPDATE pv_eggs SET progress=MIN(progress+1,required) WHERE user_id=? AND hatched=0',(uid,))
+            for quest_key, quest_cfg in self.QUESTS.items():
+                if quest_cfg[1]==active_region:
+                    c.execute('INSERT INTO pv_quest_progress(user_id,quest_key,progress) VALUES(?,?,1) ON CONFLICT(user_id,quest_key) DO UPDATE SET progress=progress+1',(uid,quest_key))
+            team=c.execute('SELECT COALESCE(AVG(p.level),1) FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? AND p.hp>0',(uid,)).fetchone()[0]
+            if floor>=maxfloors:
+                c.execute('DELETE FROM pv_dungeon_runs WHERE user_id=?',(uid,)); c.execute('INSERT INTO pv_dungeon_history(user_id,dungeon,floor_reached,result,finished_at) VALUES(?,?,?,\'cleared\',?)',(uid,key,floor,int(time.time())))
+                cleared=True
+            else:
+                c.execute('UPDATE pv_dungeon_runs SET floor=floor+1 WHERE user_id=?',(uid,)); cleared=False
+        if cleared:
+            add_progress(uid,coins=5000,xp=500); self._guild_contribute(uid,25)
+            return await ctx.send(f'🏆 **Dungeon cleared!** You conquered all **{maxfloors} floors** of {key.replace("_"," ").title()}!\nReward: **5,000 VantaCoins + 500 XP**.')
+        add_progress(uid,coins=150*floor,xp=25*floor)
+        if floor%5==0:
+            stone=random.choice(list(self.MEGA_STONES.values()))
+            with db() as c:c.execute('INSERT INTO pv_mega_stones(user_id,stone,quantity) VALUES(?,?,1) ON CONFLICT(user_id,stone) DO UPDATE SET quantity=quantity+1',(uid,stone))
+            return await ctx.send(f'⚔️ **Floor {floor} boss defeated!** Your team average level is {int(team)}.\n🎁 You earned **{150*floor:,} VantaCoins**, **{25*floor} XP**, and a **Mystery Mega Stone**.')
+        if random.random()<.22:
+            egg_type=random.choice(['common','regional','rare']); req={'common':3,'regional':5,'rare':8}[egg_type]
+            with db() as c:c.execute('INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,?,?,?,?,?)',(uid,egg_type,self._travel(uid)[0],req,int(time.time()),'dungeon'))
+            extra=f'\n🥚 You discovered a **{egg_type.title()} Egg**!'
+        else:extra=''
+        self._guild_contribute(uid,3)
+        await ctx.send(f'🧭 **Floor {floor} cleared!** You advanced to floor **{floor+1}/{maxfloors}**.\nReward: **{150*floor:,} VantaCoins + {25*floor} XP**.{extra}')
+
+    @dungeon.command(name='leave')
+    async def dungeon_leave(self,ctx):
+        with db() as c:
+            r=c.execute('SELECT dungeon,floor FROM pv_dungeon_runs WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if not r:return await ctx.send('You are not in a dungeon.')
+            c.execute('DELETE FROM pv_dungeon_runs WHERE user_id=?',(ctx.author.id,))
+            c.execute('INSERT INTO pv_dungeon_history(user_id,dungeon,floor_reached,result,finished_at) VALUES(?,?,?,\'left\',?)',(ctx.author.id,r[0],r[1],int(time.time())))
+        await ctx.send(f'🚪 You left **{r[0].replace("_"," ").title()}** at floor {r[1]}. Your already-earned rewards are kept.')
+
+    @commands.group(name='mega', invoke_without_command=True)
+    async def mega(self,ctx):
+        await ctx.send('🌟 **Mega Evolution**\n`!mega stones` · View Mega Stones\n`!mega activate <Pokémon box ID>` · Prepare one Mega Evolution for your next supported battle\nMega Evolution is temporary and does not change your stored Pokémon species.')
+
+    @mega.command(name='stones')
+    async def mega_stones(self,ctx):
+        with db() as c: rows=c.execute('SELECT stone,quantity FROM pv_mega_stones WHERE user_id=? AND quantity>0 ORDER BY stone',(ctx.author.id,)).fetchall()
+        await ctx.send(embed=discord.Embed(title='💎 Mega Stone Collection',description='\n'.join(f'• **{s.replace("-"," ").title()}** × {q}' for s,q in rows) or 'No Mega Stones yet. Defeat every fifth Mystery Dungeon floor to find a Mega Stone.',color=discord.Color.purple()))
+
+    @mega.command(name='activate')
+    async def mega_activate(self,ctx,pokemon_box_id:int):
+        uid=ctx.author.id
+        with db() as c:
+            iid=resolve_box_id(c,uid,pokemon_box_id)
+            row=c.execute('SELECT name FROM pokemon WHERE instance_id=? AND user_id=?',(iid,uid)).fetchone() if iid else None
+            if not row:return await ctx.send('❌ That Pokémon ID is not yours.')
+            stone=self.MEGA_STONES.get(row[0].lower())
+            if not stone:return await ctx.send(f'❌ **{row[0].title()}** has no Mega Evolution in the current catalogue.')
+            if c.execute('SELECT 1 FROM pv_mega_active WHERE user_id=?',(uid,)).fetchone():return await ctx.send('A Mega Evolution is already prepared for your next supported battle.')
+            c.execute('BEGIN IMMEDIATE')
+            owned=c.execute('SELECT quantity FROM pv_mega_stones WHERE user_id=? AND stone=?',(uid,stone)).fetchone()
+            if not owned or owned[0]<1:return await ctx.send(f'🔒 You need **{stone.title()}**. Find compatible Mega Stones in Mystery Dungeons.')
+            c.execute('UPDATE pv_mega_stones SET quantity=quantity-1 WHERE user_id=? AND stone=?',(uid,stone))
+            c.execute('INSERT INTO pv_mega_active(user_id,instance_id,activated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET instance_id=excluded.instance_id,activated_at=excluded.activated_at',(uid,iid,int(time.time())))
+        await ctx.send(f'🌟 **{row[0].title()}** is prepared for Mega Evolution! Its next supported NPC/legendary/raid battle will receive the Mega boost. The transformation expires after that battle.')
+
+    @commands.group(name='quests', invoke_without_command=True)
+    async def quests(self,ctx):
+        lines=[]
+        with db() as c:
+            for key,(title,region,goal,legendary,reward) in self.QUESTS.items():
+                row=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
+                progress,claimed=row if row else (0,0)
+                lines.append(f'**{title}** · {region.title()} · {min(progress,goal)}/{goal} exploration steps · {"Claimed" if claimed else "Ready to claim" if progress>=goal else "In progress"}')
+        await ctx.send(embed=discord.Embed(title='📜 Legendary Questlines',description='\n'.join(lines)+'\n\nUse `!quest <quest_key>` for details, `!quest claim <quest_key>` to claim it, then `!quest summon <quest_key>` to challenge its Legendary guardian.',color=discord.Color.gold()))
+
+    @commands.command(name='quest')
+    async def quest(self,ctx,action_or_key:str='list',*,argument:str=''):
+        if action_or_key.lower() in {'list','all'}:return await self.quests(ctx)
+        if action_or_key.lower()=='summon':
+            key=argument.lower().strip()
+            if key not in self.QUESTS:return await ctx.send('❌ Unknown quest key. Use `!quests`.')
+            title,region,goal,legendary,reward=self.QUESTS[key]
+            with db() as c:
+                progress=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
+                if not progress or not progress[1]:return await ctx.send(f'🔒 Complete and claim **{title}** before summoning its Legendary guardian.')
+                if c.execute('SELECT 1 FROM boss_encounters WHERE user_id=?',(ctx.author.id,)).fetchone():return await ctx.send('You already have a Legendary encounter. Finish it before summoning another.')
+                if c.execute('SELECT 1 FROM raid_encounters WHERE user_id=? UNION SELECT 1 FROM encounters WHERE user_id=?',(ctx.author.id,ctx.author.id)).fetchone():return await ctx.send('Finish your current hunt or raid before summoning a quest guardian.')
+            try: data=await pokemon_data(legendary.lower())
+            except Exception:return await ctx.send('⚠️ The Legendary data service is unavailable. No encounter was created; try again shortly.')
+            with db() as c:
+                c.execute('INSERT INTO boss_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,0)',(ctx.author.id,data['id'],data['name'],0))
+                c.execute('DELETE FROM boss_party WHERE user_id=?',(ctx.author.id,))
+            return await ctx.send(f'🌌 **{legendary} has answered your quest!**\nBuild a three-Pokémon guardian squad with `!add <Pokémon ID>`, then challenge it with `!legendarybattle`. The encounter uses PokéVanta’s existing Legendary battle system and rewards.')
+        if action_or_key.lower()=='claim':
+            key=argument.lower().strip()
+            if key not in self.QUESTS:return await ctx.send('❌ Unknown quest key. Use `!quests`.')
+            title,region,goal,legendary,reward=self.QUESTS[key]
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                row=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
+                if not row or row[0]<goal:return await ctx.send(f'🔒 **{title}** needs {goal} exploration steps in its story arc.')
+                if row[1]:return await ctx.send('You already claimed this quest reward.')
+                c.execute('UPDATE pv_quest_progress SET claimed=1 WHERE user_id=? AND quest_key=?',(ctx.author.id,key))
+                region_order=list(self.REGIONS)
+                if region in region_order and region_order.index(region)+1<len(region_order):
+                    next_region=region_order[region_order.index(region)+1]
+                    c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(ctx.author.id,next_region,int(time.time())))
+            add_progress(ctx.author.id,coins=reward,xp=250)
+            await self._guild_contribute(ctx.author.id,20)
+            return await ctx.send(f'🏆 **{title} completed!**\nYou earned **{reward:,} VantaCoins + 250 XP**. Legendary encounter clue unlocked: **{legendary}**. (Questline rewards do not automatically grant a Legendary.)')
+        key=action_or_key.lower().strip()
+        if key not in self.QUESTS:return await ctx.send('❌ Unknown quest. Use `!quests` to see available questlines.')
+        title,region,goal,legendary,reward=self.QUESTS[key]
+        progress=self._travel(ctx.author.id)
+        with db() as c:row=c.execute('SELECT progress,claimed FROM pv_quest_progress WHERE user_id=? AND quest_key=?',(ctx.author.id,key)).fetchone()
+        amount=row[0] if row else 0
+        await ctx.send(embed=discord.Embed(title=f'📜 {title}',description=f'**Region:** {region.title()}\n**Legendary:** {legendary}\n**Objective:** Explore {goal} times (current progress {min(amount,goal)}/{goal}).\n**Reward:** {reward:,} VantaCoins + 250 XP\n\nTravel to {region.title()} and explore to progress. Claim with `!quest claim {key}`, then summon the guardian with `!quest summon {key}`.',color=discord.Color.gold()))
+
+    @commands.group(name='guild', invoke_without_command=True)
+    async def guild(self,ctx):
+        await ctx.send('🏰 **Trainer Guilds**\n`!guild create <name>` · Create a guild\n`!guild join <name>` · Join a public guild\n`!guild leave` · Leave your guild\n`!guild info` · Guild profile\n`!guild contribute <amount>` · Donate VantaCoins for guild XP\n`!guild leaderboard` · Top guilds\nExploration and dungeon progress also contribute guild XP automatically.')
+
+    @guild.command(name='create')
+    async def guild_create(self,ctx,*,name:str):
+        name=name.strip()
+        if len(name)<3 or len(name)>32:return await ctx.send('Guild names must be 3–32 characters.')
+        with db() as c:
+            if c.execute('SELECT 1 FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone():return await ctx.send('You already belong to a guild. Leave it first.')
+            try:
+                cur=c.execute('INSERT INTO pv_guilds(name,owner_id,created_at) VALUES(?,?,?)',(name,ctx.author.id,int(time.time())))
+            except sqlite3.IntegrityError:return await ctx.send('That guild name is already taken.')
+            c.execute('INSERT INTO pv_guild_members(user_id,guild_id,role,joined_at) VALUES(?,?,\'leader\',?)',(ctx.author.id,cur.lastrowid,int(time.time())))
+        await ctx.send(f'🏰 **{name}** has been founded! You are its Guild Leader.')
+
+    @guild.command(name='join')
+    async def guild_join(self,ctx,*,name:str):
+        with db() as c:
+            if c.execute('SELECT 1 FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone():return await ctx.send('You already belong to a guild.')
+            row=c.execute('SELECT guild_id,name FROM pv_guilds WHERE name=? COLLATE NOCASE',(name.strip(),)).fetchone()
+            if not row:return await ctx.send('No guild with that name was found.')
+            c.execute('INSERT INTO pv_guild_members(user_id,guild_id,joined_at) VALUES(?,?,?)',(ctx.author.id,row[0],int(time.time())))
+        await ctx.send(f'✅ You joined **{row[1]}**!')
+
+    @guild.command(name='leave')
+    async def guild_leave(self,ctx):
+        with db() as c:
+            row=c.execute('SELECT guild_id,role FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if not row:return await ctx.send('You are not in a guild.')
+            members=c.execute('SELECT COUNT(*) FROM pv_guild_members WHERE guild_id=?',(row[0],)).fetchone()[0]
+            if row[1]=='leader' and members>1:return await ctx.send('Transfer leadership before leaving; a guild must always have a leader.')
+            c.execute('DELETE FROM pv_guild_members WHERE user_id=?',(ctx.author.id,))
+            if row[1]=='leader':c.execute('DELETE FROM pv_guilds WHERE guild_id=?',(row[0],))
+        await ctx.send('You left your guild.')
+
+    @guild.command(name='info')
+    async def guild_info(self,ctx):
+        with db() as c:
+            r=c.execute('SELECT g.guild_id,g.name,g.owner_id,g.level,g.xp,COUNT(m.user_id) FROM pv_guild_members m JOIN pv_guilds g ON g.guild_id=m.guild_id WHERE m.user_id=? GROUP BY g.guild_id',(ctx.author.id,)).fetchone()
+            if not r:return await ctx.send('You are not in a guild.')
+            members=c.execute('SELECT user_id,role FROM pv_guild_members WHERE guild_id=? ORDER BY CASE role WHEN \'leader\' THEN 0 ELSE 1 END,joined_at LIMIT 15',(r[0],)).fetchall()
+        e=discord.Embed(title=f'🏰 {r[1]}',description=f'**Level:** {r[3]} · **XP:** {r[4]} / {r[3]*1000}\n**Members:** {r[5]}\n**Leader:** <@{r[2]}>\n\n'+'\n'.join(f'• <@{u}> — {role.title()}' for u,role in members),color=discord.Color.blurple())
+        await ctx.send(embed=e)
+
+    @guild.command(name='contribute')
+    async def guild_contribute(self,ctx,amount:int):
+        if amount<100 or amount>100000:return await ctx.send('Contribution must be between 100 and 100,000 VantaCoins.')
+        with db() as c:
+            row=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if not row:return await ctx.send('Join a guild first.')
+            c.execute('BEGIN IMMEDIATE')
+            wallet=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if not wallet or wallet[0]<amount:return await ctx.send('You do not have enough VantaCoins.')
+            c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(amount,ctx.author.id))
+            points=max(1,amount//100)
+            c.execute('UPDATE pv_guilds SET xp=xp+?,level=1+CAST((xp+?)/1000 AS INTEGER) WHERE guild_id=?',(points,points,row[0]))
+            week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+            c.execute('INSERT INTO pv_guild_contributions(user_id,guild_id,week_key,points) VALUES(?,?,?,?) ON CONFLICT(user_id,guild_id,week_key) DO UPDATE SET points=points+excluded.points',(ctx.author.id,row[0],week,points))
+        await ctx.send(f'🤝 You contributed **{amount:,} VantaCoins** and added **{points} guild XP**!')
+
+    @guild.command(name='leaderboard')
+    async def guild_leaderboard(self,ctx):
+        with db() as c:rows=c.execute('SELECT g.name,g.level,g.xp,COUNT(m.user_id) FROM pv_guilds g LEFT JOIN pv_guild_members m ON m.guild_id=g.guild_id GROUP BY g.guild_id ORDER BY g.level DESC,g.xp DESC LIMIT 10').fetchall()
+        await ctx.send(embed=discord.Embed(title='🏆 Trainer Guild Rankings',description='\n'.join(f'**{i}. {n}** · Lv.{l} · {xp:,} XP · {members} members' for i,(n,l,xp,members) in enumerate(rows,1)) or 'No guilds yet.',color=discord.Color.gold()))
+
+
 class Bot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -7289,6 +7785,7 @@ class Bot(commands.Bot):
 
     async def setup_hook(self):
         await self.add_cog(Game(self));await self.add_cog(CarlStyleExtensions(self));await self.add_cog(EventsMissions(self))
+        await self.add_cog(MMORPG(self))
         self.add_view(TicketPanelView(self))
         self.add_view(TicketCloseView(self, 0))
         await load_pokemon_list();await self.tree.sync()
