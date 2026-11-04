@@ -1111,8 +1111,14 @@ class NPCBattleView(TimedView):
         for item in list(self.children): self.remove_item(item)
         await self.build()
         em=discord.Embed(title=('🌟 Raid Battle — Pokémon switched!' if self.raid else '🔥 Legendary 3v1 — Pokémon switched!'),description=f'**Active:** {target[3].title()} Lv.{target[4]}\nHP {hp_bar(self.player_hp,target[9])}\nStatus: **{status_label(self.player_status)}**\n**Boss:** {display_name(self.enemy)} Lv.{self.enemy["_level"]}\nHP {hp_bar(self.enemy_hp,self.enemy_max_hp)}\nStatus: **{status_label(self.enemy_status)}**\n🎙️ **Commentator:** {target[3].title()} enters the arena. Use the move buttons below, or Switch Pokémon to select a healthy teammate.')
-        if sprite(self.enemy,shiny=self.boss_shiny):em.set_image(url=sprite(self.enemy,shiny=self.boss_shiny))
-        if self.message is not None: await self.message.edit(embed=em,view=self)
+        boss_art = None
+        try:
+            boss_art = await radiant_sprite_file(self.enemy)
+            em.set_image(url=f'attachment://{boss_art.filename}')
+        except Exception as exc:
+            print(f'RADIANTDEX battle-switch artwork failed: {exc!r}')
+        if self.message is not None:
+            await self.message.edit(embed=em, attachments=[boss_art] if boss_art else [], view=self)
         if interaction is not None and not interaction.response.is_done(): await interaction.response.send_message(f'✅ Switched to **{target[3].title()}**.',ephemeral=True)
     def cb(self,i):
         async def f(inter):
@@ -1134,9 +1140,20 @@ class NPCBattleView(TimedView):
             if content is not None and view is self:
                 e=discord.Embed(title=('🌟 Shiny Raid Battle' if self.raid else ('🔥 Legendary Boss Battle' if self.boss else '⚔️ Pokémon Battle Arena')), description=content, color=discord.Color.dark_red() if self.boss else discord.Color.red())
                 own=await pokemon_data(self.row[2])
-                if sprite(own,shiny=bool(self.row[6])):e.set_thumbnail(url=sprite(own,shiny=bool(self.row[6])))
-                if sprite(self.enemy,shiny=self.boss_shiny):e.set_image(url=sprite(self.enemy,shiny=self.boss_shiny))
-                await self.message.edit(content=None, embed=e, view=self)
+                battle_art_files=[]
+                try:
+                    own_art=await radiant_sprite_file(own)
+                    e.set_thumbnail(url=f'attachment://{own_art.filename}')
+                    battle_art_files.append(own_art)
+                except Exception as exc:
+                    print(f'RADIANTDEX player battle artwork failed: {exc!r}')
+                try:
+                    enemy_art=await radiant_sprite_file(self.enemy)
+                    e.set_image(url=f'attachment://{enemy_art.filename}')
+                    battle_art_files.append(enemy_art)
+                except Exception as exc:
+                    print(f'RADIANTDEX opponent battle artwork failed: {exc!r}')
+                await self.message.edit(content=None, embed=e, attachments=battle_art_files, view=self)
             elif content is not None:
                 await self.message.edit(content=content, embed=None, view=None)
             else:
@@ -1337,7 +1354,7 @@ class PvPMovePicker(TimedView):
                     self.battle.last_text='⚠️ A temporary battle update error occurred. Please try choosing a move again.'
                     try:
                         if self.battle.message:
-                            await self.battle.message.edit(embed=await self.battle.make_embed(), view=self.battle.view())
+                            await self.battle.message.edit(embed=await self.battle.make_embed(), attachments=getattr(self.battle,'radiant_art_files',[]), view=self.battle.view())
                     except Exception as update_exc:
                         print(f'PvP recovery update failed: {update_exc!r}')
             button.callback=pick; self.add_item(button)
@@ -1352,8 +1369,19 @@ class PvPBattle:
     async def make_embed(self):
         e=discord.Embed(title='⚔️ Pokémon Battle Arena', description=await self.render(), color=discord.Color.red())
         da=await pokemon_data(self.ra[2]); dbb=await pokemon_data(self.rb[2])
-        if sprite(da,shiny=bool(self.ra[6])): e.set_thumbnail(url=sprite(da,shiny=bool(self.ra[6])))
-        if sprite(dbb,shiny=bool(self.rb[6])): e.set_image(url=sprite(dbb,shiny=bool(self.rb[6])))
+        self.radiant_art_files=[]
+        try:
+            left_art=await radiant_sprite_file(da)
+            e.set_thumbnail(url=f'attachment://{left_art.filename}')
+            self.radiant_art_files.append(left_art)
+        except Exception as exc:
+            print(f'RADIANTDEX PvP challenger artwork failed: {exc!r}')
+        try:
+            right_art=await radiant_sprite_file(dbb)
+            e.set_image(url=f'attachment://{right_art.filename}')
+            self.radiant_art_files.append(right_art)
+        except Exception as exc:
+            print(f'RADIANTDEX PvP opponent artwork failed: {exc!r}')
         e.set_footer(text='Left sprite: challenger • Main sprite: opponent')
         return e
     def view(self):
@@ -1377,10 +1405,10 @@ class PvPBattle:
             if len(self.picks)<2:
                 self.last_text=f'<@{uid}> has locked in a move. Waiting for the other trainer…'
                 try:
-                    await self.message.edit(embed=await self.make_embed(),view=self.view())
+                    await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=self.view())
                 except Exception as exc:
                     print(f'PvP waiting-state update failed: {exc!r}')
-                    await self.message.edit(content=await self.render(), embed=None, view=self.view())
+                    await self.message.edit(content=await self.render(), embed=None, attachments=[], view=self.view())
                 return
             await self.resolve()
     async def resolve(self):
@@ -1399,14 +1427,14 @@ class PvPBattle:
                 if self.energy[uid] < 2:
                     self.picks = {}
                     self.last_text = '🔋 Charged Move is not ready; use two Fast Moves first.'
-                    await self.message.edit(embed=await self.make_embed(), view=self.view())
+                    await self.message.edit(embed=await self.make_embed(), attachments=getattr(self,'radiant_art_files',[]), view=self.view())
                     return
                 self.energy[uid]=0
             else:
                 if self.energy[uid] >= 2:
                     self.picks = {}
                     self.last_text = '⚡ Two Fast Moves used! The Fast Move is locked until you use your Charged Move.'
-                    await self.message.edit(embed=await self.make_embed(), view=self.view())
+                    await self.message.edit(embed=await self.make_embed(), attachments=getattr(self,'radiant_art_files',[]), view=self.view())
                     return
                 self.energy[uid]=min(2,self.energy[uid]+1)
             held=(row[10] or '') if len(row)>10 else ''
@@ -1456,9 +1484,9 @@ class PvPBattle:
             self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_game_reward(winner,xp=100,rolls=2);self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight! 🎒 **{loot}** +100 XP'
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.a],self.status[self.a],self.ra[0]));c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.b],self.status[self.b],self.rb[0]))
-            await self.message.edit(embed=await self.make_embed(),view=None)
+            await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=None)
         else:
-            await self.message.edit(embed=await self.make_embed(),view=self.view())
+            await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=self.view())
 
 stats_cache={}
 
@@ -3210,9 +3238,20 @@ Type: **{type_text(enemy)}**
 
 Click **Choose Move**. Your move options are private, just like trainer challenges.''')
         e.color=discord.Color.red()
-        if sprite(own_data,shiny=bool(row[6])):e.set_thumbnail(url=sprite(own_data,shiny=bool(row[6])))
-        if sprite(enemy):e.set_image(url=sprite(enemy))
-        v.message=await ctx.send(embed=e,view=v); ACTIVE_VIEWS[ctx.author.id]=v
+        battle_art_files=[]
+        try:
+            own_art=await radiant_sprite_file(own_data)
+            e.set_thumbnail(url=f'attachment://{own_art.filename}')
+            battle_art_files.append(own_art)
+        except Exception as exc:
+            print(f'RADIANTDEX NPC player artwork failed: {exc!r}')
+        try:
+            enemy_art=await radiant_sprite_file(enemy)
+            e.set_image(url=f'attachment://{enemy_art.filename}')
+            battle_art_files.append(enemy_art)
+        except Exception as exc:
+            print(f'RADIANTDEX NPC opponent artwork failed: {exc!r}')
+        v.message=await ctx.send(embed=e,view=v,files=battle_art_files); ACTIVE_VIEWS[ctx.author.id]=v
     @commands.command(name='challenge',aliases=['pvp','duel','chall'],description='Challenge another trainer to a PvP battle; PvP battles have their own 60-second cooldown.')
     async def challenge(self,ctx,opponent:discord.Member):
         if opponent.bot or opponent.id==ctx.author.id:return await ctx.send('❌ Choose another human trainer.')
@@ -3245,7 +3284,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 await p.setup()
                 pv=p.view()
                 p.message=i.message;pv.message=i.message
-                await i.edit_original_response(content=None,embed=await p.make_embed(),view=pv)
+                await i.edit_original_response(content=None,embed=await p.make_embed(),attachments=getattr(p,'radiant_art_files',[]),view=pv)
                 ACTIVE_VIEWS[ctx.author.id]=p;ACTIVE_VIEWS[opponent.id]=p
             except Exception as exc:
                 print(f'PvP challenge acceptance failed: {exc!r}')
