@@ -322,10 +322,15 @@ def setup():
             c.execute('UPDATE players SET started=1')
         c.execute('CREATE TABLE IF NOT EXISTS pokemon(instance_id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,dex_id INTEGER,name TEXT,level INTEGER DEFAULT 5,xp INTEGER DEFAULT 0,shiny INTEGER DEFAULT 0,nickname TEXT DEFAULT "",hp INTEGER DEFAULT 1,max_hp INTEGER DEFAULT 1,held_item TEXT DEFAULT "",status_condition TEXT DEFAULT "")')
         c.execute("CREATE TABLE IF NOT EXISTS pokedex_entries(user_id INTEGER NOT NULL,dex_id INTEGER NOT NULL,name TEXT NOT NULL,shiny INTEGER NOT NULL DEFAULT 0,registered_at INTEGER DEFAULT 0,PRIMARY KEY(user_id,dex_id,shiny))")
+        c.execute("CREATE TABLE IF NOT EXISTS radiant_pokedex_entries(user_id INTEGER NOT NULL,radiant_dex_id INTEGER NOT NULL,dex_id INTEGER NOT NULL,name TEXT NOT NULL,registered_at INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,radiant_dex_id),UNIQUE(user_id,dex_id))")
         pcols=[r[1] for r in c.execute('PRAGMA table_info(pokemon)').fetchall()]
         if 'held_item' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN held_item TEXT DEFAULT ""')
         if 'status_condition' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN status_condition TEXT DEFAULT ""')
         if 'radiant' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN radiant INTEGER NOT NULL DEFAULT 0')
+        # Backfill the separate Radiant Dex for Radiant Pokémon caught before this update.
+        legacy_radiants=c.execute('SELECT DISTINCT user_id,dex_id,name FROM pokemon WHERE radiant=1 AND user_id IS NOT NULL ORDER BY user_id,instance_id').fetchall()
+        for radiant_uid,radiant_species_id,radiant_name in legacy_radiants:
+            assign_radiant_dex_id(c,int(radiant_uid),int(radiant_species_id),radiant_name)
         if 'fast_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN fast_move TEXT DEFAULT ""')
         if 'charged_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN charged_move TEXT DEFAULT ""')
         if 'box_id' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN box_id INTEGER')
@@ -402,6 +407,21 @@ def resolve_box_id(conn, uid, box_id):
 def get_box_id(conn, uid, instance_id):
     row=conn.execute('SELECT box_id FROM pokemon WHERE user_id=? AND instance_id=?',(uid,instance_id)).fetchone()
     return int(row[0]) if row and row[0] is not None else None
+
+def assign_radiant_dex_id(conn, uid, dex_id, name):
+    """Register one species in this trainer's separate, sequential Radiant Dex."""
+    if not uid or not dex_id:
+        return None
+    row = conn.execute('SELECT radiant_dex_id FROM radiant_pokedex_entries WHERE user_id=? AND dex_id=?', (uid, int(dex_id))).fetchone()
+    if row:
+        return int(row[0])
+    next_id = int(conn.execute('SELECT COALESCE(MAX(radiant_dex_id),0)+1 FROM radiant_pokedex_entries WHERE user_id=?', (uid,)).fetchone()[0])
+    conn.execute('INSERT INTO radiant_pokedex_entries(user_id,radiant_dex_id,dex_id,name,registered_at) VALUES(?,?,?,?,?)', (uid,next_id,int(dex_id),str(name),int(time.time())))
+    return next_id
+
+def get_radiant_dex_id(conn, uid, dex_id):
+    row = conn.execute('SELECT radiant_dex_id FROM radiant_pokedex_entries WHERE user_id=? AND dex_id=?', (uid,int(dex_id))).fetchone()
+    return int(row[0]) if row else None
 
 def assign_box_id(conn, uid, instance_id):
     if uid is None or int(uid)==0: return None
@@ -555,39 +575,68 @@ def sprite(d, shiny=False):
     return art.get('front_default') or s.get('front_default')
 
 async def radiant_sprite_file(d):
-    """Fetch PokeAPI official artwork and apply the bot-wide consistent violet Radiant treatment."""
+    """Render Radiant artwork using the exact luminance-to-purple palette
+    from the user's RADIANTDEX artwork exporter. The official artwork's
+    transparency is preserved and the result is attached directly to Discord.
+    """
     if Image is None:
         raise RuntimeError('Pillow is not installed. Install it with: python -m pip install pillow')
-    source = sprite(d, shiny=False)
-    if not source:
-        return None
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(source) as response:
-            response.raise_for_status()
-            raw = await response.read()
-    image = Image.open(io.BytesIO(raw)).convert('RGBA')
-    # Purple/lavender color grade while preserving the original Pokémon silhouette.
-    alpha = image.getchannel('A')
-    rgb = image.convert('RGB')
-    rgb = ImageEnhance.Color(rgb).enhance(1.35)
-    rgb = ImageEnhance.Brightness(rgb).enhance(1.12)
-    overlay = Image.new('RGB', rgb.size, (151, 55, 255))
-    rgb = Image.blend(rgb, overlay, 0.62)
-    tinted = rgb.convert('RGBA')
-    tinted.putalpha(alpha)
-    # Soft violet aura behind the transparent artwork.
-    glow_mask = alpha.filter(ImageFilter.GaussianBlur(max(5, image.width // 35)))
-    glow = Image.new('RGBA', image.size, (177, 75, 255, 0))
-    glow.putalpha(glow_mask.point(lambda value: int(value * 0.72)))
-    canvas = Image.new('RGBA', image.size, (0, 0, 0, 0))
-    canvas.alpha_composite(glow)
-    canvas.alpha_composite(tinted)
-    output = io.BytesIO()
-    canvas.save(output, format='PNG', optimize=True)
-    output.seek(0)
+    sprites = d.get('sprites') or {}
+    other = sprites.get('other') or {}
+    official = other.get('official-artwork') or {}
+    home = other.get('home') or {}
+    candidates = [official.get('front_default'), home.get('front_default'), sprites.get('front_default')]
+    candidates = list(dict.fromkeys(url for url in candidates if url))
+    if not candidates:
+        raise RuntimeError(f'PokéAPI returned no artwork URL for {d.get("name", "unknown")}')
+    raw = None
+    errors = []
+    timeout = aiohttp.ClientTimeout(total=25, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout, headers={'User-Agent':'PokeVantaBot/1.0 (Radiant artwork)'}) as session:
+        for url in candidates:
+            try:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        errors.append(f'HTTP {response.status} from {url}')
+                        continue
+                    raw = await response.read()
+                    if raw:
+                        break
+            except Exception as exc:
+                errors.append(f'{type(exc).__name__}: {exc}')
+    if not raw:
+        raise RuntimeError('Could not download any Pokémon artwork: ' + '; '.join(errors[-3:]))
+    try:
+        image = Image.open(io.BytesIO(raw)).convert('RGBA')
+        image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        # This is the same palette and luminance mapping as radiantdex_export.py.
+        stops = [(0.0, (25, 3, 48)), (0.28, (83, 13, 139)),
+                 (0.58, (157, 42, 226)), (0.82, (211, 126, 255)),
+                 (1.0, (255, 232, 255))]
+        pixels = image.load()
+        for y in range(image.height):
+            for x in range(image.width):
+                r, g, b, a = pixels[x, y]
+                if not a:
+                    continue
+                luminance = (0.2126*r + 0.7152*g + 0.0722*b) / 255.0
+                for i in range(len(stops)-1):
+                    lower, ca = stops[i]
+                    upper, cb = stops[i+1]
+                    if lower <= luminance <= upper:
+                        t = (luminance-lower)/(upper-lower)
+                        pixels[x, y] = (round(ca[0]+(cb[0]-ca[0])*t),
+                                        round(ca[1]+(cb[1]-ca[1])*t),
+                                        round(ca[2]+(cb[2]-ca[2])*t), a)
+                        break
+        output = io.BytesIO()
+        image.save(output, format='PNG', optimize=True)
+        output.seek(0)
+    except Exception as exc:
+        raise RuntimeError(f'Could not process Radiant artwork: {type(exc).__name__}: {exc}') from exc
     safe_name = re.sub(r'[^a-z0-9_-]+', '-', str(d.get('name', 'pokemon')).lower()).strip('-') or 'pokemon'
     return discord.File(output, filename=f'radiant-{safe_name}.png')
+
 def max_hp(d,lvl,iv_hp=0): return max(1,int((2*stats(d).get('hp',50)*lvl)/100+lvl+10)+int(max(0,min(31,int(iv_hp or 0)))*max(1,int(lvl))/100))
 def hp_bar(current, maximum, width=12):
     maximum=max(1,maximum); filled=max(0,min(width,round(current/maximum*width)))
@@ -1615,7 +1664,7 @@ class BoxView(TimedView):
 class DexView(TimedView):
     """Paginated Pokédex showing registered and missing species together."""
     ITEMS_PER_PAGE = 25
-    def __init__(self, owner_id, entries, shiny, title, registered_count, total_count):
+    def __init__(self, owner_id, entries, shiny, title, registered_count, total_count, id_prefix=""):
         super().__init__(timeout=180, timeout_text='⏰ Pokédex pages expired. Run the same `!dex` command again.')
         self.owner_id=owner_id
         self.entries=entries  # (dex_id, name, registered)
@@ -1623,6 +1672,7 @@ class DexView(TimedView):
         self.dex_title=title
         self.registered_count=registered_count
         self.total_count=total_count
+        self.id_prefix=id_prefix
         self.page=0
         self.pages=max(1,(len(entries)+self.ITEMS_PER_PAGE-1)//self.ITEMS_PER_PAGE)
         self.update_buttons()
@@ -1632,11 +1682,11 @@ class DexView(TimedView):
     def make_embed(self):
         current=self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]
         embed=discord.Embed(title=('✨ Shiny ' if self.shiny else '📘 ')+self.dex_title,
-            color=discord.Color.gold() if self.shiny else discord.Color.blurple())
+            color=discord.Color.from_rgb(145, 65, 230) if self.id_prefix else (discord.Color.gold() if self.shiny else discord.Color.blurple()))
         embed.description=(f'**Registered:** {self.registered_count}/{self.total_count}  •  **Missing:** {self.total_count-self.registered_count}\n'
             f'**Entries — page {self.page+1}/{self.pages}**\n' +
-            ('\n'.join(f"{'✅' if caught else '⬜'} `#{dex_id:04}` {name.replace('-', ' ').title()}" for dex_id,name,caught in current) if current else 'No species found for this category.'))
-        embed.set_footer(text='✅ Registered • ⬜ Not registered • Normal and shiny entries are separate')
+            ('\n'.join(f"{'✅' if caught else '⬜'} `{self.id_prefix + format(dex_id, '03d') if self.id_prefix else '#' + format(dex_id, '04d')}` {name.replace('-', ' ').title()}" for dex_id,name,caught in current) if current else 'No species found for this category.'))
+        embed.set_footer(text='Radiant Dex IDs are separate from National Dex IDs' if self.id_prefix else '✅ Registered • ⬜ Not registered • Normal and shiny entries are separate')
         return embed
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
@@ -2304,6 +2354,7 @@ class Game(commands.Cog):
             cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh,int(radiant))); iid=cur.lastrowid; box_id=assign_box_id(c,uid,iid)
             # Register only the first catch of this species + variant; repeats do not change the Dex.
             c.execute('INSERT OR IGNORE INTO pokedex_entries(user_id,dex_id,name,shiny) VALUES(?,?,?,?)',(uid,int(enc[0]),d['name'],int(bool(enc[2]))))
+            radiant_dex_id = assign_radiant_dex_id(c,uid,int(enc[0]),d['name']) if radiant else None
             if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
                 c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(uid,1,iid))
             if not is_global:
@@ -2334,7 +2385,7 @@ class Game(commands.Cog):
                 c.execute('UPDATE hunt_counts SET count=? WHERE user_id=?',(catch_progress,uid))
         note=' **You were the first to guess it!**' if is_global else ''
         variant=(RADIANT_EMOJI + ' RADIANT ') if radiant else ('✨ SHINY ' if enc[2] else '')
-        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`\n🎒 Reward: **{loot}** • +25 XP. Check `!inventory`.'
+        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`' + (f' • Radiant Dex ID: `R{radiant_dex_id:03d}`' if radiant_dex_id else '') + f'\n🎒 Reward: **{loot}** • +25 XP. Check `!inventory`.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -2353,6 +2404,15 @@ class Game(commands.Cog):
                 response+='\n\n'+f'🔥 **Legendary boss unlocked!** Your next encounter is ready — use `!add <pokemon_id>` to select three Pokémon, then `!legendarybattle`.'
                 await ctx.send(response)
                 return await ctx.send(embed=boss_embed)
+        if radiant:
+            try:
+                radiant_file=await radiant_sprite_file(d)
+                catch_embed=discord.Embed(title=f'{RADIANT_EMOJI} Radiant Pokémon registered!',description=response,color=discord.Color.from_rgb(145,65,230))
+                catch_embed.set_image(url=f'attachment://{radiant_file.filename}')
+                return await ctx.send(embed=catch_embed,file=radiant_file)
+            except Exception as exc:
+                print(f'Radiant catch artwork failed for {d.get("name", "unknown")}: {type(exc).__name__}: {exc}')
+                return await ctx.send(response + '\n⚠️ Radiant artwork could not be rendered; check the bot logs and Pillow installation.')
         return await ctx.send(response)
 
     @commands.command(name='cancel',aliases=['stop','quit'])
@@ -2685,7 +2745,8 @@ class Game(commands.Cog):
                 '`!dex paldea` / `!dex gen 9` — Paldea\n'
                 '`!dex legendary` — Legendary Pokémon\n'
                 '`!dex mythical` — Mythical Pokémon\n'
-                '`!dex ultrabeast` — Ultra Beasts\n\n'
+                '`!dex ultrabeast` — Ultra Beasts\n'
+                '`!dex radiant` — Your separate Radiant Pokédex (IDs R001, R002, …)\n\n'
                 '`!dex <pokemon name>` — Pokémon stats and info\n'
                 'Each Pokédex page shows 25 entries. ✅ = registered; ⬜ = not registered.\n'
                 'Use `!dex shiny` to see shiny Pokédex commands.'
@@ -2716,6 +2777,13 @@ class Game(commands.Cog):
         elif tokens and tokens[-1] in ('shiny','shinies'):
             shiny=True; tokens=tokens[:-1]
         key=' '.join(tokens).strip()
+        if key in ('radiant','radiants'):
+            with db() as c:
+                radiant_rows=c.execute('SELECT radiant_dex_id,name FROM radiant_pokedex_entries WHERE user_id=? ORDER BY radiant_dex_id',(ctx.author.id,)).fetchall()
+            entries=[(int(r[0]),str(r[1]),True) for r in radiant_rows]
+            view=DexView(ctx.author.id,entries,False,'Radiant Pokédex',len(entries),len(entries),id_prefix='R')
+            msg=await ctx.send(embed=view.make_embed(),view=view); view.message=msg
+            return
         gen_ranges={1:(1,151,'Kanto (Gen 1)'),2:(152,251,'Johto (Gen 2)'),3:(252,386,'Hoenn (Gen 3)'),4:(387,493,'Sinnoh (Gen 4)'),5:(494,649,'Unova (Gen 5)'),6:(650,721,'Kalos (Gen 6)'),7:(722,809,'Alola (Gen 7)'),8:(810,905,'Galar (Gen 8)'),9:(906,1025,'Paldea (Gen 9)')}
         region_aliases={'kanto':1,'johto':2,'hoenn':3,'sinnoh':4,'unova':5,'kalos':6,'alola':7,'galar':8,'paldea':9}
         if key in region_aliases: key=f'gen {region_aliases[key]}'
@@ -2839,7 +2907,9 @@ class Game(commands.Cog):
         hp=max(0,min(hp,maxhp)); maxhp=max(1,maxhp); ratio=hp/maxhp
         filled=max(0,min(10,round(ratio*10))); bar='▰'*filled+'▱'*(10-filled)
         variant=(RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else '')
-        e=discord.Embed(title=f'{variant}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.from_rgb(80,235,220) if radiant else (discord.Color.gold() if shiny else (discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())))
+        with db() as c: radiant_id=get_radiant_dex_id(c,ctx.author.id,dex_id) if radiant else None
+        radiant_line=f'\n**Radiant Dex ID:** `R{radiant_id:03d}`' if radiant_id else ''
+        e=discord.Embed(title=f'{variant}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`{radiant_line}\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.from_rgb(80,235,220) if radiant else (discord.Color.gold() if shiny else (discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())))
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
         iv_total=sum(max(0,min(31,int(v or 0))) for v in iv_values)
         iv_percent=iv_total/186*100
@@ -2861,7 +2931,9 @@ class Game(commands.Cog):
             else:
                 art = sprite(d, shiny=bool(shiny))
                 if art: e.set_image(url=art)
-        e.set_footer(text=f'Pokémon species / Pokédex ID: {dex_id} • Live collection data • !info defaults to your selected Pokémon')
+        footer=f'Pokémon species / National Dex ID: {dex_id} • Live collection data • !info defaults to your selected Pokémon'
+        if radiant and not radiant_file: footer += ' • Radiant artwork conversion failed; see bot logs'
+        e.set_footer(text=footer)
         if radiant_file: await ctx.send(embed=e, file=radiant_file)
         else: await ctx.send(embed=e)
 
@@ -2946,10 +3018,11 @@ class Game(commands.Cog):
                     cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant)))
                     iid=cur.lastrowid
                     assign_box_id(c,member.id,iid)
+                    radiant_id=assign_radiant_dex_id(c,member.id,int(d['id']),d['name']) if radiant else None
                     public_id=get_box_id(c,member.id,iid) or iid
                     if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
                         c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-                result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`).'
+                result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:03d}`.' if radiant_id else '.')
             except Exception as exc:
                 result=f'❌ Add failed: `{type(exc).__name__}: {exc}`'
             await interaction.message.edit(content=result,embed=None,view=view)
