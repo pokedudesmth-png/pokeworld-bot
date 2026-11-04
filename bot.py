@@ -29,6 +29,7 @@ def _read_env_file_value(key):
 
 TOKEN = os.getenv('DISCORD_TOKEN') or os.getenv('TOKEN') or _read_env_file_value('DISCORD_TOKEN') or _read_env_file_value('TOKEN')
 PREFIX = '!'
+RADIANT_EMOJI = '<:radiant:1567479696525103114>'
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pokemon_game.db')
 # Developer/owner Discord user IDs. Supports hosting variables or a local .env,
 # and accepts comma-, semicolon-, or whitespace-separated IDs.
@@ -81,34 +82,20 @@ BOT_BAN_CACHE_TTL = 15.0
 
 # Stable product IDs used by !shop buy <id>. This is a curated battle-focused catalogue.
 SHOP_ITEMS = {
-  1: ('oran-berry', 'Oran Berry', 120, 'Heals 10 HP when used on a Pokémon', 'ora1'),
-  2: ('sitrus-berry', 'Sitrus Berry', 300, 'Heals 25% of max HP when used', 'sit2'),
-  3: ('pecha-berry', 'Pecha Berry', 150, 'Cures poison', 'pec3'),
-  4: ('cheri-berry', 'Cheri Berry', 150, 'Cures paralysis', 'che4'),
-  5: ('rawst-berry', 'Rawst Berry', 150, 'Cures burn', 'raw5'),
-  6: ('aspear-berry', 'Aspear Berry', 150, 'Cures freeze', 'asp6'),
-  7: ('chesto-berry', 'Chesto Berry', 150, 'Cures sleep', 'che7'),
-  8: ('lum-berry', 'Lum Berry', 350, 'Cures any major status condition', 'lum8'),
-  9: ('leppa-berry', 'Leppa Berry', 250, 'Battle stamina item; restores a small amount of HP in this game', 'lep9'),
-  10: ('figy-berry', 'Figy Berry', 250, 'Heals 20% of max HP when used', 'fig10'),
-  11: ('wiki-berry', 'Wiki Berry', 250, 'Heals 20% of max HP when used', 'wik11'),
-  12: ('mago-berry', 'Mago Berry', 250, 'Heals 20% of max HP when used', 'mag12'),
-  13: ('aguav-berry', 'Aguav Berry', 250, 'Heals 20% of max HP when used', 'agu13'),
-  14: ('iapapa-berry', 'Iapapa Berry', 250, 'Heals 20% of max HP when used', 'iap14'),
-  15: ('leftovers', 'Leftovers', 1800, 'Held item; provides small passive healing after surviving a battle turn', 'lef15'),
-  16: ('choice-band', 'Choice Band', 10000, 'Held item; increases physical damage', 'cho16'),
-  17: ('choice-specs', 'Choice Specs', 10000, 'Held item; increases special damage', 'cho17'),
-  18: ('choice-scarf', 'Choice Scarf', 10000, 'Held item; boosts Speed and slightly increases damage in this simplified battle system', 'cho18'),
-  19: ('life-orb', 'Life Orb', 2500, 'Held item; boosts damage', 'lif19'),
+  15: ('leftovers', 'Leftovers', 1800, 'Held item; restores 1/16 of max HP after surviving an opponent turn', 'lef15'),
+  16: ('choice-band', 'Choice Band', 10000, 'Held item; increases physical move damage by 50%', 'cho16'),
+  17: ('choice-specs', 'Choice Specs', 10000, 'Held item; increases special move damage by 50%', 'cho17'),
+  18: ('choice-scarf', 'Choice Scarf', 10000, 'Held item; boosts PvP turn-order Speed by 50% and damage by 10% (damage bonus is used in NPC battles)', 'cho18'),
+  19: ('life-orb', 'Life Orb', 2500, 'Held item; boosts damage by 30% and costs 10% max HP recoil after a damaging move', 'lif19'),
   20: ('expert-belt', 'Expert Belt', 2000, 'Held item; boosts super-effective damage', 'exp20'),
-  21: ('focus-sash', 'Focus Sash', 2000, 'Held item; may help survive a hit', 'foc21'),
-  22: ('assault-vest', 'Assault Vest', 1800, 'Held item; reduces incoming damage slightly', 'ass22'),
-  23: ('rocky-helmet', 'Rocky Helmet', 1800, 'Held item; retaliates with minor damage after being hit', 'roc23'),
+  21: ('focus-sash', 'Focus Sash', 2000, 'Held item; once per battle, survive a knockout hit at full HP with 1 HP remaining', 'foc21'),
+  22: ('assault-vest', 'Assault Vest', 1800, 'Held item; reduces incoming special-move damage by 20%', 'ass22'),
+  23: ('rocky-helmet', 'Rocky Helmet', 1800, 'Held item; returns 8% of damage dealt back to the attacker', 'roc23'),
   24: ('muscle-band', 'Muscle Band', 1500, 'Held item; boosts physical damage', 'mus24'),
   25: ('wise-glasses', 'Wise Glasses', 1500, 'Held item; boosts special damage', 'wis25'),
-  26: ('shell-bell', 'Shell Bell', 1600, 'Held item; heals a little after dealing damage', 'she26'),
-  27: ('safety-goggles', 'Safety Goggles', 1200, 'Held item; status protection flavour effect', 'saf27'),
-  28: ('heavy-duty-boots', 'Heavy-Duty Boots', 1300, 'Held item; reduces incoming damage slightly (entry hazards are not implemented)', 'hea28'),
+  26: ('shell-bell', 'Shell Bell', 1600, 'Held item; restores 1/8 of damage dealt as HP', 'she26'),
+  27: ('safety-goggles', 'Safety Goggles', 1200, 'Held item; prevents major status conditions inflicted by moves', 'saf27'),
+  28: ('heavy-duty-boots', 'Heavy-Duty Boots', 1300, 'Held item; reduces incoming damage by 10% (entry hazards are not implemented)', 'hea28'),
   29: ('black-belt', 'Black Belt', 1000, 'Held item; boosts Fighting-type move damage', 'bla29'),
   30: ('charcoal', 'Charcoal', 1000, 'Held item; boosts Fire-type move damage', 'cha30'),
   31: ('mystic-water', 'Mystic Water', 1000, 'Held item; boosts Water-type move damage', 'mys31'),
@@ -139,9 +126,6 @@ SHOP_ITEMS = {
 ITEM_BY_KEY = {v[0]: (k, *v) for k,v in SHOP_ITEMS.items()}
 # Display-only emojis; no catalog, pricing, or game mechanics are changed.
 ITEM_EMOJI = {
- 'oran-berry':'🍊','sitrus-berry':'🍋','pecha-berry':'🍑','cheri-berry':'🍒','rawst-berry':'🍇',
- 'aspear-berry':'🍐','chesto-berry':'🫐','lum-berry':'🍈','leppa-berry':'🍓','figy-berry':'🥝',
- 'wiki-berry':'🍎','mago-berry':'🥭','aguav-berry':'🍍','iapapa-berry':'🥥',
  'leftovers':'🍱','choice-band':'🎗️','choice-specs':'🕶️','choice-scarf':'🧣','life-orb':'🔮',
  'expert-belt':'🥋','focus-sash':'🪢','assault-vest':'🦺','rocky-helmet':'⛑️','muscle-band':'💪',
  'wise-glasses':'👓','shell-bell':'🐚','safety-goggles':'🥽','heavy-duty-boots':'🥾','black-belt':'🏅',
@@ -173,8 +157,14 @@ try:
     with open(ITEM_EMOJI_FILE, 'r', encoding='utf-8') as _emoji_file:
         _saved_item_emojis = json.load(_emoji_file)
     if isinstance(_saved_item_emojis, dict):
-        SHOP_ITEM_EMOJI.update({str(k): str(v) for k, v in _saved_item_emojis.items()})
-        ITEM_EMOJI.update({str(k): str(v) for k, v in _saved_item_emojis.items()})
+        _saved_item_emojis = {str(k): str(v) for k, v in _saved_item_emojis.items() if not str(k).endswith('-berry')}
+        SHOP_ITEM_EMOJI.update(_saved_item_emojis)
+        ITEM_EMOJI.update(_saved_item_emojis)
+        try:
+            with open(ITEM_EMOJI_FILE, 'w', encoding='utf-8') as _clean_emoji_file:
+                json.dump(_saved_item_emojis, _clean_emoji_file, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
 except (OSError, ValueError, TypeError):
     pass
 
@@ -331,9 +321,46 @@ def setup():
         pcols=[r[1] for r in c.execute('PRAGMA table_info(pokemon)').fetchall()]
         if 'held_item' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN held_item TEXT DEFAULT ""')
         if 'status_condition' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN status_condition TEXT DEFAULT ""')
+        if 'radiant' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN radiant INTEGER NOT NULL DEFAULT 0')
         if 'fast_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN fast_move TEXT DEFAULT ""')
         if 'charged_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN charged_move TEXT DEFAULT ""')
         if 'box_id' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN box_id INTEGER')
+        iv_columns=('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed')
+        iv_schema_missing=any(col not in pcols for col in iv_columns)
+        for iv_col in iv_columns:
+            if iv_col not in pcols:
+                c.execute(f'ALTER TABLE pokemon ADD COLUMN {iv_col} INTEGER NOT NULL DEFAULT -1')
+        # Existing Pokémon receive one permanent IV roll; apply their HP IV to current max HP once.
+        c.execute('''UPDATE pokemon SET
+            iv_hp=CASE WHEN iv_hp<0 THEN abs(random())%32 ELSE iv_hp END,
+            iv_attack=CASE WHEN iv_attack<0 THEN abs(random())%32 ELSE iv_attack END,
+            iv_defense=CASE WHEN iv_defense<0 THEN abs(random())%32 ELSE iv_defense END,
+            iv_sp_attack=CASE WHEN iv_sp_attack<0 THEN abs(random())%32 ELSE iv_sp_attack END,
+            iv_sp_defense=CASE WHEN iv_sp_defense<0 THEN abs(random())%32 ELSE iv_sp_defense END,
+            iv_speed=CASE WHEN iv_speed<0 THEN abs(random())%32 ELSE iv_speed END
+            WHERE iv_hp<0 OR iv_attack<0 OR iv_defense<0 OR iv_sp_attack<0 OR iv_sp_defense<0 OR iv_speed<0''')
+        if iv_schema_missing:
+            c.execute('''UPDATE pokemon SET
+                hp=CASE WHEN hp<=0 THEN 0 WHEN hp>=max_hp THEN max_hp+CAST(iv_hp*level/100 AS INTEGER)
+                        ELSE MIN(max_hp+CAST(iv_hp*level/100 AS INTEGER),hp+CAST(iv_hp*level/100 AS INTEGER)) END,
+                max_hp=max_hp+CAST(iv_hp*level/100 AS INTEGER)''')
+        c.execute('''CREATE TRIGGER IF NOT EXISTS pokemon_roll_ivs_after_insert
+            AFTER INSERT ON pokemon
+            BEGIN
+              UPDATE pokemon SET
+                iv_hp=CASE WHEN NEW.iv_hp<0 THEN abs(random())%32 ELSE NEW.iv_hp END,
+                iv_attack=CASE WHEN NEW.iv_attack<0 THEN abs(random())%32 ELSE NEW.iv_attack END,
+                iv_defense=CASE WHEN NEW.iv_defense<0 THEN abs(random())%32 ELSE NEW.iv_defense END,
+                iv_sp_attack=CASE WHEN NEW.iv_sp_attack<0 THEN abs(random())%32 ELSE NEW.iv_sp_attack END,
+                iv_sp_defense=CASE WHEN NEW.iv_sp_defense<0 THEN abs(random())%32 ELSE NEW.iv_sp_defense END,
+                iv_speed=CASE WHEN NEW.iv_speed<0 THEN abs(random())%32 ELSE NEW.iv_speed END
+              WHERE instance_id=NEW.instance_id;
+              UPDATE pokemon SET
+                max_hp=max_hp + CAST(iv_hp*level/100 AS INTEGER),
+                hp=CASE WHEN hp<=0 THEN 0 WHEN hp>=max_hp THEN max_hp + CAST(iv_hp*level/100 AS INTEGER)
+                        ELSE MIN(max_hp + CAST(iv_hp*level/100 AS INTEGER), hp + CAST(iv_hp*level/100 AS INTEGER)) END
+              WHERE instance_id=NEW.instance_id;
+            END''')
         # Backfill stable, per-owner collection IDs. Listed Pokémon are unowned and receive an ID on return/purchase.
         owners=c.execute('SELECT DISTINCT user_id FROM pokemon WHERE user_id IS NOT NULL AND user_id<>0').fetchall()
         for (owner_id,) in owners:
@@ -352,7 +379,11 @@ def setup():
         c.execute('UPDATE pokemon SET level=300 WHERE level>300')
         c.execute('CREATE TABLE IF NOT EXISTS team(user_id INTEGER,slot INTEGER,instance_id INTEGER,PRIMARY KEY(user_id,slot))')
         c.execute('CREATE TABLE IF NOT EXISTS inventory(user_id INTEGER,item TEXT,amount INTEGER,PRIMARY KEY(user_id,item))')
+        c.execute("DELETE FROM inventory WHERE item LIKE '%-berry'")
+        c.execute("UPDATE pokemon SET held_item='' WHERE held_item LIKE '%-berry'")
         c.execute('CREATE TABLE IF NOT EXISTS encounters(user_id INTEGER PRIMARY KEY,dex_id INTEGER,name TEXT,shiny INTEGER DEFAULT 0,level INTEGER DEFAULT 5,hints_used INTEGER DEFAULT 0)')
+        encounter_cols=[r[1] for r in c.execute('PRAGMA table_info(encounters)').fetchall()]
+        if 'radiant' not in encounter_cols: c.execute('ALTER TABLE encounters ADD COLUMN radiant INTEGER NOT NULL DEFAULT 0')
         # One server-wide special encounter: the first correct guess claims it.
         c.execute('CREATE TABLE IF NOT EXISTS global_encounter(id INTEGER PRIMARY KEY CHECK(id=1),dex_id INTEGER,name TEXT,shiny INTEGER DEFAULT 1,level INTEGER DEFAULT 5,spawned_by INTEGER)')
         cols=[r[1] for r in c.execute('PRAGMA table_info(encounters)').fetchall()]
@@ -443,6 +474,27 @@ def add_progress(uid,coins=0,xp=0):
     while xp0>=level*100: xp0-=level*100; level+=1
     with db() as c: c.execute('UPDATE players SET coins=?,xp=?,level=? WHERE user_id=?',(coins0+coins,xp0,level,uid))
     return level
+
+GAMEPLAY_REWARD_ITEMS = (
+    ('rare-candy', 4), ('potion', 4), ('super-potion', 3),
+    ('raid-pass', 2), ('fast-tm', 2), ('charged-tm', 2),
+    ('elite-charged-tm', 1),
+)
+
+def grant_game_reward(uid, xp=0, guaranteed_items=None, rolls=1):
+    """Grant gameplay prizes as useful supplies/upgrade materials instead of routine coins."""
+    add_progress(uid, xp=int(xp))
+    granted=[]
+    for item,qty in (guaranteed_items or {}).items():
+        qty=int(qty)
+        if qty>0:
+            change_item(uid,item,qty); granted.append(f'{qty} × {item.replace("-", " ").title()}')
+    for _ in range(max(0,int(rolls))):
+        item=random.choices([x[0] for x in GAMEPLAY_REWARD_ITEMS],weights=[x[1] for x in GAMEPLAY_REWARD_ITEMS],k=1)[0]
+        qty=2 if item in {'potion','rare-candy'} and random.random()<0.25 else 1
+        change_item(uid,item,qty); granted.append(f'{qty} × {item.replace("-", " ").title()}')
+    return ' + '.join(granted) if granted else 'XP'
+
 def inventory_amount(uid,item):
     ensure_player(uid)
     with db() as c:
@@ -497,7 +549,7 @@ def sprite(d, shiny=False):
     if shiny:
         return art.get('front_shiny') or s.get('front_shiny') or art.get('front_default') or s.get('front_default')
     return art.get('front_default') or s.get('front_default')
-def max_hp(d,lvl): return max(1,int((2*stats(d).get('hp',50)*lvl)/100+lvl+10))
+def max_hp(d,lvl,iv_hp=0): return max(1,int((2*stats(d).get('hp',50)*lvl)/100+lvl+10)+int(max(0,min(31,int(iv_hp or 0)))*max(1,int(lvl))/100))
 def hp_bar(current, maximum, width=12):
     maximum=max(1,maximum); filled=max(0,min(width,round(current/maximum*width)))
     return f'`{"▰"*filled}{"▱"*(width-filled)}` **{max(0,current)}/{maximum}**'
@@ -616,9 +668,27 @@ async def saved_battle_moves(row):
     charged['power']=max(50,int((charged.get('power') or 60)*1.8))
     return [fast,charged]
 
-def calc_damage(attacker, defender, move, level):
-    a=stats(attacker); b=stats(defender); physical=move.get('damage_class',{}).get('name')=='physical'
-    atk=a.get('attack' if physical else 'special-attack',50); defense=b.get('defense' if physical else 'special-defense',50)
+def pokemon_ivs(row):
+    if row is None or len(row) < 21:
+        return {}
+    names=('hp','attack','defense','special-attack','special-defense','speed')
+    cols=('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed')
+    # The IV columns are appended to the pokemon table after its original 12 columns.
+    return {name:max(0,min(31,int(row[15+i] or 0))) for i,name in enumerate(names)}
+
+def iv_adjusted_stats(species, ivs=None, level=100):
+    result=stats(species)
+    for stat_name, iv in (ivs or {}).items():
+        if stat_name in result:
+            result[stat_name] += int(max(0,min(31,int(iv))) * max(1,int(level)) / 100)
+    return result
+
+def calc_damage(attacker, defender, move, level, attacker_ivs=None, defender_ivs=None, defender_level=None):
+    a=iv_adjusted_stats(attacker,attacker_ivs,level)
+    b=iv_adjusted_stats(defender,defender_ivs,defender_level or level)
+    physical=move.get('damage_class',{}).get('name')=='physical'
+    atk=a.get('attack' if physical else 'special-attack',50)
+    defense=b.get('defense' if physical else 'special-defense',50)
     mt=move['type']['name']; at=[x['type']['name'] for x in attacker['types']]; dt=[x['type']['name'] for x in defender['types']]
     stab=1.5 if mt in at else 1; eff=effectiveness(mt,dt); crit=1.5 if random.random()<.0625 else 1
     damage=max(1,int((((2*level/5+2)*(move.get('power') or 40)*atk/max(1,defense))/50+2)*stab*eff*crit*random.uniform(.85,1)))
@@ -640,11 +710,12 @@ def held_damage_multiplier(held, move, effectiveness_value=1):
     if TYPE_HELD_ITEMS.get(held)==mtype: mult*=1.2
     return mult
 
-def held_incoming_multiplier(held):
+def held_incoming_multiplier(held, move=None):
     """Defensive held-item effects shared by NPC, legendary, raid and PvP battles."""
     mult=1.0
-    if held=='assault-vest': mult*=0.8
-    elif held=='heavy-duty-boots': mult*=0.9  # No entry hazards exist, so a small defensive perk is used.
+    # Assault Vest only reduces special damage, matching its intended battle role.
+    if held=='assault-vest' and (move or {}).get('damage_class',{}).get('name')=='special': mult*=0.8
+    elif held=='heavy-duty-boots': mult*=0.9
     return mult
 
 def held_prevents_status(held):
@@ -867,7 +938,7 @@ async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level
 
 class NPCBattleView(TimedView):
     def __init__(self,uid,row,enemy,boss=False,boss_shiny=False,active_boss_battles=None,raid=False):
-        super().__init__(timeout=None, timeout_text=''); self.raid=raid; self.uid=uid; self.row=row; self.enemy=enemy; self.player_hp=row[8]; self.enemy_base_hp=max_hp(enemy,enemy['_level']); self.enemy_max_hp=self.enemy_base_hp*(4 if raid else 1); self.enemy_hp=self.enemy_max_hp; self.player_status=(row[11] or '') if len(row)>11 else ''; self.enemy_status=''; self.moves=[]; self.choice_lock=''; self.busy=False; self.boss=boss; self.boss_shiny=boss_shiny; self.party=[]; self.energy_by_pokemon={row[0]:0}; self.active_boss_battles=active_boss_battles
+        super().__init__(timeout=None, timeout_text=''); self.raid=raid; self.uid=uid; self.row=row; self.enemy=enemy; self.player_hp=row[8]; self.enemy_base_hp=max_hp(enemy,enemy['_level']); self.enemy_max_hp=self.enemy_base_hp*(4 if raid else 1); self.enemy_hp=self.enemy_max_hp; self.player_status=(row[11] or '') if len(row)>11 else ''; self.enemy_status=''; self.moves=[]; self.choice_lock=''; self.busy=False; self.boss=boss; self.boss_shiny=boss_shiny; self.party=[]; self.energy_by_pokemon={row[0]:0}; self.focus_sash_used=set(); self.active_boss_battles=active_boss_battles
     async def on_timeout(self):
         if self.boss and self.active_boss_battles is not None:
             self.active_boss_battles.discard(self.uid)
@@ -970,6 +1041,7 @@ class NPCBattleView(TimedView):
     async def turn(self,inter,move):
         p=await pokemon_data(self.row[2]); msg=''
         held=(self.row[10] or '') if len(self.row)>10 else ''
+        enemyheld=self.enemy.get('_held_item','')
         move_name=move.get('name','').lower()
         battle_kind=move.get('_battle_kind','fast')
         if battle_kind=='charged' and self.energy<2: return await self.update_battle(inter,content='🔋 Your Charged Move is not ready. Use two Fast Moves first.')
@@ -986,7 +1058,7 @@ class NPCBattleView(TimedView):
             msg=f'💚 **{self.row[3].title()}** used **{move_name.replace("-"," " ).title()}** and recovered **{restored} HP**!\nYour HP: {hp_bar(self.player_hp,self.row[9])}\n🎙️ **Commentator:** A timely recovery! {self.row[3].title()} regains its strength.'
         elif random.randint(1,100)>(move.get('accuracy') or 100): msg=f'💨 **{move["name"].title()}** missed!\n{battle_commentary(self.row[3], move, 0)}'
         else:
-            dmg,eff,crit=calc_damage(p,self.enemy,move,self.row[4])
+            dmg,eff,crit=calc_damage(p,self.enemy,move,self.row[4],attacker_ivs=pokemon_ivs(self.row))
             with db() as mega_conn:
                 mega_active=mega_conn.execute('SELECT instance_id FROM pv_mega_active WHERE user_id=?',(self.uid,)).fetchone()
                 mega_boost=bool(mega_active and int(mega_active[0])==int(self.row[0]))
@@ -997,10 +1069,10 @@ class NPCBattleView(TimedView):
             ability_names={a['ability']['name'] for a in p.get('abilities',[])}
             if 'adaptability' in ability_names and move.get('type',{}).get('name') in [t['type']['name'] for t in p['types']]: dmg=int(dmg*1.15)
             if 'huge-power' in ability_names or 'pure-power' in ability_names: dmg=int(dmg*1.15)
-            enemyheld=self.enemy.get('_held_item','')
-            if enemyheld=='assault-vest':dmg=int(dmg*.8)
+            dmg=max(1,int(dmg*held_incoming_multiplier(enemyheld,move)))
             if enemyheld=='focus-sash' and self.enemy_hp>=self.enemy_max_hp and dmg>=self.enemy_hp: dmg=max(0,self.enemy_hp-1)
             self.enemy_hp=max(0,self.enemy_hp-dmg)
+            if enemyheld=='rocky-helmet' and dmg>0:self.player_hp=max(0,self.player_hp-max(1,int(dmg*.08)))
             status_msg=''
             inflicted=status_from_move(move)
             if inflicted and enemyheld!='safety-goggles' and not self.enemy_status:
@@ -1020,7 +1092,7 @@ class NPCBattleView(TimedView):
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=? AND user_id=?',
                           (max(0, min(self.row[9], self.player_hp)), self.player_status or '', self.row[0], self.uid))
-            r=random.randint(80,220);x=random.randint(40,90);add_progress(self.uid,r,x)
+            x=random.randint(40,90);loot=grant_game_reward(self.uid,xp=x,rolls=2)
             if self.raid:
                 pv_record_activity(self.uid,'raid_win',1,getattr(inter.guild,'id',None))
             elif self.boss:
@@ -1050,16 +1122,16 @@ class NPCBattleView(TimedView):
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=self.enemy.get('_level'), image_url=sprite(self.enemy, shiny=True))
                 jackpot=1_000_000 if self.boss_shiny else 0
                 if jackpot:
-                    add_progress(self.uid,coins=jackpot)
+                    grant_game_reward(self.uid,xp=500,guaranteed_items={'rare-candy':50,'elite-charged-tm':5,'raid-pass':10},rolls=0)
                     if inter.guild:
-                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}** and received **1,000,000 VantaCoins**.\n**Result:** Jackpot credited after victory.', guild=inter.guild, user=inter.user)
-                jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **1,000,000 {get_vantacoin_emoji()} VantaCoins (1 million)** have been credited to your balance! 💰' if jackpot else ''
-                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]} — ID `{get_box_id(c,self.uid,iid)}`!\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP{jackpot_text}',view=None)
-            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP',view=None)
+                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}** and received **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**.\n**Result:** Jackpot credited after victory.', guild=inter.guild, user=inter.user)
+                jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes** have been added to your inventory! 💰' if jackpot else ''
+                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]} — ID `{get_box_id(c,self.uid,iid)}`!\n🎒 Loot: **{loot}** • ⭐ +{x} XP{jackpot_text}',view=None)
+            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
         self.enemy_hp, tickmsg=status_tick(self.enemy_status,self.enemy_hp,self.enemy_max_hp)
         if tickmsg: msg+='\n'+tickmsg
         if self.enemy_hp<=0:
-            r=random.randint(80,220);x=random.randint(40,90);add_progress(self.uid,r,x)
+            x=random.randint(40,90);loot=grant_game_reward(self.uid,xp=x,rolls=2)
             if self.raid:
                 pv_record_activity(self.uid,'raid_win',1,getattr(inter.guild,'id',None))
             elif self.boss:
@@ -1078,13 +1150,19 @@ class NPCBattleView(TimedView):
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}`!\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
-            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n💰 +{r} {get_vantacoin_emoji()} VantaCoins • ⭐ +{x} XP',view=None)
-        em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'])
+            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
+        em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'],defender_ivs=pokemon_ivs(self.row),defender_level=self.row[4]);dmg=int(dmg*held_damage_multiplier(enemyheld,em,eff))
         if self.raid: dmg=max(1,int(dmg*1.35))  # Raid boss strikes are substantially stronger.
-        dmg=max(1,int(dmg*held_incoming_multiplier(held)))
-        if held=='focus-sash' and self.player_hp>=self.row[9] and dmg>=self.player_hp: dmg=max(0,self.player_hp-1)
+        dmg=max(1,int(dmg*held_incoming_multiplier(held,em)))
+        if held=='focus-sash' and self.row[0] not in self.focus_sash_used and self.player_hp>=self.row[9] and dmg>=self.player_hp:
+            dmg=max(0,self.player_hp-1); self.focus_sash_used.add(self.row[0])
+            with db() as sash_conn: sash_conn.execute("UPDATE pokemon SET held_item='' WHERE instance_id=?",(self.row[0],))
+            held=''
         if held=='rocky-helmet': self.enemy_hp=max(0,self.enemy_hp-max(1,int(dmg*.08)))
         self.player_hp=max(0,self.player_hp-dmg)
+        if enemyheld=='shell-bell' and dmg>0:self.enemy_hp=min(self.enemy_max_hp,self.enemy_hp+max(1,dmg//8))
+        if enemyheld=='life-orb' and dmg>0:self.enemy_hp=max(0,self.enemy_hp-max(1,self.enemy_max_hp//10))
+        if enemyheld=='leftovers' and self.enemy_hp>0:self.enemy_hp=min(self.enemy_max_hp,self.enemy_hp+max(1,self.enemy_max_hp//16))
         inflicted=status_from_move(em)
         if inflicted and not held_prevents_status(held) and not self.player_status:
             self.player_status=inflicted; msg+=f'\n🧪 **{self.row[3].title()}** is now **{status_label(inflicted)}**!'
@@ -1115,7 +1193,7 @@ class NPCBattleView(TimedView):
                     c.execute('DELETE FROM boss_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
                 return await self.update_battle(inter, content=f'💥 **Boss challenge lost!**\n{msg}\n\nThe legendary escaped. You are back to normal `!hunt` encounters. Complete 10 more hunts to trigger another boss challenge.',view=None)
-            return await self.update_battle(inter, content=f'💥 **Defeat!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\nUse `!useitem Potion <pokemon_id>` to heal HP, or a status-curing berry if needed.',view=None)
+            return await self.update_battle(inter, content=f'💥 **Defeat!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\nUse `!useitem Potion <pokemon_id>` to heal HP.',view=None)
         with db() as c:c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.player_hp,self.player_status,self.row[0]))
         await self.update_battle(inter, content=f'⚔️ **NPC Battle**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nStatus: **{status_label(self.player_status)}**\n👾 Enemy: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\nStatus: **{status_label(self.enemy_status)}**',view=self)
 
@@ -1158,7 +1236,7 @@ class PvPMovePicker(TimedView):
             button.callback=pick; self.add_item(button)
 
 class PvPBattle:
-    def __init__(self,a,b,ra,rb): self.a=a;self.b=b;self.ra=ra;self.rb=rb;self.hp={a:ra[8],b:rb[8]};self.status={a:(ra[11] or ''),b:(rb[11] or '')};self.moves={};self.energy={a:0,b:0};self.picks={};self.choice_locks={};self.message=None;self.lock=asyncio.Lock();self.over=False;self.last_text='🎙️ **Commentator:** The trainers step into the arena—this battle is underway!'
+    def __init__(self,a,b,ra,rb): self.a=a;self.b=b;self.ra=ra;self.rb=rb;self.hp={a:ra[8],b:rb[8]};self.status={a:(ra[11] or ''),b:(rb[11] or '')};self.moves={};self.energy={a:0,b:0};self.picks={};self.choice_locks={};self.focus_sash_used=set();self.message=None;self.lock=asyncio.Lock();self.over=False;self.last_text='🎙️ **Commentator:** The trainers step into the arena—this battle is underway!'
     async def setup(self):
         for uid,row in [(self.a,self.ra),(self.b,self.rb)]:self.moves[uid]=await saved_battle_moves(row)
     async def render(self):
@@ -1202,7 +1280,7 @@ class PvPBattle:
         speeds={}
         for uid in (self.a,self.b):
             row=self.ra if uid==self.a else self.rb
-            speeds[uid]=stats(await pokemon_data(row[2])).get('speed',0)*(1.5 if len(row)>10 and row[10]=='choice-scarf' else 1)
+            speeds[uid]=iv_adjusted_stats(await pokemon_data(row[2]),pokemon_ivs(row),row[4]).get('speed',0)*(1.5 if len(row)>10 and row[10]=='choice-scarf' else 1)
         order=sorted([self.a,self.b],key=lambda u:speeds[u],reverse=True)
         # Keep action messages visible in the public battle log, but never reveal a move before both trainers have selected.
         log=[]
@@ -1224,19 +1302,25 @@ class PvPBattle:
                     await self.message.edit(embed=await self.make_embed(), view=self.view())
                     return
                 self.energy[uid]=min(2,self.energy[uid]+1)
+            held=(row[10] or '') if len(row)>10 else ''
+            enemyheld=(orow[10] or '') if len(orow)>10 else ''
             move_name=move.get('name','').lower()
             healing_moves={'recover','roost','moonlight','synthesis','soft-boiled','slack-off','shore-up'}
             if move_name in healing_moves:
                 before=self.hp[uid]; maximum=row[9]; self.hp[uid]=min(maximum,self.hp[uid]+max(1,int(maximum*0.5))); restored=self.hp[uid]-before
                 log.append(f'💚 **{row[3].title()}** used **{move_name.replace("-"," " ).title()}** and recovered **{restored} HP**!\nHP: {hp_bar(self.hp[uid],maximum)}\n🎙️ **Commentator:** A timely recovery! {row[3].title()} regains its strength.')
+                if held=='leftovers' and self.hp[uid]>0:self.hp[uid]=min(row[9],self.hp[uid]+max(1,row[9]//16))
                 continue
-            if random.randint(1,100)>(move.get('accuracy') or 100): log.append(f'💨 **{row[3].title()}** used **{move["name"].title()}**, but missed!\n{battle_commentary(row[3], move, 0)}');continue
+            if random.randint(1,100)>(move.get('accuracy') or 100):
+                log.append(f'💨 **{row[3].title()}** used **{move["name"].title()}**, but missed!\n{battle_commentary(row[3], move, 0)}')
+                if held=='leftovers' and self.hp[uid]>0:self.hp[uid]=min(row[9],self.hp[uid]+max(1,row[9]//16))
+                continue
             before_hp=self.hp[opp]
-            held=(row[10] or '') if len(row)>10 else ''
-            enemyheld=(orow[10] or '') if len(orow)>10 else ''
-            dmg,eff,crit=calc_damage(attacker,defender,move,row[4]);dmg=int(dmg*held_damage_multiplier(held,move,eff))
-            dmg=max(1,int(dmg*held_incoming_multiplier(enemyheld)))
-            if enemyheld=='focus-sash' and self.hp[opp]>=orow[9] and dmg>=self.hp[opp]: dmg=max(0,self.hp[opp]-1)
+            dmg,eff,crit=calc_damage(attacker,defender,move,row[4],attacker_ivs=pokemon_ivs(row),defender_ivs=pokemon_ivs(orow),defender_level=orow[4]);dmg=int(dmg*held_damage_multiplier(held,move,eff))
+            dmg=max(1,int(dmg*held_incoming_multiplier(enemyheld,move)))
+            if enemyheld=='focus-sash' and opp not in self.focus_sash_used and self.hp[opp]>=orow[9] and dmg>=self.hp[opp]:
+                dmg=max(0,self.hp[opp]-1); self.focus_sash_used.add(opp)
+                with db() as sash_conn: sash_conn.execute("UPDATE pokemon SET held_item='' WHERE instance_id=?",(orow[0],))
             self.hp[opp]=max(0,self.hp[opp]-dmg)
             if held=='shell-bell' and dmg>0:self.hp[uid]=min(row[9],self.hp[uid]+max(1,dmg//8))
             if held=='life-orb' and dmg>0:self.hp[uid]=max(0,self.hp[uid]-max(1,row[9]//10))
@@ -1262,7 +1346,7 @@ class PvPBattle:
         elif self.hp[self.b]<=0:winner=self.a
         self.last_text='\n'.join(log)
         if winner:
-            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;add_progress(winner,coins=250,xp=100);self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight! +250 {get_vantacoin_emoji()} VantaCoins +100 XP'
+            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_game_reward(winner,xp=100,rolls=2);self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight! 🎒 **{loot}** +100 XP'
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.a],self.status[self.a],self.ra[0]));c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.b],self.status[self.b],self.rb[0]))
             await self.message.edit(embed=await self.make_embed(),view=None)
@@ -1286,12 +1370,10 @@ class ShopView(TimedView):
         self.update_buttons()
 
     def matches_category(self, key):
-        if self.category == 'berries':
-            return 'berry' in key
         if self.category == 'potions':
             return key in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}
         if self.category == 'held':
-            return 'berry' not in key and key not in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}
+            return key not in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}
         return True
 
     def update_buttons(self):
@@ -1302,7 +1384,7 @@ class ShopView(TimedView):
         """Render one Discord embed containing up to ten shop items."""
         start = self.page * self.ITEMS_PER_PAGE
         current = self.entries[start:start + self.ITEMS_PER_PAGE]
-        labels = {'all': 'All Items', 'berries': 'Berries', 'potions': 'Potions', 'held': 'Held Items'}
+        labels = {'all': 'All Items', 'potions': 'Potions', 'held': 'Held Items'}
         embed = discord.Embed(
             title=f'🛒 Poké Mart — {labels.get(self.category, "All Items")}',
             color=discord.Color.orange()
@@ -1436,7 +1518,7 @@ class BoxView(TimedView):
         self.previous.disabled=self.page<=0
         self.next.disabled=self.page>=self.pages-1
     def make_embed(self):
-        labels={'all':'All Pokémon','hp':'Highest max HP first','status':'Pokémon with status conditions','legendary':'Legendary Pokémon','shiny':'Shiny Pokémon','mythical':'Mythical Pokémon','ultrabeast':'Ultra Beasts','damaged':'Pokémon below max HP','items':'Pokémon Holding Items','name':'Named Pokémon'}
+        labels={'all':'All Pokémon','hp':'Highest max HP first','status':'Pokémon with status conditions','legendary':'Legendary Pokémon','shiny':'Shiny Pokémon','radiant':'Radiant Pokémon','mythical':'Mythical Pokémon','ultrabeast':'Ultra Beasts','damaged':'Pokémon below max HP','items':'Pokémon Holding Items','name':'Named Pokémon'}
         current=self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]
         embed=discord.Embed(title=f'📦 Pokémon Box — {labels.get(self.category, "All Pokémon")}', color=discord.Color.blurple())
         if not current:
@@ -1453,9 +1535,10 @@ class BoxView(TimedView):
                 if held:
                     details+=f'\n{item_emoji(held)} **Held item:** {ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace(chr(45), chr(32)).title()}'
                 dex_id = row[8] if len(row)>8 else None
-                # Keep the shiny sparkle before the Pokémon name, without a Pokémon emoji.
-                shiny_marker = '✨ ' if shiny else ''
-                field_name=f'{shiny_marker}{display}'.strip()
+                radiant = bool(row[9]) if len(row)>9 else False
+                # Radiant and Shiny are separate collectible variants.
+                variant_marker = RADIANT_EMOJI + ' ' if radiant else ('✨ ' if shiny else '')
+                field_name=f'{variant_marker}{display}'.strip()
                 embed.add_field(name=field_name[:256], value=details[:1024], inline=False)
         embed.set_footer(text=f'Pokémon Box — {labels.get(self.category, "All Pokémon")} • Page {self.page+1}/{self.pages} • {len(self.entries)} Pokémon')
         return embed
@@ -1786,9 +1869,10 @@ class Game(commands.Cog):
         bonus_text = ''
         roll = random.random()
         if roll < 0.08:
-            bonus = random.randint(40, 180) * (2 if rarity in ('Legendary', 'Ultra Rare', 'Mythical') else 1)
-            add_progress(uid, coins=bonus)
-            bonus_text = f'\n\n🧰 **Washed-up treasure!** You also found **{bonus:,} {get_vantacoin_emoji()} VantaCoins**.'
+            bonus_item=random.choice(('rare-candy','super-potion','raid-pass','fast-tm','charged-tm'))
+            bonus_qty=2 if rarity in ('Legendary','Ultra Rare','Mythical') else 1
+            change_item(uid,bonus_item,bonus_qty)
+            bonus_text = f'\n\n🧰 **Washed-up treasure!** You also found **{bonus_qty} × {bonus_item.replace("-"," ").title()}**.'
         elif roll < 0.15:
             bonus_text = '\n\n💫 **Perfect Reel!** Your timing was excellent — the catch is recorded as an Angler highlight!'
         elif roll < 0.19:
@@ -1895,7 +1979,7 @@ class Game(commands.Cog):
         e.set_footer(text='PokéVanta Fishing • Fish are converted one at a time')
         await ctx.send(embed=e)
 
-    @commands.command(name='hunt',aliases=['h','search'],description='Find a wild Pokémon (7-second cooldown); every 25th successful catch unlocks a legendary boss.')
+    @commands.command(name='hunt',aliases=['h','search'],description='Find a wild Pokémon; 1/4096 chance of a Radiant variant. Every 25th successful catch unlocks a legendary boss.')
     @commands.cooldown(1, 7, commands.BucketType.user)
     async def hunt(self,ctx):
         try:
@@ -1911,13 +1995,20 @@ class Game(commands.Cog):
                 c.execute('INSERT OR IGNORE INTO hunt_counts(user_id,count) VALUES(?,0)',(uid,))
                 count=c.execute('SELECT count FROM hunt_counts WHERE user_id=?',(uid,)).fetchone()[0]
             # Starting a hunt does not advance catch progress. Only a successful catch does.
-            d=await random_pokemon(); shiny=random.random()<1/128; lvl=random.randint(3,20)
-            with db() as c:c.execute('INSERT OR REPLACE INTO encounters(user_id,dex_id,name,shiny,level,hints_used) VALUES(?,?,?,?,?,0)',(uid,d['id'],d['name'],int(shiny),lvl))
+            d=await random_pokemon(); radiant=(random.randint(1,4096)==1); shiny=(not radiant and random.random()<1/128); lvl=random.randint(3,20)
+            with db() as c:c.execute('INSERT OR REPLACE INTO encounters(user_id,dex_id,name,shiny,level,hints_used,radiant) VALUES(?,?,?,?,?,0,?)',(uid,d['id'],d['name'],int(shiny),lvl,int(radiant)))
             pv_record_activity(uid,'hunt',1,getattr(ctx.guild,'id',None))
-            e=discord.Embed(title='🌿 A wild Pokémon appeared!',description=f'**Catch progress:** {count}/50 • **Level:** {lvl}\n**Type:** ???\n\n👀 Look at the picture and guess the Pokémon!\nUse `!hint` for up to 2 missing-letter hints and `!catch <name>` to catch it. Every 25 successful catches unlocks a legendary boss; boss shiny odds are **1/1000**, improved to **1/250** on every 50th successful catch!')
-            if shiny:e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
+            e=discord.Embed(title='🌿 A wild Pokémon appeared!',description=f'**Catch progress:** {count}/50 • **Level:** {lvl}\n**Type:** ???\n\n👀 Look at the picture and guess the Pokémon!\nUse `!hint` for up to 2 missing-letter hints and `!catch <name>` to catch it. Every 25 successful catches unlocks a legendary boss; boss shiny odds are **1/1000**, improved to **1/250** on every 50th successful catch!\n\n{RADIANT_EMOJI} **Radiant odds:** 1/4096 per hunt.')
+            if radiant:
+                e.title=f'{RADIANT_EMOJI} A RADIANT Pokémon appeared!'
+                e.description=f'{RADIANT_EMOJI} **INCREDIBLY RARE RADIANT ENCOUNTER!**\n'+e.description
+                e.color=discord.Color.from_rgb(80, 235, 220)
+            elif shiny:
+                e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
+                e.color=discord.Color.gold()
             art=sprite(d,shiny=shiny)
             if art:e.set_image(url=art)
+            if radiant:e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
             await ctx.reply(embed=e, mention_author=False)
         except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
 
@@ -2023,7 +2114,7 @@ class Game(commands.Cog):
         with db() as c:
             boss=c.execute('SELECT dex_id,name,level,shiny FROM boss_encounters WHERE user_id=?',(uid,)).fetchone()
         # The configured dev can test boss battles without completing 10 hunts.
-        # Dev-created/started bosses are guaranteed shiny, so winning grants the existing 1,000,000-coin jackpot.
+        # Dev-created/started bosses are guaranteed shiny, so winning grants the existing special item jackpot.
         if dev_override and not boss:
             candidates=[x for x in POKEMON_LIST if x['name'] in LEGENDARY_NAMES]
             if not candidates:
@@ -2033,19 +2124,19 @@ class Game(commands.Cog):
                 c.execute('INSERT OR REPLACE INTO boss_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,1)',(uid,d['id'],d['name'],0))
                 c.execute('DELETE FROM boss_party WHERE user_id=?',(uid,))
             boss=(d['id'],d['name'],0,1)
-            await ctx.send(f'🛠️ **Dev override enabled:** you can start this boss without completing 10 hunts. This boss is guaranteed shiny; defeating it awards the **1,000,000 {get_vantacoin_emoji()} jackpot**. Build your team with `!add <pokemon_id>` if needed.')
+            await ctx.send(f'🛠️ **Dev override enabled:** you can start this boss without completing 10 hunts. This boss is guaranteed shiny; defeating it awards **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**. Build your team with `!add <pokemon_id>` if needed.')
         elif dev_override and boss and not boss[3]:
             with db() as c:
                 c.execute('UPDATE boss_encounters SET shiny=1 WHERE user_id=?',(uid,))
             boss=(boss[0],boss[1],boss[2],1)
-            await ctx.send(f'🛠️ **Dev override enabled:** this boss is now guaranteed shiny. Defeating it awards the **1,000,000 {get_vantacoin_emoji()} jackpot**.')
+            await ctx.send(f'🛠️ **Dev override enabled:** this boss is now guaranteed shiny. Defeating it awards **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**.')
         with db() as c:
             # Re-read in case the dev override created/updated the encounter above.
             boss=c.execute('SELECT dex_id,name,level,shiny FROM boss_encounters WHERE user_id=?',(uid,)).fetchone()
             party=c.execute('SELECT p.* FROM boss_party bp JOIN pokemon p ON p.instance_id=bp.instance_id WHERE bp.user_id=? ORDER BY bp.slot',(uid,)).fetchall()
         if not boss:return await ctx.send('❌ No active boss encounter. Every 25th successful catch unlocks one (devs can use `!legendarybattle` directly).')
         if len(party)!=3:return await ctx.send(f'🧩 Your boss team has **{len(party)}/3 Pokémon**. Add them with `!add <pokemon_id>`; use `!box` to see IDs.')
-        if all(r[8]<=0 for r in party):return await ctx.send('💤 All three Pokémon have fainted. Use a potion with `!useitem Potion <pokemon_id>` or a status berry before starting the boss battle.')
+        if all(r[8]<=0 for r in party):return await ctx.send('💤 All three Pokémon have fainted. Use a potion with `!useitem Potion <pokemon_id>` .')
         remaining = pv_battle_cooldown_remaining(uid, 'legendary')
         if remaining: return await ctx.send(f'⏳ Legendary battle cooldown: wait **{remaining}s** before starting another legendary battle.')
         pv_start_battle_cooldown(uid, 'legendary')
@@ -2069,7 +2160,7 @@ class Game(commands.Cog):
     @commands.command(name='hint',aliases=['i','clue'],description='Get one of two hints for your current wild Pokémon.')
     async def hint(self,ctx):
         uid=ctx.author.id
-        with db() as c:enc=c.execute('SELECT dex_id,name,shiny,level,hints_used FROM encounters WHERE user_id=?',(uid,)).fetchone()
+        with db() as c:enc=c.execute('SELECT dex_id,name,shiny,level,hints_used,radiant FROM encounters WHERE user_id=?',(uid,)).fetchone()
         if not enc:return await ctx.send('❌ You have no active hunt. Use `!hunt` first.')
         if enc[4]>=2:return await ctx.send('❌ You have already used both hints for this Pokémon.')
         d=await pokemon_data(enc[0]); used=enc[4]
@@ -2120,11 +2211,11 @@ class Game(commands.Cog):
                 # Remove it while holding the write lock so no second user can claim it.
                 c.execute('DELETE FROM global_encounter WHERE id=1')
                 c.commit()
-                enc=(global_enc[0],global_enc[1],global_enc[2],global_enc[3],0)
+                enc=(global_enc[0],global_enc[1],global_enc[2],global_enc[3],0,0)
                 is_global=True
             else:
                 c.commit()
-                enc=c.execute('SELECT dex_id,name,shiny,level,hints_used FROM encounters WHERE user_id=?',(uid,)).fetchone()
+                enc=c.execute('SELECT dex_id,name,shiny,level,hints_used,radiant FROM encounters WHERE user_id=?',(uid,)).fetchone()
                 is_global=False
         if not enc:
             return await ctx.send('❌ No active Pokémon to catch. Use `!hunt` — or wait for a server-wide shiny spawn!')
@@ -2137,7 +2228,8 @@ class Game(commands.Cog):
             print(f'Catch data lookup failed for user {uid}, dex_id={enc[0]!r}: {type(exc).__name__}: {exc}')
             return await ctx.send('⚠️ I could not load this Pokémon from PokéAPI right now. Your encounter is still saved—please try `!catch <name>` again in a moment.')
         with db() as c:
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh)); iid=cur.lastrowid; box_id=assign_box_id(c,uid,iid)
+            radiant=bool(enc[5]) if len(enc)>5 else False
+            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh,int(radiant))); iid=cur.lastrowid; box_id=assign_box_id(c,uid,iid)
             # Register only the first catch of this species + variant; repeats do not change the Dex.
             c.execute('INSERT OR IGNORE INTO pokedex_entries(user_id,dex_id,name,shiny) VALUES(?,?,?,?)',(uid,int(enc[0]),d['name'],int(bool(enc[2]))))
             if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
@@ -2151,7 +2243,7 @@ class Game(commands.Cog):
         fossil_species = {'omanyte','omastar','kabuto','kabutops','aerodactyl','lileep','cradily','anorith','armaldo','cranidos','rampardos','shieldon','bastiodon','tirtouga','carracosta','archen','archeops','tyrunt','tyrantrum','amaura','aurorus'}
         if str(d.get('name','')).strip().lower().replace(' ','-') in fossil_species:
             pv_record_activity(uid,'fossil_catch',1,getattr(ctx.guild,'id',None))
-        add_progress(uid,coins=50,xp=25)
+        loot=grant_game_reward(uid,xp=25,rolls=3,guaranteed_items={'rare-candy':5,'elite-charged-tm':1} if is_global else None)
         if bool(enc[2]) and ctx.guild:
             await log_rare_shiny_event(ctx.guild, ctx.author, display_name(d), action='caught', level=enc[3], image_url=sprite(d, shiny=True))
         boss_unlocked=False
@@ -2169,7 +2261,8 @@ class Game(commands.Cog):
                 is_fiftieth_catch = (progressed == 50)
                 c.execute('UPDATE hunt_counts SET count=? WHERE user_id=?',(catch_progress,uid))
         note=' **You were the first to guess it!**' if is_global else ''
-        response=f'🎉 {ctx.author.mention} caught {"✨ SHINY " if enc[2] else ""}{display_name(d)}!{note} ID: `{box_id}`\n💰 +50 coins! Check `!box`.'
+        variant=(RADIANT_EMOJI + ' RADIANT ') if radiant else ('✨ SHINY ' if enc[2] else '')
+        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`\n🎒 Reward: **{loot}** • +25 XP. Check `!inventory`.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -2409,7 +2502,7 @@ class Game(commands.Cog):
                     'regions': 'View the nine-region world atlas and your unlocks.',
                     'region': 'View or travel to an unlocked Pokémon region.',
                     'travel': 'Travel between discovered locations in your current region.',
-                    'explore': 'Explore your current location for Pokémon, eggs, items, VantaCoins, interactive Pokémon riddles and treasure-search mini-games.',
+                    'explore': 'Explore your current location for Pokémon, eggs, useful items, interactive Pokémon riddles and treasure-search mini-games.',
                     'egg': 'Claim a starter egg, view egg commands or hatch an incubated egg.',
                     'eggs': 'View your egg collection and incubation progress.',
                     'dungeon': 'Explore persistent multi-floor Mystery Dungeon runs.',
@@ -2437,7 +2530,7 @@ class Game(commands.Cog):
                     'regions': 'View the world atlas, region unlocks and your exploration progress.',
                     'region': 'View your current region or details about an unlocked region.',
                     'travel': 'Travel to a known location in your current region.',
-                    'explore': 'Explore your current location for Pokémon, eggs, VantaCoins and items. Find interactive Pokémon riddles and treasure-search mini-games; exploration also incubates eggs and advances regional questlines.',
+                    'explore': 'Explore your current location for Pokémon, eggs and useful items. Find interactive Pokémon riddles and treasure-search mini-games; exploration also incubates eggs and advances regional questlines.',
                     'eggs': 'View your unhatched eggs, their region and incubation progress.',
                 }
                 desc = known_descriptions.get(command.qualified_name.lower(), known_descriptions.get(root_name, f'{root_name.replace("_", " ").capitalize()} command. See its usage above for the required arguments.'))
@@ -2616,13 +2709,13 @@ class Game(commands.Cog):
         category=category.lower().replace('-', '').replace('_','')
         if category == 'name' and not pokemon_name:
             return await ctx.send('Usage: `!box name <pokemon>` — for example, `!box name Pikachu`.')
-        aliases={'hl':'highlevel','highlevels':'highlevel','highlevelpokemon':'highlevel','maxhp':'hp','highesthp':'hp','condition':'status','statuscondition':'status','legendaries':'legendary','shinies':'shiny','ultrabeasts':'ultrabeast','injured':'damaged','notfullhp':'damaged','belowmaxhp':'damaged','helditems':'items','item':'items'}
+        aliases={'hl':'highlevel','highlevels':'highlevel','highlevelpokemon':'highlevel','maxhp':'hp','highesthp':'hp','condition':'status','statuscondition':'status','legendaries':'legendary','shinies':'shiny','ultrabeasts':'ultrabeast','injured':'damaged','notfullhp':'damaged','belowmaxhp':'damaged','helditems':'items','item':'items','radiants':'radiant'}
         category=aliases.get(category,category)
-        allowed={'all','hp','status','legendary','shiny','mythical','ultrabeast','damaged','items','highlevel','name'}
+        allowed={'all','hp','status','legendary','shiny','radiant','mythical','ultrabeast','damaged','items','highlevel','name'}
         if category not in allowed:
-            return await ctx.send('❌ Unknown box category. Try: `!box all`, `!box hp`, `!box status`, `!box legendary`, `!box shiny`, `!box mythical`, `!box ultrabeast`, or `!box damaged`, or `!box items`, `!box highlevel` / `!box hl` (level above 50), or `!box name <pokemon>`.')
+            return await ctx.send('❌ Unknown box category. Try: `!box all`, `!box hp`, `!box status`, `!box legendary`, `!box shiny`, `!box mythical`, `!box ultrabeast`, `!box radiant`, or `!box damaged`, or `!box items`, `!box highlevel` / `!box hl` (level above 50), or `!box name <pokemon>`.')
         with db() as c:
-            rows=c.execute('SELECT box_id,dex_id,name,level,shiny,held_item,hp,max_hp,status_condition FROM pokemon WHERE user_id=? ORDER BY box_id',(ctx.author.id,)).fetchall()
+            rows=c.execute('SELECT box_id,dex_id,name,level,shiny,held_item,hp,max_hp,status_condition,radiant FROM pokemon WHERE user_id=? ORDER BY box_id',(ctx.author.id,)).fetchall()
         if not rows:return await ctx.send('📦 Your box is empty. Use `!hunt` to find Pokémon!')
         if category == 'name':
             wanted=pokemon_name.strip().lower().replace('-', ' ')
@@ -2635,6 +2728,7 @@ class Game(commands.Cog):
         elif category=='hp': rows=sorted(rows,key=lambda r:(r[7] or 0,r[6] or 0),reverse=True)
         elif category=='status': rows=[r for r in rows if r[8]]
         elif category=='shiny': rows=[r for r in rows if r[4]]
+        elif category=='radiant': rows=[r for r in rows if r[9]]
         elif category=='damaged': rows=[r for r in rows if (r[6] or 0)<(r[7] or 0)]
         elif category=='ultrabeast': rows=[r for r in rows if r[1] in ultra_ids]
         elif category in ('legendary','mythical'):
@@ -2647,7 +2741,7 @@ class Game(commands.Cog):
             rows=filtered
         if category=='items' and not rows:
             return await ctx.send('🎒 None of your Pokémon are holding items yet. Use `!giveitem <item> <pokemon_id>` to equip one.')
-        entries=[(r[0],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[1]) for r in rows]
+        entries=[(r[0],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[1],r[9]) for r in rows]
         await ensure_box_pokemon_emojis(ctx.guild, entries[:BoxView.ITEMS_PER_PAGE])
         view=BoxView(ctx.author.id,entries,category,ctx.guild)
         view.message=await ctx.send(embed=view.make_embed(),view=view)
@@ -2656,22 +2750,28 @@ class Game(commands.Cog):
     async def info(self,ctx,pokemon_id:Optional[int]=None):
         with db() as c:
             if pokemon_id is None:
-                row=c.execute('SELECT p.instance_id,p.dex_id,p.name,p.level,p.shiny,p.hp,p.max_hp,p.held_item,p.status_condition FROM pokemon p JOIN team t ON t.instance_id=p.instance_id WHERE p.user_id=? ORDER BY CASE WHEN t.slot=1 THEN 0 ELSE 1 END,t.slot LIMIT 1',(ctx.author.id,)).fetchone()
+                row=c.execute('SELECT p.instance_id,p.dex_id,p.name,p.level,p.shiny,p.hp,p.max_hp,p.held_item,p.status_condition,p.iv_hp,p.iv_attack,p.iv_defense,p.iv_sp_attack,p.iv_sp_defense,p.iv_speed,p.radiant FROM pokemon p JOIN team t ON t.instance_id=p.instance_id WHERE p.user_id=? ORDER BY CASE WHEN t.slot=1 THEN 0 ELSE 1 END,t.slot LIMIT 1',(ctx.author.id,)).fetchone()
             else:
                 internal_id=resolve_box_id(c,ctx.author.id,pokemon_id)
-                row=c.execute('SELECT instance_id,dex_id,name,level,shiny,hp,max_hp,held_item,status_condition FROM pokemon WHERE instance_id=? AND user_id=?',(internal_id,ctx.author.id)).fetchone() if internal_id else None
+                row=c.execute('SELECT instance_id,dex_id,name,level,shiny,hp,max_hp,held_item,status_condition,iv_hp,iv_attack,iv_defense,iv_sp_attack,iv_sp_defense,iv_speed,radiant FROM pokemon WHERE instance_id=? AND user_id=?',(internal_id,ctx.author.id)).fetchone() if internal_id else None
         if not row:
             return await ctx.send('❌ No Pokémon selected/found. Use `!select <ID>` first, or `!info <ID>`.')
-        iid,dex_id,name,level,shiny,hp,maxhp,held,status=row
+        iid,dex_id,name,level,shiny,hp,maxhp,held,status,*tail=row
+        iv_values=tail[:6]
+        radiant=bool(tail[6]) if len(tail)>6 else False
         with db() as c: display_iid=get_box_id(c,ctx.author.id,iid) or iid
         try:
-            d=await pokemon_data(str(dex_id)); base=stats(d); types=type_text(d); abilities=', '.join(a['ability']['name'].replace('-',' ').title() for a in d.get('abilities',[])) or 'Unknown'
+            d=await pokemon_data(str(dex_id)); iv_map=dict(zip(('hp','attack','defense','special-attack','special-defense','speed'),iv_values)); base=iv_adjusted_stats(d,iv_map,level); types=type_text(d); abilities=', '.join(a['ability']['name'].replace('-',' ').title() for a in d.get('abilities',[])) or 'Unknown'
         except Exception:
             base={}; types='Unknown'; abilities='Unknown'; d=None
         hp=max(0,min(hp,maxhp)); maxhp=max(1,maxhp); ratio=hp/maxhp
         filled=max(0,min(10,round(ratio*10))); bar='▰'*filled+'▱'*(10-filled)
-        e=discord.Embed(title=f'{"✨ Shiny " if shiny else ""}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())
+        variant=(RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else '')
+        e=discord.Embed(title=f'{variant}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.from_rgb(80,235,220) if radiant else (discord.Color.gold() if shiny else (discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())))
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
+        iv_total=sum(max(0,int(v or 0)) for v in iv_values)
+        iv_text='\n'.join(f'**{label}:** {int(value)}/31' for label,value in zip(('HP','Attack','Defense','Sp. Attack','Sp. Defense','Speed'),iv_values))
+        e.add_field(name=f'Individual Values · {iv_total}/186',value=iv_text,inline=False)
         held_label=(ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()) if held else 'None'
         e.add_field(name='Condition',value=f'**Status:** {(status or "healthy").replace("-"," ").title()}\n**Held item:** {item_emoji(held) + " " if held else ""}{held_label}\n**Ability:** {abilities}',inline=True)
         # Set art before move lookup, so move/API/DB errors cannot remove the Pokémon picture.
@@ -2724,18 +2824,20 @@ class Game(commands.Cog):
         embed.set_footer(text='Saved moves • !moves defaults to your team lead')
         await ctx.send(embed=embed)
 
-    @commands.command(name='pokemonadd',aliases=['pokeadd'],description='Developer-only: add a Pokémon to a trainer after confirmation.')
+    @commands.command(name='pokemonadd',aliases=['pokeadd'],description='Developer-only: add a normal, shiny, or radiant Pokémon to a trainer after confirmation.')
     async def pokemonadd(self,ctx,member:discord.Member,*,pokemon_name:str):
         if ctx.author.id not in OWNER_IDS:
             return await ctx.send('🔒 This command is restricted to configured PokéVanta developers.')
-        shiny=pokemon_name.lower().replace(' ','').startswith('shiny')
-        lookup=pokemon_name[5:] if shiny else pokemon_name
+        raw_name=pokemon_name.strip()
+        radiant=raw_name.lower().replace(' ','').startswith('radiant')
+        shiny=raw_name.lower().replace(' ','').startswith('shiny')
+        lookup=raw_name[7:] if radiant else (raw_name[5:] if shiny else raw_name)
         lookup=lookup.strip().lower().replace(' ','-')
         try:
             d=await pokemon_data(lookup)
         except Exception:
             return await ctx.send('❌ Pokémon not found. Example: `!pokemonadd @user shinyeternatus`')
-        mh=max_hp(d,50); label=('✨ Shiny ' if shiny else '')+display_name(d)
+        mh=max_hp(d,50); label=((RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else ''))+display_name(d)
         # Admin Pokémon-add confirmations stay available until confirmed or cancelled.
         view=TimedView(timeout=None, timeout_text='')
         yes=discord.ui.Button(label='Confirm add',style=discord.ButtonStyle.success)
@@ -2746,13 +2848,13 @@ class Game(commands.Cog):
             if interaction.data.get('custom_id') == 'pokemonadd_cancel':
                 await interaction.response.edit_message(content='❎ Addition cancelled.',embed=None,view=None); return
             with db() as c:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh)); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
+                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant))); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
                 if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
             await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{get_box_id(c,member.id,iid)}`).',embed=None,view=None)
         async def yes_cb(interaction):
             if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Only the command user can confirm this.',ephemeral=True)
             with db() as c:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh)); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
+                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant))); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
                 if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
             await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{get_box_id(c,member.id,iid)}`).',embed=None,view=None)
         async def no_cb(interaction):
@@ -2788,7 +2890,7 @@ class Game(commands.Cog):
             if existing:
                 return await ctx.send(f'⚠️ A server-wide shiny (**{existing[0].title()}**) is already active. Let someone catch it first!')
             c.execute('INSERT INTO global_encounter(id,dex_id,name,shiny,level,spawned_by) VALUES(1,?,?,1,?,?)', (d['id'],d['name'],lvl,ctx.author.id))
-        embed=discord.Embed(title='✨ A SERVER-WIDE SHINY Pokémon appeared!', description=f'**A wild shiny appeared!**\n**Level:** {lvl}\n**Type:** ???\n\nLook at the artwork and guess its name with `!catch <pokemon name>`.\n💰 First correct guess wins and gets **50 {get_vantacoin_emoji()} VantaCoins**. Only one user can catch it!')
+        embed=discord.Embed(title='✨ A SERVER-WIDE SHINY Pokémon appeared!', description=f'**A wild shiny appeared!**\n**Level:** {lvl}\n**Type:** ???\n\nLook at the artwork and guess its name with `!catch <pokemon name>`.\n💰 First correct guess wins **5 Rare Candies and 1 Elite Charged TM**. Only one user can catch it!')
         art=sprite(d,shiny=True)
         if art: embed.set_image(url=art)
         await ctx.send(embed=embed)
@@ -2870,7 +2972,7 @@ class Game(commands.Cog):
             return await ctx.send('⚠️ You already have an active battle. Finish it or use `!cancel` first.')
         row=await owned_lead(ctx.author.id)
         if not row:return await ctx.send('❌ Catch a Pokémon and put it in your team with `!setteam ID 1`.')
-        if row[8]<=0:return await ctx.send('❌ Your lead is fainted. Use `!useitem Potion <pokemon_id>` or a healing berry.')
+        if row[8]<=0:return await ctx.send('❌ Your lead is fainted. Use `!useitem Potion <pokemon_id>` .')
         remaining = pv_battle_cooldown_remaining(ctx.author.id, 'npc')
         if remaining: return await ctx.send(f'⏳ NPC battle cooldown: wait **{remaining}s** before starting another NPC battle.')
         pv_start_battle_cooldown(ctx.author.id, 'npc')
@@ -2965,7 +3067,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     async def shop(self,ctx,action:Optional[str]=None,*,product:Optional[str]=None):
         if action and action.lower()=='buy':
             if not product:
-                return await ctx.send('Usage: `!shop buy <item name|shortform|id>`\nExamples: `!shop buy Oran Berry`, `!shop buy ora1`, `!shop buy 1`')
+                return await ctx.send('Usage: `!shop buy <item name|shortform|id>`\nExamples: `!shop buy Potion`, `!shop buy pot47`, `!shop buy 47`')
             quantity=1
             bits=product.rsplit(maxsplit=1)
             if len(bits)==2 and bits[1].isdigit(): product,quantity=bits[0],int(bits[1])
@@ -2989,7 +3091,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             except Exception as exc:
                 print(f'Shop purchase failed for user {ctx.author.id}, product {product_id}: {exc!r}')
                 return await ctx.send('❌ Purchase failed. Please try again; if it repeats, send the Termux error.')
-            consumable = ('berry' in key) or key in {'potion','super-potion','hyper-potion','max-potion','full-restore'}
+            consumable = key in {'potion','super-potion','hyper-potion','max-potion','full-restore'}
             howto = f'Use `!useitem {shortform} <pokemon_id>`' if consumable else f'Equip with `!giveitem {shortform} <pokemon_id>`'
             return await ctx.send(f'🛒 **Purchase successful!**\nBought {item_emoji(key)} **{label} ×{quantity}** for **{total:,} {get_vantacoin_emoji()} VantaCoins**.\n🎒 Added to your inventory. Shortform: `{shortform}`.\n💰 Remaining balance: **{balance:,} {get_vantacoin_emoji()} VantaCoins**.\n{howto}.')
         if action and action.lower() in ('sell','sellback'):
@@ -3029,13 +3131,12 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             requested = (product or 'all').strip().lower().replace('-', ' ').replace('_', ' ')
             aliases = {
                 'all':'all', 'any':'all', 'ally':'all', 'everything':'all',
-                'berry':'berries', 'berries':'berries', 'berrys':'berries',
                 'potion':'potions', 'potions':'potions',
                 'held':'held', 'held item':'held', 'held items':'held', 'items':'held', 'equipment':'held'
             }
             category = aliases.get(requested)
             if category is None:
-                return await ctx.send('❌ Category not found. Use `!shop view berries`, `!shop view potions`, `!shop view held`, or `!shop view all`.')
+                return await ctx.send('❌ Category not found. Use `!shop view potions`, `!shop view held`, or `!shop view all`.')
         view=ShopView(ctx.author.id, category, guild=ctx.guild)
         view.message=await ctx.send(embed=view.make_embed(),view=view)
 
@@ -3201,7 +3302,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 c.execute('DELETE FROM inventory WHERE user_id=? AND item=? AND amount<=0',(ctx.author.id,key))
             kind='Fast' if fast else 'Charged'
             return await ctx.send(f'✅ **{row[3].title()}** (ID `{public_box_id}`) changed its {kind} Move to **{selected["name"].replace("-", " ").title()}** using {item_emoji(key)} {label}.')
-        if 'berry' in key or key in {'potion','super-potion','hyper-potion','max-potion','full-restore'}:
+        if key in {'potion','super-potion','hyper-potion','max-potion','full-restore'}:
             return await ctx.send('🧪 This is a consumable; use `!useitem <item> <pokemon_id>`.')
         try:
             with db() as c:
@@ -3262,7 +3363,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     async def useitem(self,ctx,*,args:str):
         parts=args.rsplit(maxsplit=1)
         if len(parts)!=2 or (not parts[1].isdigit() and parts[1].lower() != 'all'):
-            return await ctx.send('Usage: `!useitem <berry/potion name|shortform|id> <pokemon_id|all>` — example: `!useitem Potion 12` or `!use 51 all` for bulk Full Restore')
+            return await ctx.send('Usage: `!useitem <potion name|shortform|id> <pokemon_id|all>` — example: `!useitem Potion 12` or `!use 51 all` for bulk Full Restore')
         product,pokemon_text=parts
         public_box_id=None if pokemon_text.lower()=='all' else int(pokemon_text)
         pokemon_id=public_box_id
@@ -3272,8 +3373,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         product_id=resolve_shop_product(product)
         if product_id is None:return await ctx.send('❌ Unknown item. Use `!shop` or `!inventory` to see item names, shortforms, and IDs.')
         key,label,cost,desc,shortform=SHOP_ITEMS[product_id]
-        consumable_keys={k for k,*_ in SHOP_ITEMS.values() if 'berry' in k}
-        consumable_keys.update({'potion','super-potion','hyper-potion','max-potion','full-restore'})
+        consumable_keys={'potion','super-potion','hyper-potion','max-potion','full-restore'}
         if key not in consumable_keys:return await ctx.send('❌ This is a held item. Equip it with `!giveitem <item_id> <pokemon_id>`.')
         with db() as c:
             row=c.execute('SELECT instance_id,name,hp,max_hp,status_condition FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
@@ -3316,25 +3416,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         if not stock or stock[0]<=0:return await ctx.send(f'❌ You do not own {item_emoji(key)} **{label}**. Buy it with `!shop buy {shortform} 1`.')
         hp,maxhp,status=row[2],row[3],row[4] or ''
         old_hp,old_status=hp,status
-        cure_map={'pecha-berry':'poison','cheri-berry':'paralysis','rawst-berry':'burn','aspear-berry':'freeze','chesto-berry':'sleep'}
-        if key in cure_map:
-            target=cure_map[key]
-            if status not in ((target,'badly-poisoned') if target=='poison' else (target,)):
-                return await ctx.send(f'ℹ️ **{row[1].title()}** is not affected by {target.replace("-"," ")}. **{item_emoji(key)} {label}** was not consumed.')
-            status='';msg=f'cured {target.replace("-"," ")}'
-        elif key=='lum-berry':
-            if not status:return await ctx.send(f'ℹ️ **{row[1].title()}** has no status condition. **{item_emoji(key)} {label}** was not consumed.')
-            msg=f'cured {status_label(status).lower()}';status=''
-        elif key=='oran-berry':
-            if hp>=maxhp:return await ctx.send(f'ℹ️ **{row[1].title()}** already has full HP. **{item_emoji(key)} {label}** was not consumed.')
-            hp=min(maxhp,hp+10);msg=f'restored {hp-old_hp} HP'
-        elif key in ('sitrus-berry','figy-berry','wiki-berry','mago-berry','aguav-berry','iapapa-berry'):
-            if hp>=maxhp:return await ctx.send(f'ℹ️ **{row[1].title()}** already has full HP. **{item_emoji(key)} {label}** was not consumed.')
-            hp=min(maxhp,hp+max(1,maxhp//4));msg=f'restored {hp-old_hp} HP'
-        elif key=='leppa-berry':
-            if hp>=maxhp:return await ctx.send(f'ℹ️ **{row[1].title()}** already has full HP. **{item_emoji(key)} {label}** was not consumed.')
-            hp=min(maxhp,hp+5);msg=f'restored {hp-old_hp} HP'
-        elif key=='potion':
+        if key=='potion':
             if hp>=maxhp:return await ctx.send(f'ℹ️ **{row[1].title()}** already has full HP. **{item_emoji(key)} {label}** was not consumed.')
             hp=min(maxhp,hp+20);msg=f'restored {hp-old_hp} HP'
         elif key=='super-potion':
@@ -3540,15 +3622,15 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             c.execute('UPDATE pokemon SET level=? WHERE instance_id=? AND user_id=?',(newlevel,pokemon_id,ctx.author.id))
             c.execute("UPDATE inventory SET amount=amount-? WHERE user_id=? AND item='rare-candy'",(need,ctx.author.id))
             c.execute("DELETE FROM inventory WHERE user_id=? AND item='rare-candy' AND amount<=0",(ctx.author.id,))
-        with db() as c: current=c.execute('SELECT dex_id,name,hp,max_hp,shiny FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
+        with db() as c: current=c.execute('SELECT dex_id,name,hp,max_hp,shiny,iv_hp FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
         try:
-            species_data=await pokemon_data(current[1]); new_max=max_hp(species_data,newlevel)
+            species_data=await pokemon_data(current[1]); new_max=max_hp(species_data,newlevel,current[5])
             old_max=max(1,current[3]); new_hp=min(new_max,max(1,int(current[2]/old_max*new_max))) if current[2]>0 else 0
             with db() as c:c.execute('UPDATE pokemon SET max_hp=?,hp=? WHERE instance_id=? AND user_id=?',(new_max,new_hp,pokemon_id,ctx.author.id))
         except Exception:pass
         await ctx.send(f'🍬 Used **{need} Rare Candies** on **{row[0].title()}**: Lv.{row[1]} → **Lv.{newlevel}**. Maximum level is 300.')
 
-    @commands.command(name='daily',aliases=['d','claim'],description='Claim your daily VantaCoin and Pokémon reward.')
+    @commands.command(name='daily',aliases=['d','claim'],description='Claim your daily Pokémon, Raid Passes and Rare Candies.')
     async def daily(self,ctx):
         uid=ctx.author.id
         coins,xp,l,last,streak=get_player(uid)
@@ -3578,16 +3660,17 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             return await ctx.send('⚠️ Could not load your daily Pokémon right now. No reward or streak was consumed; please try again shortly.')
         lvl=random.randint(10,30); mh=max_hp(pick,lvl)
         with db() as c:
-            c.execute('UPDATE players SET coins=coins+?,daily=?,daily_streak=? WHERE user_id=?',(2000,now,streak,uid))
+            c.execute('UPDATE players SET daily=?,daily_streak=? WHERE user_id=?',(now,streak,uid))
             c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 5) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+5",(uid,))
+            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 3) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+3",(uid,))
             cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh));iid=cur.lastrowid; assign_box_id(c,uid,iid)
             if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
         if legendary:
-            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n💰 +2,000 {get_vantacoin_emoji()} VantaCoins • 🎟️ +5 Raid Passes')
+            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes • 🎒 +3 Rare Candies')
         else:
-            await ctx.send(f'🎁 Daily reward: **2,000 {get_vantacoin_emoji()} VantaCoins** + **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes\n🔥 Current streak: **{streak}** days')
+            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes • 🍬 +3 Rare Candies\n🔥 Current streak: **{streak}** days')
         if ctx.guild:
-            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **2,000 VantaCoins**, **5 Raid Passes**, and **{display_name(pick)} Lv. {lvl}**.\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
+            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **3 Rare Candies** and **5 Raid Passes**, and **{display_name(pick)} Lv. {lvl}**.\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
     @commands.command(name='balance',aliases=['bal','money'],description='View your VantaCoins, level and XP.')
     async def balance(self,ctx):
         coins,xp,level,_,_=get_player(ctx.author.id)
@@ -3595,7 +3678,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.add_field(name=f'{get_vantacoin_emoji()} VantaCoins',value=f'**{coins:,}**',inline=True)
         e.add_field(name='Trainer Level',value=f'**{level}**',inline=True)
         e.add_field(name='XP Progress',value=f'**{xp:,} / {level*100:,}**',inline=True)
-        e.set_footer(text='Earn coins from catching Pokémon, battles and daily rewards.')
+        e.set_footer(text='Earn VantaCoins through item sales, fish sales and trainer-to-trainer trading.')
         await ctx.send(embed=e)
 
     @commands.command(name='give', description='Give VantaCoins to another player.')
@@ -4479,7 +4562,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     @commands.guild_only()
     @commands.has_guild_permissions(manage_emojis_and_stickers=True)
     async def setupitememojis(self, ctx):
-        """Install all 54 shop-item sprite emojis, resuming safely after partial runs."""
+        """Install the current shop-item sprite emojis, resuming safely after partial runs."""
         items = list(SHOP_ITEMS.values())
         status = await ctx.send(f'🖼️ Preparing item sprites: {len(items)} shop items found. Checking existing emojis and available slots…')
 
@@ -4488,7 +4571,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             with open(ITEM_EMOJI_FILE, 'r', encoding='utf-8') as f:
                 old = json.load(f)
                 if isinstance(old, dict):
-                    saved.update(old)
+                    saved.update({str(k):v for k,v in old.items() if not str(k).endswith('-berry')})
         except (OSError, ValueError, TypeError):
             pass
 
@@ -4522,7 +4605,6 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             'assault-vest': 'assault-vest',
         }
         fallback_by_group = {
-            'berry': 'oran-berry',
             'potion': 'potion',
             'tm': 'tm-normal',
             'held': 'leftovers',
@@ -4532,9 +4614,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             candidates = [key]
             if key in fallback_by_item:
                 candidates.append(fallback_by_item[key])
-            if 'berry' in key:
-                candidates.append(fallback_by_group['berry'])
-            elif key in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}:
+            if key in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}:
                 candidates.append(fallback_by_group['potion'])
             elif 'tm' in key:
                 candidates.append(fallback_by_group['tm'])
@@ -6531,14 +6611,14 @@ MISSION_DEFS = {
     # High-difficulty objectives; activity is only counted when the corresponding
     # successful gameplay action is recorded by pv_record_activity.
     'daily': [
-        ('catch', '🌿 Wild Collector', 'Catch 20 Pokémon', 20, 7500, 35, 'oran-berry', 2),
-        ('hunt', '🔎 Field Researcher', 'Complete 30 successful hunts', 30, 6250, 35, 'potion', 3),
-        ('win', '⚔️ Battle Ready', 'Win 12 NPC battles', 12, 12500, 45, 'rare-candy', 1),
+        ('catch', '🌿 Wild Collector', 'Catch 20 Pokémon', 20, 0, 35, 'rare-candy', 2),
+        ('hunt', '🔎 Field Researcher', 'Complete 30 successful hunts', 30, 0, 35, 'super-potion', 3),
+        ('win', '⚔️ Battle Ready', 'Win 12 NPC battles', 12, 0, 45, 'elite-charged-tm', 1),
     ],
     'weekly': [
-        ('catch', '🎒 Master Collector', 'Catch 150 Pokémon', 150, 50000, 150, 'super-potion', 3),
-        ('hunt', '🌎 Wild Explorer', 'Complete 250 successful hunts', 250, 42500, 140, 'fast-tm', 1),
-        ('win', '🏆 Battle Veteran', 'Win 60 NPC battles', 60, 75000, 180, 'raid-pass', 2),
+        ('catch', '🎒 Master Collector', 'Catch 150 Pokémon', 150, 0, 150, 'rare-candy', 10),
+        ('hunt', '🌎 Wild Explorer', 'Complete 250 successful hunts', 250, 0, 140, 'fast-tm', 3),
+        ('win', '🏆 Battle Veteran', 'Win 60 NPC battles', 60, 0, 180, 'elite-charged-tm', 2),
     ],
 }
 
@@ -6555,7 +6635,7 @@ def pv_mp_week_key(now=None):
 
 # Weekly Mission Point milestone rewards. Progress and claims roll over Monday 00:00 IST.
 # Each weekly milestone has a different reward identity, not just a larger coin payout.
-# Shape: (required MP, title, VantaCoins, XP, {inventory_item: quantity}).
+# Shape: (required MP, title, supply-crate value, XP, {inventory_item: quantity}).
 MP_REWARD_TIERS = [
     (500, '🥉 Rookie Researcher', 8000, 50, {'potion': 2}),
     (1500, '🥈 Field Specialist', 15000, 125, {'rare-candy': 2}),
@@ -6566,7 +6646,7 @@ MP_REWARD_TIERS = [
 def pv_reward_bundle_text(bundle):
     parts=[]
     coins=int(bundle.get('coins',0)); xp=int(bundle.get('xp',0))
-    if coins: parts.append(f'{coins:,} VantaCoins')
+    if coins: parts.append(f'{max(1,coins//1500)} × Supply Crate(s)')
     if xp: parts.append(f'{xp:,} XP')
     for item,qty in bundle.get('items',{}).items():
         parts.append(f'{int(qty)} × {str(item).replace("-"," ").title()}')
@@ -6574,8 +6654,12 @@ def pv_reward_bundle_text(bundle):
 
 
 def pv_grant_reward_bundle(uid, bundle):
-    # Grant a curated coins, XP, and item bundle using existing player inventory tables.
-    add_progress(uid, coins=int(bundle.get('coins',0)), xp=int(bundle.get('xp',0)))
+    # Convert old coin-valued quest/event bundles into useful supply crates, not routine currency.
+    add_progress(uid, xp=int(bundle.get('xp',0)))
+    crate_count=max(0,int(bundle.get('coins',0))//1500)
+    for _ in range(crate_count):
+        item=random.choice(('rare-candy','super-potion','raid-pass','fast-tm','charged-tm'))
+        change_item(uid,item,1)
     for item,qty in bundle.get('items',{}).items():
         if int(qty)>0:
             change_item(uid, item, int(qty))
@@ -6585,32 +6669,32 @@ EVENT_TYPES = {
     'rift': {
         'title': '🌌 The Mystery of the Rift',
         'description': 'A space-time rift is destabilizing! Catch Pokémon and win battles to stabilize the anomaly.',
-        'coins': 50000, 'points': 50, 'flavor': '🌀 Rift Stabilizer Badge'
+        'coins': 0, 'points': 50, 'flavor': '🌀 Rift Stabilizer Badge'
     },
     'surge': {
         'title': '✨ Shiny Surge',
         'description': 'A wave of shimmering energy is sweeping the wilds. Every successful hunt and catch pushes back the surge.',
-        'coins': 75000, 'points': 80, 'flavor': '✨ Shimmer Seeker Badge'
+        'coins': 0, 'points': 80, 'flavor': '✨ Shimmer Seeker Badge'
     },
     'fossil': {
         'title': '🦴 Fossil Frenzy',
         'description': 'Ancient Pokémon are stirring! Catch fossil Pokémon and help researchers uncover the region’s prehistoric secrets.',
-        'coins': 62500, 'points': 70, 'flavor': '🦴 Fossil Researcher Badge'
+        'coins': 0, 'points': 70, 'flavor': '🦴 Fossil Researcher Badge'
     },
     'champion': {
         'title': '🏆 Champion Challenge',
         'description': 'Prove your skill in battle and take on legendary opponents to climb the Champion Challenge standings.',
-        'coins': 125000, 'points': 100, 'flavor': '🏆 Champion Challenger Badge'
+        'coins': 0, 'points': 100, 'flavor': '🏆 Champion Challenger Badge'
     },
     'angler': {
         'title': '🎣 The Grand Angler Tournament',
         'description': 'Cast your line, collect fish of every rarity, and help the community land the legendary catch.',
-        'coins': 175000, 'points': 130, 'flavor': '🎣 Grand Angler Badge'
+        'coins': 0, 'points': 130, 'flavor': '🎣 Grand Angler Badge'
     },
     'showdown': {
-        'title': '🎰 VantaCoin Showdown',
-        'description': 'Step into the neon-lit VantaCoin Arena! Complete fair, player-versus-player mini-games, climb the standings, and help the community reach the Showdown goal. Only completed games count—stake size never increases event points.',
-        'coins': 200000, 'points': 150, 'flavor': '🎰 VantaCoin High Roller Badge'
+        'title': '🎮 Trainer Showdown',
+        'description': 'Step into the neon-lit Trainer Arena! Complete fair, player-versus-player mini-games, climb the standings, and help the community reach the Showdown goal. Only completed games count—stake size never increases event points.',
+        'coins': 0, 'points': 150, 'flavor': '🎮 Trainer Showdown Badge'
     },
 }
 
@@ -6781,9 +6865,9 @@ class EventsMissions(commands.Cog):
                     row=c.execute('SELECT progress,claimed FROM pv_mission_progress WHERE user_id=? AND period=? AND mission_key=?',(ctx.author.id,period_key,key)).fetchone()
                     progress,claimed=row or (0,0)
                     mark='✅' if progress>=target and claimed else ('🎁' if progress>=target else '▫️')
-                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • {get_vantacoin_emoji()} {coins:,} VantaCoins + **{points} MP** + **{item_qty} × {item.replace("-"," ").title()}**'+(' • Claimed' if claimed else ''))
+                    lines.append(f'{mark} **{title}** — {desc}\n`{min(progress,target)}/{target}` • **{max(0,coins//1500)} Supply Crates** + **{points} MP** + **{item_qty} × {item.replace("-", " ").title()}**'+(' • Claimed' if claimed else ''))
                 sections.append((f'📅 {kind.title()} missions', '\n\n'.join(lines)))
-        e=discord.Embed(title='📜 Trainer Mission Board',description='Complete real gameplay objectives to earn VantaCoins and Mission Points. Claim each completed mission once.',color=discord.Color.from_rgb(65,160,125))
+        e=discord.Embed(title='📜 Trainer Mission Board',description='Complete gameplay objectives to earn Mission Points and useful item supplies. Claim each completed mission once.',color=discord.Color.from_rgb(65,160,125))
         for title,value in sections:e.add_field(name=title,value=value,inline=False)
         e.set_footer(text='Daily missions reset at 00:00 UTC • Weekly missions reset Monday 00:00 UTC')
         await ctx.send(embed=e)
@@ -6805,10 +6889,12 @@ class EventsMissions(commands.Cog):
                 week_key = pv_mp_week_key()
                 c.execute('INSERT INTO pv_mp_weekly_points(user_id,week_key,points) VALUES(?,?,?) ON CONFLICT(user_id,week_key) DO UPDATE SET points=points+excluded.points',(uid,week_key,total_points))
         if not claimed:return await ctx.send(embed=discord.Embed(title='🎁 No rewards to claim',description='Finish a mission first, or you may have already claimed every completed reward. Use `!missions` to check progress.',color=discord.Color.orange()))
-        add_progress(uid,coins=total_coins)
+        add_progress(uid)
+        for _ in range(max(0,total_coins//1500)):
+            change_item(uid,random.choice(('rare-candy','super-potion','raid-pass','fast-tm','charged-tm')),1)
         for reward_item,reward_qty in item_rewards.items(): change_item(uid,reward_item,reward_qty)
         item_text='\n'.join(f'• **{qty} × {item.replace("-"," ").title()}**' for item,qty in item_rewards.items())
-        e=discord.Embed(title='🎉 Mission rewards claimed!',description=f'**Missions completed:** {claimed}\n**VantaCoins:** +{total_coins:,} {get_vantacoin_emoji()}\n**Mission Points:** +{total_points} MP\n**Bonus items:**\n{item_text or "None"}',color=discord.Color.gold())
+        e=discord.Embed(title='🎉 Mission rewards claimed!',description=f'**Missions completed:** {claimed}\n**Supply crates:** {max(0,total_coins//1500)}\n**Mission Points:** +{total_points} MP\n**Bonus items:**\n{item_text or "None"}',color=discord.Color.gold())
         e.set_footer(text='Keep going, Trainer — new objectives are waiting!')
         await ctx.send(embed=e)
 
@@ -6850,10 +6936,12 @@ class EventsMissions(commands.Cog):
                         rewards.append(f'• **{title}** — {pv_reward_bundle_text({"coins":coins,"xp":xp,"items":items})}')
         if not rewards:
             return await ctx.send('🔒 No new weekly Mission Point reward is ready. Check `!mprewards` for this week’s progress. Rewards reset Monday at 00:00 IST (UTC+05:30).')
-        add_progress(uid,coins=total_coins,xp=total_xp)
+        add_progress(uid,xp=total_xp)
+        for _ in range(max(0,total_coins//1500)):
+            change_item(uid,random.choice(('rare-candy','super-potion','raid-pass','fast-tm','charged-tm')),1)
         for item,qty in item_rewards.items(): change_item(uid,item,qty)
         item_text=', '.join(f'{qty} × {item.replace("-"," ").title()}' for item,qty in item_rewards.items()) or 'None'
-        e = discord.Embed(title='🎉 Weekly Mission Rewards Claimed!',description='\n'.join(rewards)+f'\n\n**Total coins:** +{total_coins:,} {get_vantacoin_emoji()} · **Total XP:** +{total_xp:,}\n**Bonus items:** {item_text}',color=discord.Color.gold())
+        e = discord.Embed(title='🎉 Weekly Mission Rewards Claimed!',description='\n'.join(rewards)+f'\n\n**Supply crates:** {max(0,total_coins//1500)} · **Total XP:** +{total_xp:,}\n**Bonus items:** {item_text}',color=discord.Color.gold())
         e.set_footer(text=f'Claimed for week {week_key} IST • New weekly progress starts Monday 00:00 IST')
         await ctx.send(embed=e)
 
@@ -6939,10 +7027,10 @@ class EventsMissions(commands.Cog):
                     'fossil': '🦴 **Fossil research tasks:** fossil Pokémon catches (+25 total). Catch fossil species to help uncover ancient discoveries.',
                     'champion': '🏆 **Champion tasks:** regular battle wins (+10) and legendary boss victories (+35).',
                     'angler': '🎣 **Tournament tasks:** common fish (+3), uncommon (+7), rare (+15), epic (+30), and legendary fish (+60). Cast with `!fish`; your fish are kept until sold.',
-                    'showdown': '🎰 **Arena tasks:** finish a VantaCoin mini-game (+10); win it for an extra +15. Stake size does not affect points. Join the event first, then play `!bet @user <amount>` and choose a game.',
+                    'showdown': '🎮 **Arena tasks:** finish a mini-game (+10); win it for an extra +15. Stake size does not affect points. Join the event first, then play `!bet @user <amount>` and choose a game.',
                 }
                 guide = activity_guides.get(row[1], 'Complete the event-specific objectives shown in this guide.')
-                e=discord.Embed(title='🎁 Event Rewards & Achievement Track',description=f"**{row[2]}**\n\n{guide}\n\nJoin with `!event join` before completing qualifying actions. Only your own contribution counts toward your personal tier. Rewards unlock when the community reaches its goal or the event ends.\n\n**💰 Contribution reward tiers**\n"+'\n'.join(tier_lines)+f"\n\n**🌍 Community clear bonus:** when the global goal is reached, your tier also earns up to +50,000 VantaCoins and +250 MP.\n\n**🏅 Achievement rules**\n• Joining or claiming the basic reward does **not** grant a badge.\n• **Veteran achievement (150+ contribution):** earns the event's themed achievement badge.\n• **Elite achievement (300+ contribution):** earns the themed badge plus an Elite Contributor badge.\n• **Top 3 leaderboard finishers:** earn a permanent 1st, 2nd, or 3rd-place medal when they claim after the event ends.\n\nUse `!event leaderboard` to track standings, `!event claim` to collect rewards, and `!event badges` to view earned achievements.",color=discord.Color.gold());return await ctx.send(embed=pv_apply_event_image(e,row[1]))
+                e=discord.Embed(title='🎁 Event Rewards & Achievement Track',description=f"**{row[2]}**\n\n{guide}\n\nJoin with `!event join` before completing qualifying actions. Only your own contribution counts toward your personal tier. Rewards unlock when the community reaches its goal or the event ends.\n\n**🎟️ Contribution reward tiers**\n"+'\n'.join(tier_lines)+f"\n\n**🌍 Community clear bonus:** when the global goal is reached, your tier also earns +20 Event Tokens and bonus Mission Points.\n\n**🏅 Achievement rules**\n• Joining or claiming the basic reward does **not** grant a badge.\n• **Veteran achievement (150+ contribution):** earns the event's themed achievement badge.\n• **Elite achievement (300+ contribution):** earns the themed badge plus an Elite Contributor badge.\n• **Top 3 leaderboard finishers:** earn a permanent 1st, 2nd, or 3rd-place medal when they claim after the event ends.\n\nUse `!event leaderboard` to track standings, `!event claim` to collect rewards, and `!event badges` to view earned achievements.",color=discord.Color.gold());return await ctx.send(embed=pv_apply_event_image(e,row[1]))
             if action=='claim':
                 if row[8]!='ended' and row[5]<row[4]:return await ctx.send('⏳ Event rewards become claimable when the event ends or its goal is reached.')
                 if not user or not user[1]:return await ctx.send('Join the event with `!event join` and contribute before claiming rewards.')
@@ -7156,7 +7244,7 @@ class EventsMissions(commands.Cog):
     async def eventshop(self, ctx):
         """Browse the Event Token shop."""
         items = [
-            ('coin_pouch', '💰 VantaCoin Treasury', '125 tokens', 'Receive 1,000,000 VantaCoins'),
+            ('battle_cache', '🎒 Champion Supply Cache', '125 tokens', 'Receive 30 Rare Candies, 3 Elite Charged TMs, and 5 Raid Passes'),
             ('mp_bundle', '📘 Grand Mission Archive', '200 tokens', 'Receive 500 Mission Points'),
             ('event_relic', '🔮 Event Relic', '75 tokens', 'Collect 10 relics and exchange them for one random Shiny Legendary Pokémon'),
             ('champion_trophy', '🏆 Champion Trophy', '625 tokens', 'Premium permanent collectible for dedicated event grinders'),
@@ -7172,7 +7260,7 @@ class EventsMissions(commands.Cog):
         """Buy an item from the Event Token shop."""
         item = item.strip().lower().replace(' ', '_')
         catalog = {
-            'coin_pouch': (125, '💰 VantaCoin Treasury', 'coins'),
+            'battle_cache': (125, '🎒 Champion Supply Cache', 'battle_cache'),
             'mp_bundle': (200, '📘 Grand Mission Archive', 'mp'),
             'event_relic': (75, '🔮 Event Relic', 'collectible'),
             'champion_trophy': (625, '🏆 Champion Trophy', 'collectible'),
@@ -7194,9 +7282,9 @@ class EventsMissions(commands.Cog):
                 c.execute('INSERT INTO pv_mission_points(user_id,points) VALUES(?,500) ON CONFLICT(user_id) DO UPDATE SET points=points+500', (uid,))
                 week_key = pv_mp_week_key()
                 c.execute('INSERT INTO pv_mp_weekly_points(user_id,week_key,points) VALUES(?,?,500) ON CONFLICT(user_id,week_key) DO UPDATE SET points=points+500', (uid,week_key))
-        if kind == 'coins':
-            add_progress(uid, coins=1000000)
-            result = '+1,000,000 VantaCoins'
+        if kind == 'battle_cache':
+            change_item(uid,'rare-candy',30); change_item(uid,'elite-charged-tm',3); change_item(uid,'raid-pass',5)
+            result = '30 Rare Candies, 3 Elite Charged TMs, and 5 Raid Passes'
         elif kind == 'mp':
             result = '+500 Mission Points'
         else:
@@ -7283,14 +7371,14 @@ class EventsMissions(commands.Cog):
             'fossil': 'Fossil Pokémon catches: +25 total',
             'champion': 'NPC battle wins: +10 · Legendary boss wins: +35',
             'angler': 'Common fish: +3 · Uncommon: +7 · Rare: +15 · Epic: +30 · Legendary: +60',
-            'showdown': 'Completed VantaCoin mini-game: +10 · Win bonus: +15. Stake size does not affect points.',
+            'showdown': 'Completed mini-game: +10 · Win bonus: +15. Stake size does not affect points.',
         }
         stages = EVENT_STORY_STAGES.get(key, [])
         stage_text = '\n'.join(f'`{threshold}%` {name} — {desc}' for threshold, name, desc in stages) or 'Story stages are not configured.'
         e = discord.Embed(title=f"{cfg['title']} — Complete Info", description=cfg['description'], color=discord.Color.from_rgb(118,83,220))
         e.add_field(name='🎯 How to earn contribution', value=activities[key] + '\nJoin first with `!event join`; only qualifying actions after joining count.', inline=False)
-        e.add_field(name='🎁 Rewards', value='25+ pts: 5 tokens · 75+ pts: 15 · 150+ pts: 30 · 300+ pts: 50.\nIf the community goal is reached: +20 Event Tokens and a contribution-scaled bonus of up to 50,000 VantaCoins + 250 MP.', inline=False)
-        e.add_field(name='🏅 Achievements', value=f"150+ pts: {cfg['flavor']} · 300+ pts: Elite Event Contributor · Top 3: permanent placement medal when claiming. Joining alone gives no badge.\nEvent template reward: {cfg['coins']:,} VantaCoins / {cfg['points']} points.", inline=False)
+        e.add_field(name='🎁 Rewards', value='25+ pts: 5 tokens · 75+ pts: 15 · 150+ pts: 30 · 300+ pts: 50.\nIf the community goal is reached: +20 Event Tokens and contribution-scaled Mission Points.', inline=False)
+        e.add_field(name='🏅 Achievements', value=f"150+ pts: {cfg['flavor']} · 300+ pts: Elite Event Contributor · Top 3: permanent placement medal when claiming. Joining alone gives no badge.\nCommunity contribution value: {cfg['points']} points.", inline=False)
         e.add_field(name='📖 Story chapters', value=stage_text[:1024], inline=False)
         e.add_field(name='Commands', value='`!event` status · `!event rewards` tiers/tasks · `!event leaderboard` standings · `!event story` chapters · `!event claim` rewards · `!event badges` achievements', inline=False)
         await ctx.send(embed=pv_apply_event_image(e, key))
@@ -7311,7 +7399,7 @@ class EventsMissions(commands.Cog):
 `!event shop` / `!event buy <item>` · Spend Event Tokens
 `!event exchange relics` · Exchange 10 Event Relics for a random Shiny Legendary
 `!event tokens` / `!event inventory` · Wallet and collectibles
-Shop economy: 500-token VantaCoin Treasury, 750-token MP bundle, 250-token Relic, 2,500-token Trophy
+Shop economy: 125-token Champion Supply Cache, 200-token MP bundle, 75-token Relic, 625-token Trophy
 `!event history` · Event archive
 `!event story` · View chapters and unlocks
 `!event badges` · View your earned event achievements
@@ -7381,38 +7469,36 @@ class ExploreMiniGameView(discord.ui.View):
         uid = self.ctx.author.id
         if self.game['kind'] == 'riddle':
             if picked == self.game['answer']:
-                coins = random.randint(900, 1800)
-                add_progress(uid, coins=coins, xp=40)
+                loot = grant_game_reward(uid, xp=40, rolls=2)
                 result = (
                     f'✅ Correct! **{self.game["explanation"]}**\n'
-                    f'You earned **{coins:,} VantaCoins** and **40 XP**.'
+                    f'You earned **{loot}** and **40 XP**.'
                 )
                 title = '🧠 Riddle Solved!'
                 color = discord.Color.gold()
             else:
-                add_progress(uid, coins=100, xp=5)
+                loot = grant_game_reward(uid, xp=5, rolls=1)
                 correct = self.game['options'][self.game['answer']]
                 result = (
                     f'Not quite! The answer was **{correct}**.\n'
-                    'The wandering researcher gives you **100 VantaCoins** and **5 XP** for trying.'
+                    'The wandering researcher gives you **{loot}** and **5 XP** for trying.'
                 )
                 title = '📚 The Researcher Reveals the Answer'
                 color = discord.Color.blurple()
         else:
             if picked == self.game['treasure']:
-                coins = random.randint(700, 1700)
-                add_progress(uid, coins=coins, xp=25)
+                loot = grant_game_reward(uid, xp=25, rolls=2)
                 bonus = ''
                 if random.random() < 0.35:
-                    item = random.choice(('potion', 'super-potion', 'oran-berry', 'rare-candy'))
+                    item = random.choice(('potion', 'super-potion', 'rare-candy', 'fast-tm'))
                     change_item(uid, item, 1)
                     bonus = f'\n🎒 Bonus find: **1 × {item.replace("-", " ").title()}**!'
-                result = f'🎉 You found the hidden stash: **{coins:,} VantaCoins** and **25 XP**!{bonus}'
+                result = f'🎉 You found the hidden stash: **{loot}** and **25 XP**!{bonus}'
                 title = '🗝️ Treasure Found!'
                 color = discord.Color.gold()
             else:
-                add_progress(uid, coins=100, xp=5)
-                result = 'The chest is empty, but you find **100 VantaCoins** and gain **5 XP** tucked beneath it.'
+                loot = grant_game_reward(uid, xp=5, rolls=1)
+                result = 'The chest is empty, but you recover **{loot}** and gain **5 XP** tucked beneath it.'
                 title = '📦 An Empty Chest'
                 color = discord.Color.blurple()
 
@@ -7461,15 +7547,20 @@ class AdventureStoryView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         outcome = self.story['choices'][picked]
-        add_progress(self.ctx.author.id, coins=outcome['coins'], xp=outcome['xp'])
+        add_progress(self.ctx.author.id, xp=outcome['xp'])
+        supply_count=max(1,int(outcome.get('coins',0))//500)
+        supply_items=[]
+        for _ in range(supply_count):
+            item=random.choice(('rare-candy','potion','super-potion','raid-pass','fast-tm'))
+            change_item(self.ctx.author.id,item,1); supply_items.append(item.replace('-', ' ').title())
         bonus = ''
         if outcome.get('item'):
             change_item(self.ctx.author.id, outcome['item'], 1)
             bonus = f"\n🎒 Found: **1 × {outcome['item'].replace('-', ' ').title()}**"
         embed = discord.Embed(
             title=outcome['title'],
-            description=f"{outcome['text']}\n\n💰 **+{outcome['coins']:,} VantaCoins** · ✨ **+{outcome['xp']} XP**{bonus}",
-            color=discord.Color.green() if outcome['coins'] >= 500 else discord.Color.blurple(),
+            description=f"{outcome['text']}\n\n🎒 **Supplies:** {', '.join(supply_items)} · ✨ **+{outcome['xp']} XP**{bonus}",
+            color=discord.Color.green() if outcome['xp'] >= 50 else discord.Color.blurple(),
         )
         embed.set_footer(text='Story completed • Your choice has been saved')
         await interaction.response.edit_message(embed=embed, view=self)
@@ -7509,21 +7600,21 @@ class CavePuzzleView(discord.ui.View):
             item.disabled = True
         uid = self.ctx.author.id
         if picked == self.puzzle['answer']:
-            coins, xp = random.randint(900, 1500), 70
-            add_progress(uid, coins=coins, xp=xp)
+            xp=70
+            loot=grant_game_reward(uid,xp=xp,rolls=3)
             bonus = ''
             if random.random() < 0.30:
-                item = random.choice(('rare-candy', 'super-potion', 'oran-berry'))
+                item = random.choice(('rare-candy', 'super-potion', 'potion'))
                 change_item(uid, item, 1)
                 bonus = f"\n🎒 Bonus: **1 × {item.replace('-', ' ').title()}**"
             self.cog._daily_progress(uid, 'cave_clear')
             with db() as c:
                 c.execute('UPDATE pv_cave_daily SET completed=1 WHERE user_id=? AND day_key=?', (uid, self.day_key))
-            desc = f"✅ {self.puzzle['explanation']}\n\nYou earned **{coins:,} VantaCoins** and **{xp} XP**.{bonus}"
+            desc = f"✅ {self.puzzle['explanation']}\n\nYou earned **{loot}** and **{xp} XP**.{bonus}"
             title, color = '💎 Cave Puzzle Solved!', discord.Color.gold()
         else:
-            add_progress(uid, coins=100, xp=10)
-            desc = f"The mechanism resets. The answer was **{self.puzzle['options'][self.puzzle['answer']]}**.\nYou still earned **100 VantaCoins** and **10 XP** for trying."
+            loot=grant_game_reward(uid,xp=10,rolls=1)
+            desc = f"The mechanism resets. The answer was **{self.puzzle['options'][self.puzzle['answer']]}**.\nYou still earned **{loot}** and **10 XP** for trying."
             title, color = '🪨 The Cave Remains Sealed', discord.Color.dark_grey()
             with db() as c:
                 c.execute('UPDATE pv_cave_daily SET completed=1 WHERE user_id=? AND day_key=?', (uid, self.day_key))
@@ -7572,18 +7663,18 @@ class TypeMasterView(discord.ui.View):
                 c.execute('INSERT OR IGNORE INTO pv_type_daily(user_id,day_key,completed) VALUES(?,?,0)', (uid, day))
                 first = c.execute('UPDATE pv_type_daily SET completed=1 WHERE user_id=? AND day_key=? AND completed=0', (uid, day)).rowcount
             if first:
-                coins, xp = 500, 45
-                add_progress(uid, coins=coins, xp=xp)
+                xp = 45
+                loot = grant_game_reward(uid, xp=xp, rolls=2)
                 self.cog._daily_progress(uid, 'type_quiz')
-                reward = f'You earned **{coins:,} VantaCoins** and **{xp} XP**.'
+                reward = f'You earned **{loot}** and **{xp} XP**.'
             else:
                 reward = 'You already claimed today’s Type Master reward, but your type knowledge is sharp!'
             title, color = '⚡ Type Master: Correct!', discord.Color.gold()
             desc = f"**{self.quiz['options'][self.quiz['answer']].title()}** is immune to {self.quiz['attack'].title()}-type moves.\n{reward}"
         else:
-            add_progress(uid, coins=75, xp=5)
+            loot = grant_game_reward(uid, xp=5, rolls=1)
             title, color = '📘 Type Master: Not Quite!', discord.Color.blurple()
-            desc = f"The correct answer is **{self.quiz['options'][self.quiz['answer']].title()}**. It takes no damage from {self.quiz['attack'].title()}-type moves. You earned **75 VantaCoins** and **5 XP** for participating."
+            desc = f"The correct answer is **{self.quiz['options'][self.quiz['answer']].title()}**. It takes no damage from {self.quiz['attack'].title()}-type moves. You earned **{loot}** and **5 XP** for participating."
         embed = discord.Embed(title=title, description=desc, color=color)
         embed.set_footer(text='A Type Master reward can be claimed once per day')
         await interaction.response.edit_message(embed=embed, view=self)
@@ -7627,14 +7718,14 @@ class MMORPG(commands.Cog):
     # Daily exploration tasks each award a different useful supply, not just coins/XP.
     # Shape: (description, target, coins, XP, bonus_item, bonus_quantity).
     DAILY_EXPLORATION_MISSIONS = {
-        'trailblazer': ('Explore 3 times', 3, 350, 25, 'oran-berry', 2),
-        'type_scholar': ('Answer a Type Master quiz correctly', 1, 500, 40, 'rare-candy', 1),
-        'cave_solver': ('Attempt a mystery cave puzzle', 1, 300, 60, 'super-potion', 1),
+        'trailblazer': ('Explore 3 times', 3, 0, 25, 'rare-candy', 2),
+        'type_scholar': ('Answer a Type Master quiz correctly', 1, 0, 40, 'fast-tm', 1),
+        'cave_solver': ('Attempt a mystery cave puzzle', 1, 0, 60, 'super-potion', 2),
     }
     # Each Legendary story arc has its own themed reward bundle.
     # Shape: (title, region, goal, guardian, reward_bundle).
     QUESTS = {
-        'sky_awakening': ('The Sky’s Awakening', 'hoenn', 12, 'Rayquaza', {'coins':12000,'xp':220,'items':{'fast-tm':1,'oran-berry':3}}),
+        'sky_awakening': ('The Sky’s Awakening', 'hoenn', 12, 'Rayquaza', {'coins':12000,'xp':220,'items':{'fast-tm':1,'potion':3}}),
         'creation_trio': ('Echoes of Creation', 'sinnoh', 18, 'Dialga', {'coins':18000,'xp':300,'items':{'charged-tm':1,'rare-candy':2}}),
         'guardian_trial': ('Guardians of the Brass Tower', 'johto', 15, 'Lugia', {'coins':10000,'xp':260,'items':{'super-potion':3,'raid-pass':1}}),
         'abyssal_awaken': ('The Abyssal Awakening', 'hoenn', 20, 'Kyogre', {'coins':22000,'xp':400,'items':{'elite-charged-tm':1,'rare-candy':3}}),
@@ -7839,17 +7930,17 @@ class MMORPG(commands.Cog):
         if random.random() < 0.12:
             stories = [
                 {'title':'📜 The Lost Field Journal','description':f'A weathered journal lies beside the trail in **{location}**. Its owner may still be nearby. What do you do?', 'choices':[
-                    {'label':'Return it to the researcher','title':'🤝 A Grateful Researcher','text':'A nearby researcher recognizes the journal and rewards your honesty.', 'coins':650,'xp':45,'item':'oran-berry'},
+                    {'label':'Return it to the researcher','title':'🤝 A Grateful Researcher','text':'A nearby researcher recognizes the journal and rewards your honesty.', 'coins':650,'xp':45,'item':'potion'},
                     {'label':'Study its field notes','title':'🔎 Useful Discoveries','text':'The notes reveal a safer path and a few forgotten supplies.', 'coins':450,'xp':65,'item':'potion'},
                     {'label':'Follow the marked trail','title':'🌿 A Quiet Discovery','text':'The journal map leads you to a peaceful clearing with a small reward.', 'coins':800,'xp':35,'item':None},
                 ]},
                 {'title':'🌉 The Old Wooden Bridge','description':f'You find a creaking bridge over a clear stream near **{location}**. A small pack is visible on the other side.', 'choices':[
                     {'label':'Cross slowly','title':'🧭 Safe Passage','text':'You cross carefully and recover the abandoned travel pack.', 'coins':700,'xp':40,'item':'super-potion'},
-                    {'label':'Search the stream bank','title':'💧 Riverside Find','text':'You spot useful supplies tucked between smooth stones.', 'coins':500,'xp':55,'item':'oran-berry'},
+                    {'label':'Search the stream bank','title':'💧 Riverside Find','text':'You spot useful supplies tucked between smooth stones.', 'coins':500,'xp':55,'item':'potion'},
                     {'label':'Mark the bridge on your map','title':'🗺️ Helpful Cartography','text':'Your map gains a useful landmark. Future travellers will thank you.', 'coins':850,'xp':50,'item':None},
                 ]},
                 {'title':'🐾 Strange Footprints','description':f'Unusual tracks cross the path in **{location}**. They lead in three directions. Which trail do you follow?', 'choices':[
-                    {'label':'Follow the tiny tracks','title':'🍃 A Gentle Encounter','text':'You discover a hidden berry patch and leave the area undisturbed.', 'coins':400,'xp':70,'item':'oran-berry'},
+                    {'label':'Follow the tiny tracks','title':'🍃 A Gentle Encounter','text':'You discover a hidden supply pouch and leave the area undisturbed.', 'coins':400,'xp':70,'item':'potion'},
                     {'label':'Inspect the rocky trail','title':'⛰️ Rocky Cache','text':'A forgotten supply pouch is wedged beneath a boulder.', 'coins':900,'xp':30,'item':'potion'},
                     {'label':'Look for signs nearby','title':'🔍 Ranger’s Reward','text':'Your careful observation helps a ranger locate a lost supply crate.', 'coins':600,'xp':60,'item':'super-potion'},
                 ]},
@@ -7912,19 +8003,18 @@ class MMORPG(commands.Cog):
             level=random.randint(5,25)
             shiny=random.randint(1,1000)==1
             data,bid=await self._award_pokemon(uid,species,shiny,level)
-            coins=random.randint(100,350)
-            add_progress(uid,coins=coins,xp=20)
+            loot=grant_game_reward(uid,xp=20,rolls=1)
             flavor = random.choice([
                 'Rustling leaves reveal a surprise!',
                 'A wild Pokémon steps out from the tall grass!',
                 'You hear a cry nearby and spot a new Pokémon!',
                 'Your careful exploration leads to a rare encounter!',
             ])
-            return await ctx.send(f'🌿 **{flavor}**\n**Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}` · +20 XP · +{coins:,} VantaCoins')
+            return await ctx.send(f'🌿 **{flavor}**\n**Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}` · +20 XP · 🎒 {loot}')
         if roll < .78:
-            coins=random.randint(250,900); add_progress(uid,coins=coins,xp=10)
-            return await ctx.send(f'💎 You discovered a hidden supply cache in **{location}**!\nYou found **{coins:,} VantaCoins** and gained **10 XP**.')
-        item=random.choice(['potion','super-potion','rare-candy','oran-berry'])
+            loot=grant_game_reward(uid,xp=10,rolls=2)
+            return await ctx.send(f'💎 You discovered a hidden supply cache in **{location}**!\nYou found **{loot}** and gained **10 XP**.')
+        item=random.choice(['potion','super-potion','rare-candy','fast-tm'])
         change_item(uid,item,1)
         flavor = random.choice([
             'A hidden supply pouch was caught in the branches!',
@@ -7954,7 +8044,7 @@ class MMORPG(commands.Cog):
         for key,progress,target,claimed,coins,xp,item,qty in rows:
             label=self.DAILY_EXPLORATION_MISSIONS[key][0]
             status='✅ Claimed' if claimed else '🎁 Ready to claim' if progress>=target else '⏳ In progress'
-            lines.append(f'**{label}**\n`{key}` · **{progress}/{target}** · {status}\nReward: {coins:,} VantaCoins + {xp} XP + {qty} × {item.replace("-"," ").title()}')
+            lines.append(f'**{label}**\n`{key}` · **{progress}/{target}** · {status}\nReward: {xp} XP + {qty} × {item.replace("-"," ").title()}')
         embed=discord.Embed(title='📅 Daily Exploration Missions',description='\n\n'.join(lines),color=discord.Color.blurple())
         embed.set_footer(text='Resets daily at 00:00 India Standard Time • !explorem claim <mission_key>')
         await ctx.send(embed=embed)
@@ -7976,9 +8066,9 @@ class MMORPG(commands.Cog):
             if progress<target:
                 return await ctx.send(f'⏳ Mission not complete yet: **{progress}/{target}**.')
             c.execute('UPDATE pv_explore_daily SET claimed=1 WHERE user_id=? AND day_key=? AND mission_key=? AND claimed=0',(ctx.author.id,day,key))
-        add_progress(ctx.author.id,coins=coins,xp=xp)
+        add_progress(ctx.author.id,xp=xp)
         if item and qty>0: change_item(ctx.author.id,item,qty)
-        await ctx.send(f'🎉 **Daily mission claimed!**\nYou received **{coins:,} VantaCoins**, **{xp} XP**, and **{qty} × {item.replace("-"," ").title() if item else "no bonus item"}**.')
+        await ctx.send(f'🎉 **Daily mission claimed!**\nYou received **{xp} XP** and **{qty} × {item.replace("-"," ").title() if item else "no bonus item"}**.')
 
     @commands.command(name='cave')
     async def cave(self, ctx):
@@ -8122,20 +8212,20 @@ class MMORPG(commands.Cog):
             else:
                 c.execute('UPDATE pv_dungeon_runs SET floor=floor+1 WHERE user_id=?',(uid,)); cleared=False
         if cleared:
-            add_progress(uid,coins=5000,xp=500); self._guild_contribute(uid,25)
-            return await ctx.send(f'🏆 **Dungeon cleared!** You conquered all **{maxfloors} floors** of {key.replace("_"," ").title()}!\nReward: **5,000 VantaCoins + 500 XP**.')
-        add_progress(uid,coins=150*floor,xp=25*floor)
+            loot=grant_game_reward(uid,xp=500,guaranteed_items={'rare-candy':10,'elite-charged-tm':1,'raid-pass':3},rolls=2); self._guild_contribute(uid,25)
+            return await ctx.send(f'🏆 **Dungeon cleared!** You conquered all **{maxfloors} floors** of {key.replace("_"," ").title()}!\nReward: **{loot} + 500 XP**.')
+        loot=grant_game_reward(uid,xp=25*floor,rolls=1 if floor<5 else 2)
         if floor%5==0:
             stone=random.choice(list(self.MEGA_STONES.values()))
             with db() as c:c.execute('INSERT INTO pv_mega_stones(user_id,stone,quantity) VALUES(?,?,1) ON CONFLICT(user_id,stone) DO UPDATE SET quantity=quantity+1',(uid,stone))
-            return await ctx.send(f'⚔️ **Floor {floor} boss defeated!** Your team average level is {int(team)}.\n🎁 You earned **{150*floor:,} VantaCoins**, **{25*floor} XP**, and a **Mystery Mega Stone**.')
+            return await ctx.send(f'⚔️ **Floor {floor} boss defeated!** Your team average level is {int(team)}.\n🎁 You earned **{loot}**, **{25*floor} XP**, and a **Mystery Mega Stone**.')
         if random.random()<.22:
             egg_type=random.choice(['common','regional','rare']); req={'common':3,'regional':5,'rare':8}[egg_type]
             with db() as c:c.execute('INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,?,?,?,?,?)',(uid,egg_type,self._travel(uid)[0],req,int(time.time()),'dungeon'))
             extra=f'\n🥚 You discovered a **{egg_type.title()} Egg**!'
         else:extra=''
         self._guild_contribute(uid,3)
-        await ctx.send(f'🧭 **Floor {floor} cleared!** You advanced to floor **{floor+1}/{maxfloors}**.\nReward: **{150*floor:,} VantaCoins + {25*floor} XP**.{extra}')
+        await ctx.send(f'🧭 **Floor {floor} cleared!** You advanced to floor **{floor+1}/{maxfloors}**.\nReward: **{loot} + {25*floor} XP**.{extra}')
 
     @dungeon.command(name='leave')
     async def dungeon_leave(self,ctx):
