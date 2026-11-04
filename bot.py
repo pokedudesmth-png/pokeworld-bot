@@ -1,4 +1,4 @@
-import os, random, sqlite3, asyncio, time, re, json, base64, inspect, io
+import os, random, sqlite3, asyncio, time, re, json, base64, inspect, io, zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -574,11 +574,53 @@ def sprite(d, shiny=False):
         return art.get('front_shiny') or s.get('front_shiny') or art.get('front_default') or s.get('front_default')
     return art.get('front_default') or s.get('front_default')
 
+_RADIANT_ASSET_CACHE = {}
+_RADIANT_ARCHIVE_INDEX = None
+
 async def radiant_sprite_file(d):
-    """Render Radiant artwork using the exact luminance-to-purple palette
-    from the user's RADIANTDEX artwork exporter. The official artwork's
-    transparency is preserved and the result is attached directly to Discord.
+    """Prefer the exact exported RADIANTDEX PNG for this PokéAPI Pokémon.
+
+    Put RADIANTDEX_Radiant_Artwork.zip beside bot.py (or extract it into
+    RADIANTDEX_Artwork/). If an exported file is unavailable, fall back to
+    the same palette conversion so the command can still show artwork.
     """
+    pokemon_id = d.get('id')
+    pokemon_name = str(d.get('name', 'pokemon')).lower()
+    safe_asset_name = re.sub(r'[^a-zA-Z0-9._-]+', '_', pokemon_name)
+    asset_basename = f'{int(pokemon_id):04d}_{safe_asset_name}.png' if str(pokemon_id).isdigit() else None
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if asset_basename:
+        if asset_basename in _RADIANT_ASSET_CACHE:
+            return discord.File(io.BytesIO(_RADIANT_ASSET_CACHE[asset_basename]), filename=f'radiant-{safe_asset_name}.png')
+
+        # First support an already-extracted artwork folder.
+        extracted_path = os.path.join(base_dir, 'RADIANTDEX_Artwork', asset_basename)
+        try:
+            if os.path.isfile(extracted_path):
+                with open(extracted_path, 'rb') as asset_file:
+                    asset_bytes = asset_file.read()
+                if asset_bytes:
+                    _RADIANT_ASSET_CACHE[asset_basename] = asset_bytes
+                    return discord.File(io.BytesIO(asset_bytes), filename=f'radiant-{safe_asset_name}.png')
+        except OSError:
+            pass
+
+        # Or read the matching PNG directly from the generated artwork ZIP.
+        archive_path = os.path.join(base_dir, 'RADIANTDEX_Radiant_Artwork.zip')
+        try:
+            if os.path.isfile(archive_path):
+                with zipfile.ZipFile(archive_path, 'r') as archive:
+                    match = next((member for member in archive.namelist()
+                                  if member.rsplit('/', 1)[-1] == asset_basename), None)
+                    if match:
+                        asset_bytes = archive.read(match)
+                        if asset_bytes:
+                            _RADIANT_ASSET_CACHE[asset_basename] = asset_bytes
+                            return discord.File(io.BytesIO(asset_bytes), filename=f'radiant-{safe_asset_name}.png')
+        except (OSError, zipfile.BadZipFile, KeyError):
+            pass
+
     if Image is None:
         raise RuntimeError('Pillow is not installed. Install it with: python -m pip install pillow')
     sprites = d.get('sprites') or {}
