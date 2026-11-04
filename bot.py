@@ -2115,22 +2115,19 @@ class Game(commands.Cog):
                 e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
                 e.color=discord.Color.gold()
             if radiant:e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
-            if radiant:
-                
-                try: radiant_file = await radiant_sprite_file(d)
-                except Exception as exc:
-                    print(f'Radiant artwork failed for {d.get("name", "unknown")}: {exc!r}')
-                    radiant_file = None
-                if radiant_file:
-                    e.set_image(url=f'attachment://{radiant_file.filename}')
-                    await ctx.reply(embed=e, file=radiant_file, mention_author=False)
-                else:
-                    # Never disguise a failed Radiant conversion with normal-colour artwork.
-                    e.set_footer(text='RADIANT VARIANT • artwork conversion failed; check Pillow and bot logs')
-                    await ctx.reply(embed=e, mention_author=False)
+            # RADIANTDEX: all wild Pokémon artwork is recoloured purple, not only rare Radiant spawns.
+            try:
+                radiant_file = await radiant_sprite_file(d)
+            except Exception as exc:
+                print(f'RADIANTDEX hunt artwork failed for {d.get("name", "unknown")}: {exc!r}')
+                radiant_file = None
+            if radiant_file:
+                e.set_image(url=f'attachment://{radiant_file.filename}')
+                await ctx.reply(embed=e, file=radiant_file, mention_author=False)
             else:
                 art=sprite(d,shiny=shiny)
                 if art:e.set_image(url=art)
+                e.set_footer(text='RADIANTDEX artwork unavailable for this entry; showing source artwork.')
                 await ctx.reply(embed=e, mention_author=False)
         except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
 
@@ -2276,8 +2273,16 @@ class Game(commands.Cog):
             raise
         e=discord.Embed(title='🔥 LEGENDARY BOSS — 3 VS 1',description=f'**Boss:** {display_name(d)} Lv. **{boss_level}**\nHP {hp_bar(max_hp(d,boss_level),max_hp(d,boss_level))}\nStatus: **Healthy**\n**Your squad:**\n'+'\n'.join(f'• **{r[3].title()}** Lv.{r[4]}\n  HP {hp_bar(r[8],r[9])}\n  Status: **{status_label(r[11] or "")}**' for r in party)+'\n\nChoose a move using the move buttons below. If a Pokémon faints, only the Switch button remains; select a healthy teammate to continue. Boss level is 18–25 levels above your highest-level teammate. Shiny status and odds were determined when this boss appeared.')
         e.color=discord.Color.dark_red()
-        if sprite(d,shiny=bool(boss[3])):e.set_image(url=sprite(d,shiny=bool(boss[3])))
-        v.message=await ctx.send(embed=e,view=v); ACTIVE_VIEWS[uid]=v
+        try: boss_art=await radiant_sprite_file(d)
+        except Exception as exc:
+            print(f'RADIANTDEX legendary boss artwork failed: {exc!r}')
+            boss_art=None
+        if boss_art: e.set_image(url=f'attachment://{boss_art.filename}')
+        else:
+            art=sprite(d,shiny=bool(boss[3]))
+            if art:e.set_image(url=art)
+        v.message=await ctx.send(embed=e,view=v,file=boss_art) if boss_art else await ctx.send(embed=e,view=v)
+        ACTIVE_VIEWS[uid]=v
 
     @commands.command(name='hint',aliases=['i','clue'],description='Get one of two hints for your current wild Pokémon.')
     async def hint(self,ctx):
@@ -2404,16 +2409,18 @@ class Game(commands.Cog):
                 response+='\n\n'+f'🔥 **Legendary boss unlocked!** Your next encounter is ready — use `!add <pokemon_id>` to select three Pokémon, then `!legendarybattle`.'
                 await ctx.send(response)
                 return await ctx.send(embed=boss_embed)
-        if radiant:
-            try:
-                radiant_file=await radiant_sprite_file(d)
-                catch_embed=discord.Embed(title=f'{RADIANT_EMOJI} Radiant Pokémon registered!',description=response,color=discord.Color.from_rgb(145,65,230))
-                catch_embed.set_image(url=f'attachment://{radiant_file.filename}')
-                return await ctx.send(embed=catch_embed,file=radiant_file)
-            except Exception as exc:
-                print(f'Radiant catch artwork failed for {d.get("name", "unknown")}: {type(exc).__name__}: {exc}')
-                return await ctx.send(response + '\n⚠️ Radiant artwork could not be rendered; check the bot logs and Pillow installation.')
-        return await ctx.send(response)
+        try:
+            radiant_file=await radiant_sprite_file(d)
+            catch_embed=discord.Embed(
+                title=(f'{RADIANT_EMOJI} Radiant Pokémon registered!' if radiant else f'🎉 {display_name(d)} added to your Box!'),
+                description=response,
+                color=discord.Color.from_rgb(145,65,230)
+            )
+            catch_embed.set_image(url=f'attachment://{radiant_file.filename}')
+            return await ctx.send(embed=catch_embed,file=radiant_file)
+        except Exception as exc:
+            print(f'RADIANTDEX catch artwork failed for {d.get("name", "unknown")}: {type(exc).__name__}: {exc}')
+            return await ctx.send(response + '\n⚠️ Radiant artwork could not be rendered; showing text only.')
 
     @commands.command(name='cancel',aliases=['stop','quit'])
     async def cancel(self,ctx):
@@ -2724,9 +2731,16 @@ class Game(commands.Cog):
             abilities=', '.join(a['ability']['name'].replace('-', ' ').title() + (' (Hidden)' if a.get('is_hidden') else '') for a in d.get('abilities',[])) or 'Unknown'
             e=discord.Embed(title=f'#{d["id"]} — {label}',description=f'**Type:** {type_text(d)}\n**BST:** {sum(s.values())}\n**Generation:** {gen_label}\n**Abilities:** {abilities}')
             for k,l in [('hp','❤️ HP'),('attack','⚔️ Attack'),('defense','🛡️ Defense'),('special-attack','✨ Sp. Atk'),('special-defense','🔰 Sp. Def'),('speed','💨 Speed')]:e.add_field(name=l,value=str(s[k]))
-            art=sprite(d,shiny=shiny)
-            if art:e.set_image(url=art)
-            await ctx.send(embed=e)
+            radiant_file=None
+            try: radiant_file=await radiant_sprite_file(d)
+            except Exception as exc: print(f'RADIANTDEX Pokédex artwork failed: {exc!r}')
+            if radiant_file:
+                e.set_image(url=f'attachment://{radiant_file.filename}')
+                await ctx.send(embed=e,file=radiant_file)
+            else:
+                art=sprite(d,shiny=shiny)
+                if art:e.set_image(url=art)
+                await ctx.send(embed=e)
         except Exception: await ctx.send('❌ Pokémon not found. Try `!pokedex eternatus` or `!pokedex shinyeternatus`.')
     @commands.command(name='dex',description='View normal/shiny Pokédex by generation or category.')
     async def dex(self,ctx,*,query:str=''):
@@ -2809,6 +2823,12 @@ class Game(commands.Cog):
                 abilities=', '.join(a['ability']['name'].replace('-', ' ').title() + (' (Hidden)' if a.get('is_hidden') else '') for a in d.get('abilities',[])) or 'Unknown'
                 e=discord.Embed(title=f'#{d["id"]} — {label}',description=f'**Type:** {type_text(d)}\n**BST:** {sum(s.values())}\n**Generation:** {gen_label}\n**Abilities:** {abilities}')
                 for stat_key,stat_label in [('hp','❤️ HP'),('attack','⚔️ Attack'),('defense','🛡️ Defense'),('special-attack','✨ Sp. Atk'),('special-defense','🔰 Sp. Def'),('speed','💨 Speed')]: e.add_field(name=stat_label,value=str(s[stat_key]))
+                radiant_file=None
+                try: radiant_file=await radiant_sprite_file(d)
+                except Exception as exc: print(f'RADIANTDEX Dex artwork failed: {exc!r}')
+                if radiant_file:
+                    e.set_image(url=f'attachment://{radiant_file.filename}')
+                    return await ctx.send(embed=e,file=radiant_file)
                 art=sprite(d,shiny=shiny)
                 if art: e.set_image(url=art)
                 return await ctx.send(embed=e)
@@ -2919,15 +2939,12 @@ class Game(commands.Cog):
         # Set art before move lookup, so move/API/DB errors cannot remove the Pokémon picture.
         radiant_file = None
         if d:
-            if radiant:
-                try: radiant_file = await radiant_sprite_file(d)
-                except Exception as exc:
-                    print(f'Radiant artwork failed for {d.get("name", "unknown")}: {exc!r}')
-                    radiant_file = None
-                if radiant_file:
-                    e.set_image(url=f'attachment://{radiant_file.filename}')
-                else:
-                    e.set_footer(text='RADIANT VARIANT • artwork conversion failed; check Pillow and bot logs')
+            try:
+                radiant_file = await radiant_sprite_file(d)
+            except Exception as exc:
+                print(f'RADIANTDEX info artwork failed for {d.get("name", "unknown")}: {exc!r}')
+            if radiant_file:
+                e.set_image(url=f'attachment://{radiant_file.filename}')
             else:
                 art = sprite(d, shiny=bool(shiny))
                 if art: e.set_image(url=art)
@@ -2972,13 +2989,9 @@ class Game(commands.Cog):
         radiant_file = None
         try:
             d = await pokemon_data(str(row[2]))
-            radiant_flag = bool(row[-1]) if len(row) > 15 else False
-            if radiant_flag:
-                radiant_file = await radiant_sprite_file(d)
-                if radiant_file:
-                    embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
-                else:
-                    embed.set_footer(text='Radiant artwork unavailable — check Pillow and bot logs')
+            radiant_file = await radiant_sprite_file(d)
+            if radiant_file:
+                embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
             else:
                 image_url = sprite(d, shiny=bool(row[6]))
                 if image_url: embed.set_thumbnail(url=image_url)
@@ -3036,14 +3049,12 @@ class Game(commands.Cog):
         yes.callback=yes_cb; no.callback=no_cb; view.add_item(yes); view.add_item(no)
         embed=discord.Embed(title='Confirm Pokémon addition',description=f'Add **{label}** Lv. 50 to {member.mention}?')
         
-        try: radiant_file = await radiant_sprite_file(d) if radiant else None
-        except Exception: radiant_file = None
-        if radiant:
-            if radiant_file:
-                embed.set_image(url=f'attachment://{radiant_file.filename}')
-            else:
-                print(f'Radiant preview artwork failed for {d.get("name", "unknown")}: Pillow/artwork unavailable')
-                embed.set_footer(text='Radiant artwork unavailable — check Pillow and bot logs')
+        try: radiant_file = await radiant_sprite_file(d)
+        except Exception as exc:
+            print(f'RADIANTDEX Pokémon-add preview failed: {exc!r}')
+            radiant_file = None
+        if radiant_file:
+            embed.set_image(url=f'attachment://{radiant_file.filename}')
         else:
             art=sprite(d,shiny=shiny)
             if art: embed.set_image(url=art)
@@ -3095,9 +3106,18 @@ class Game(commands.Cog):
                 return await ctx.send(f'⚠️ A server-wide shiny (**{existing[0].title()}**) is already active. Let someone catch it first!')
             c.execute('INSERT INTO global_encounter(id,dex_id,name,shiny,level,spawned_by) VALUES(1,?,?,1,?,?)', (d['id'],d['name'],lvl,ctx.author.id))
         embed=discord.Embed(title='✨ A SERVER-WIDE SHINY Pokémon appeared!', description=f'**A wild shiny appeared!**\n**Level:** {lvl}\n**Type:** ???\n\nLook at the artwork and guess its name with `!catch <pokemon name>`.\n💰 First correct guess wins **5 Rare Candies and 1 Elite Charged TM**. Only one user can catch it!')
-        art=sprite(d,shiny=True)
-        if art: embed.set_image(url=art)
-        await ctx.send(embed=embed)
+        try:
+            radiant_file=await radiant_sprite_file(d)
+        except Exception as exc:
+            print(f'RADIANTDEX shinyhunt artwork failed: {exc!r}')
+            radiant_file=None
+        if radiant_file:
+            embed.set_image(url=f'attachment://{radiant_file.filename}')
+            await ctx.send(embed=embed,file=radiant_file)
+        else:
+            art=sprite(d,shiny=True)
+            if art: embed.set_image(url=art)
+            await ctx.send(embed=embed)
 
     @commands.command(name='setteam',aliases=['teamset','slotteam'],description='Set a Pokémon into team slot 1-6.')
     async def setteam(self,ctx,pokemon_id:int,slot:int):
@@ -3725,8 +3745,16 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 raise
             em=discord.Embed(title='🌟 SHINY RAID BOSS — 6 vs 1',description=f'**Boss:** ✨ {display_name(d)} Lv. **{level}**\nHP {hp_bar(max_hp(d,level)*4,max_hp(d,level)*4)}\n\n**Your raid squad:**\n'+'\n'.join(f'• `{r[0]}` **{r[3].title()}** Lv.{r[4]} — {hp_bar(r[8],r[9])}' for r in party)+'\n\nUse the move buttons below; if your active Pokémon faints, use Switch Pokémon to choose a healthy teammate. Raid battles have their own 60-second start cooldown. Win to receive 50 Rare Candies and the shiny boss at 75 levels below its raid level.')
             em.color=discord.Color.gold()
-            if sprite(d,shiny=True):em.set_image(url=sprite(d,shiny=True))
-            view.message=await ctx.send(embed=em,view=view); ACTIVE_VIEWS[uid]=view
+            try: raid_art=await radiant_sprite_file(d)
+            except Exception as exc:
+                print(f'RADIANTDEX raid boss artwork failed: {exc!r}')
+                raid_art=None
+            if raid_art: em.set_image(url=f'attachment://{raid_art.filename}')
+            else:
+                art=sprite(d,shiny=True)
+                if art:em.set_image(url=art)
+            view.message=await ctx.send(embed=em,view=view,file=raid_art) if raid_art else await ctx.send(embed=em,view=view)
+            ACTIVE_VIEWS[uid]=view
             return
         if action=='spawn':
             with db() as c:
