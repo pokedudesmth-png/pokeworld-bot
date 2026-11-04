@@ -557,8 +557,7 @@ def sprite(d, shiny=False):
 async def radiant_sprite_file(d):
     """Fetch PokeAPI official artwork and apply the bot-wide consistent violet Radiant treatment."""
     if Image is None:
-        # Let callers fall back to the original artwork rather than sending an image-less embed.
-        return None
+        raise RuntimeError('Pillow is not installed. Install it with: python -m pip install pillow')
     source = sprite(d, shiny=False)
     if not source:
         return None
@@ -574,7 +573,7 @@ async def radiant_sprite_file(d):
     rgb = ImageEnhance.Color(rgb).enhance(1.35)
     rgb = ImageEnhance.Brightness(rgb).enhance(1.12)
     overlay = Image.new('RGB', rgb.size, (151, 55, 255))
-    rgb = Image.blend(rgb, overlay, 0.38)
+    rgb = Image.blend(rgb, overlay, 0.62)
     tinted = rgb.convert('RGBA')
     tinted.putalpha(alpha)
     # Soft violet aura behind the transparent artwork.
@@ -2076,9 +2075,8 @@ class Game(commands.Cog):
                     e.set_image(url=f'attachment://{radiant_file.filename}')
                     await ctx.reply(embed=e, file=radiant_file, mention_author=False)
                 else:
-                    # Fallback image keeps the Pokémon visible if Pillow or the artwork host fails.
-                    art = sprite(d, shiny=False)
-                    if art: e.set_image(url=art)
+                    # Never disguise a failed Radiant conversion with normal-colour artwork.
+                    e.set_footer(text='RADIANT VARIANT • artwork conversion failed; check Pillow and bot logs')
                     await ctx.reply(embed=e, mention_author=False)
             else:
                 art=sprite(d,shiny=shiny)
@@ -2843,9 +2841,9 @@ class Game(commands.Cog):
         variant=(RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else '')
         e=discord.Embed(title=f'{variant}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.from_rgb(80,235,220) if radiant else (discord.Color.gold() if shiny else (discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())))
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
-        iv_total=sum(max(0,int(v or 0)) for v in iv_values)
-        iv_text='\n'.join(f'**{label}:** {int(value)}/31' for label,value in zip(('HP','Attack','Defense','Sp. Attack','Sp. Defense','Speed'),iv_values))
-        e.add_field(name=f'Individual Values · {iv_total}/186',value=iv_text,inline=False)
+        iv_total=sum(max(0,min(31,int(v or 0))) for v in iv_values)
+        iv_percent=iv_total/186*100
+        e.add_field(name='IV Potential',value=f'**{iv_percent:.1f}%** · `{iv_total}/186` total IVs',inline=False)
         held_label=(ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()) if held else 'None'
         e.add_field(name='Condition',value=f'**Status:** {(status or "healthy").replace("-"," ").title()}\n**Held item:** {item_emoji(held) + " " if held else ""}{held_label}\n**Ability:** {abilities}',inline=True)
         # Set art before move lookup, so move/API/DB errors cannot remove the Pokémon picture.
@@ -2859,8 +2857,7 @@ class Game(commands.Cog):
                 if radiant_file:
                     e.set_image(url=f'attachment://{radiant_file.filename}')
                 else:
-                    art = sprite(d, shiny=False)
-                    if art: e.set_image(url=art)
+                    e.set_footer(text='RADIANT VARIANT • artwork conversion failed; check Pillow and bot logs')
             else:
                 art = sprite(d, shiny=bool(shiny))
                 if art: e.set_image(url=art)
@@ -2909,8 +2906,7 @@ class Game(commands.Cog):
                 if radiant_file:
                     embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
                 else:
-                    image_url = sprite(d, shiny=False)
-                    if image_url: embed.set_thumbnail(url=image_url)
+                    embed.set_footer(text='Radiant artwork unavailable — check Pillow and bot logs')
             else:
                 image_url = sprite(d, shiny=bool(row[6]))
                 if image_url: embed.set_thumbnail(url=image_url)
@@ -2939,24 +2935,31 @@ class Game(commands.Cog):
         view=TimedView(timeout=None, timeout_text='')
         yes=discord.ui.Button(label='Confirm add',style=discord.ButtonStyle.success)
         no=discord.ui.Button(label='Cancel',style=discord.ButtonStyle.danger)
-        async def confirm(interaction):
+        async def yes_cb(interaction):
             if interaction.user.id != ctx.author.id:
                 return await interaction.response.send_message('Only the command user can confirm this.',ephemeral=True)
-            if interaction.data.get('custom_id') == 'pokemonadd_cancel':
-                await interaction.response.edit_message(content='❎ Addition cancelled.',embed=None,view=None); return
-            with db() as c:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant))); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
-                if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-            await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{get_box_id(c,member.id,iid)}`).',embed=None,view=None)
-        async def yes_cb(interaction):
-            if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Only the command user can confirm this.',ephemeral=True)
-            with db() as c:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant))); iid=cur.lastrowid; assign_box_id(c,member.id,iid)
-                if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-            await interaction.response.edit_message(content=f'✅ Added **{label}** to {member.mention} (ID `{get_box_id(c,member.id,iid)}`).',embed=None,view=None)
+            await interaction.response.defer()
+            for button in view.children:
+                button.disabled = True
+            try:
+                with db() as c:
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant)))
+                    iid=cur.lastrowid
+                    assign_box_id(c,member.id,iid)
+                    public_id=get_box_id(c,member.id,iid) or iid
+                    if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
+                        c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
+                result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`).'
+            except Exception as exc:
+                result=f'❌ Add failed: `{type(exc).__name__}: {exc}`'
+            await interaction.message.edit(content=result,embed=None,view=view)
         async def no_cb(interaction):
-            if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Only the command user can cancel this.',ephemeral=True)
-            await interaction.response.edit_message(content='❎ Addition cancelled.',embed=None,view=None)
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message('Only the command user can cancel this.',ephemeral=True)
+            await interaction.response.defer()
+            for button in view.children:
+                button.disabled = True
+            await interaction.message.edit(content='❎ Addition cancelled.',embed=None,view=view)
         yes.callback=yes_cb; no.callback=no_cb; view.add_item(yes); view.add_item(no)
         embed=discord.Embed(title='Confirm Pokémon addition',description=f'Add **{label}** Lv. 50 to {member.mention}?')
         
@@ -2966,8 +2969,8 @@ class Game(commands.Cog):
             if radiant_file:
                 embed.set_image(url=f'attachment://{radiant_file.filename}')
             else:
-                art=sprite(d,shiny=False)
-                if art: embed.set_image(url=art)
+                print(f'Radiant preview artwork failed for {d.get("name", "unknown")}: Pillow/artwork unavailable')
+                embed.set_footer(text='Radiant artwork unavailable — check Pillow and bot logs')
         else:
             art=sprite(d,shiny=shiny)
             if art: embed.set_image(url=art)
@@ -4284,17 +4287,24 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         async def yes_cb(interaction):
             if interaction.user.id != ctx.author.id:
                 return await interaction.response.send_message('Only the dev who started this action can confirm it.',ephemeral=True)
+            await interaction.response.defer()
+            for button in view.children:
+                button.disabled = True
             try:
                 result=action()
                 if asyncio.iscoroutine(result):
                     result = await result
-                await interaction.response.edit_message(content=f'✅ {result}',embed=None,view=None)
+                message=f'✅ {result}'
             except Exception as exc:
-                await interaction.response.edit_message(content=f'❌ Action failed: `{exc}`',embed=None,view=None)
+                message=f'❌ Action failed: `{type(exc).__name__}: {exc}`'
+            await interaction.message.edit(content=message,embed=None,view=view)
         async def no_cb(interaction):
             if interaction.user.id != ctx.author.id:
                 return await interaction.response.send_message('Only the dev who started this action can cancel it.',ephemeral=True)
-            await interaction.response.edit_message(content='❎ Action cancelled.',embed=None,view=None)
+            await interaction.response.defer()
+            for button in view.children:
+                button.disabled = True
+            await interaction.message.edit(content='❎ Action cancelled.',embed=None,view=view)
         yes.callback=yes_cb; no.callback=no_cb; view.add_item(yes); view.add_item(no)
         view.message=await ctx.send(embed=discord.Embed(title=title,description=description,color=discord.Color.orange()),view=view)
 
