@@ -557,7 +557,8 @@ def sprite(d, shiny=False):
 async def radiant_sprite_file(d):
     """Fetch PokeAPI official artwork and apply the bot-wide consistent violet Radiant treatment."""
     if Image is None:
-        raise RuntimeError('Pillow is required for Radiant artwork. Install it with: python -m pip install pillow')
+        # Let callers fall back to the original artwork rather than sending an image-less embed.
+        return None
     source = sprite(d, shiny=False)
     if not source:
         return None
@@ -715,16 +716,35 @@ def pokemon_ivs(row):
     # The IV columns are appended to the pokemon table after its original 12 columns.
     return {name:max(0,min(31,int(row[15+i] or 0))) for i,name in enumerate(names)}
 
-def iv_adjusted_stats(species, ivs=None, level=100):
+def radiant_stat_multiplier(species):
+    """Radiant boosts only naturally strong species; low-BST Pokémon stay weak."""
+    base = stats(species)
+    total = sum(int(value or 0) for value in base.values())
+    if total >= 600:
+        return 1.45
+    if total >= 500:
+        return 1.35
+    return 1.0
+
+def iv_adjusted_stats(species, ivs=None, level=100, radiant=False):
     result=stats(species)
     for stat_name, iv in (ivs or {}).items():
         if stat_name in result:
             result[stat_name] += int(max(0,min(31,int(iv))) * max(1,int(level)) / 100)
+    # Apply the Radiant bonus to battle stats before STAB, type effectiveness,
+    # critical hits, and held-item effects. Weak species (base-stat total < 500)
+    # intentionally receive no Radiant stat bonus.
+    if radiant:
+        multiplier = radiant_stat_multiplier(species)
+        if multiplier > 1:
+            for stat_name in ('hp', 'attack', 'defense', 'special-attack', 'special-defense', 'speed'):
+                if stat_name in result:
+                    result[stat_name] = max(1, int(result[stat_name] * multiplier))
     return result
 
-def calc_damage(attacker, defender, move, level, attacker_ivs=None, defender_ivs=None, defender_level=None):
-    a=iv_adjusted_stats(attacker,attacker_ivs,level)
-    b=iv_adjusted_stats(defender,defender_ivs,defender_level or level)
+def calc_damage(attacker, defender, move, level, attacker_ivs=None, defender_ivs=None, defender_level=None, attacker_radiant=False, defender_radiant=False):
+    a=iv_adjusted_stats(attacker,attacker_ivs,level,radiant=attacker_radiant)
+    b=iv_adjusted_stats(defender,defender_ivs,defender_level or level,radiant=defender_radiant)
     physical=move.get('damage_class',{}).get('name')=='physical'
     atk=a.get('attack' if physical else 'special-attack',50)
     defense=b.get('defense' if physical else 'special-defense',50)
@@ -1097,7 +1117,7 @@ class NPCBattleView(TimedView):
             msg=f'💚 **{self.row[3].title()}** used **{move_name.replace("-"," " ).title()}** and recovered **{restored} HP**!\nYour HP: {hp_bar(self.player_hp,self.row[9])}\n🎙️ **Commentator:** A timely recovery! {self.row[3].title()} regains its strength.'
         elif random.randint(1,100)>(move.get('accuracy') or 100): msg=f'💨 **{move["name"].title()}** missed!\n{battle_commentary(self.row[3], move, 0)}'
         else:
-            dmg,eff,crit=calc_damage(p,self.enemy,move,self.row[4],attacker_ivs=pokemon_ivs(self.row))
+            dmg,eff,crit=calc_damage(p,self.enemy,move,self.row[4],attacker_ivs=pokemon_ivs(self.row),attacker_radiant=bool(len(self.row)>12 and self.row[12]))
             with db() as mega_conn:
                 mega_active=mega_conn.execute('SELECT instance_id FROM pv_mega_active WHERE user_id=?',(self.uid,)).fetchone()
                 mega_boost=bool(mega_active and int(mega_active[0])==int(self.row[0]))
@@ -1190,7 +1210,7 @@ class NPCBattleView(TimedView):
                 return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}`!\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
-        em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'],defender_ivs=pokemon_ivs(self.row),defender_level=self.row[4]);dmg=int(dmg*held_damage_multiplier(enemyheld,em,eff))
+        em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'],defender_ivs=pokemon_ivs(self.row),defender_level=self.row[4],defender_radiant=bool(len(self.row)>12 and self.row[12]));dmg=int(dmg*held_damage_multiplier(enemyheld,em,eff))
         if self.raid: dmg=max(1,int(dmg*1.35))  # Raid boss strikes are substantially stronger.
         dmg=max(1,int(dmg*held_incoming_multiplier(held,em)))
         if held=='focus-sash' and self.row[0] not in self.focus_sash_used and self.player_hp>=self.row[9] and dmg>=self.player_hp:
@@ -1355,7 +1375,7 @@ class PvPBattle:
                 if held=='leftovers' and self.hp[uid]>0:self.hp[uid]=min(row[9],self.hp[uid]+max(1,row[9]//16))
                 continue
             before_hp=self.hp[opp]
-            dmg,eff,crit=calc_damage(attacker,defender,move,row[4],attacker_ivs=pokemon_ivs(row),defender_ivs=pokemon_ivs(orow),defender_level=orow[4]);dmg=int(dmg*held_damage_multiplier(held,move,eff))
+            dmg,eff,crit=calc_damage(attacker,defender,move,row[4],attacker_ivs=pokemon_ivs(row),defender_ivs=pokemon_ivs(orow),defender_level=orow[4],attacker_radiant=bool(len(row)>12 and row[12]),defender_radiant=bool(len(orow)>12 and orow[12]));dmg=int(dmg*held_damage_multiplier(held,move,eff))
             dmg=max(1,int(dmg*held_incoming_multiplier(enemyheld,move)))
             if enemyheld=='focus-sash' and opp not in self.focus_sash_used and self.hp[opp]>=orow[9] and dmg>=self.hp[opp]:
                 dmg=max(0,self.hp[opp]-1); self.focus_sash_used.add(opp)
@@ -2052,9 +2072,14 @@ class Game(commands.Cog):
                 except Exception as exc:
                     print(f'Radiant artwork failed for {d.get("name", "unknown")}: {exc!r}')
                     radiant_file = None
-                if radiant_file: e.set_image(url=f'attachment://{radiant_file.filename}')
-                if radiant_file: await ctx.reply(embed=e, file=radiant_file, mention_author=False)
-                else: await ctx.reply(embed=e, mention_author=False)
+                if radiant_file:
+                    e.set_image(url=f'attachment://{radiant_file.filename}')
+                    await ctx.reply(embed=e, file=radiant_file, mention_author=False)
+                else:
+                    # Fallback image keeps the Pokémon visible if Pillow or the artwork host fails.
+                    art = sprite(d, shiny=False)
+                    if art: e.set_image(url=art)
+                    await ctx.reply(embed=e, mention_author=False)
             else:
                 art=sprite(d,shiny=shiny)
                 if art:e.set_image(url=art)
@@ -2831,7 +2856,11 @@ class Game(commands.Cog):
                 except Exception as exc:
                     print(f'Radiant artwork failed for {d.get("name", "unknown")}: {exc!r}')
                     radiant_file = None
-                if radiant_file: e.set_image(url=f'attachment://{radiant_file.filename}')
+                if radiant_file:
+                    e.set_image(url=f'attachment://{radiant_file.filename}')
+                else:
+                    art = sprite(d, shiny=False)
+                    if art: e.set_image(url=art)
             else:
                 art = sprite(d, shiny=bool(shiny))
                 if art: e.set_image(url=art)
@@ -2877,7 +2906,11 @@ class Game(commands.Cog):
             radiant_flag = bool(row[-1]) if len(row) > 15 else False
             if radiant_flag:
                 radiant_file = await radiant_sprite_file(d)
-                if radiant_file: embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
+                if radiant_file:
+                    embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
+                else:
+                    image_url = sprite(d, shiny=False)
+                    if image_url: embed.set_thumbnail(url=image_url)
             else:
                 image_url = sprite(d, shiny=bool(row[6]))
                 if image_url: embed.set_thumbnail(url=image_url)
@@ -2930,7 +2963,11 @@ class Game(commands.Cog):
         try: radiant_file = await radiant_sprite_file(d) if radiant else None
         except Exception: radiant_file = None
         if radiant:
-            if radiant_file: embed.set_image(url=f'attachment://{radiant_file.filename}')
+            if radiant_file:
+                embed.set_image(url=f'attachment://{radiant_file.filename}')
+            else:
+                art=sprite(d,shiny=False)
+                if art: embed.set_image(url=art)
         else:
             art=sprite(d,shiny=shiny)
             if art: embed.set_image(url=art)
