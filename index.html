@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#10051e">
+<title>RADIANTDEX — Discover the Radiant World</title>
+<style>
+:root{color-scheme:dark;--bg:#090411;--panel:#160b25;--panel2:#201033;--line:#42245f;--purple:#bd68ff;--pink:#f0b7ff;--muted:#b7a5c9;--text:#fff8ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% -15%,#4b176e 0%,#170923 36%,var(--bg) 72%);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;min-height:100vh}
+header{padding:26px 22px 18px;text-align:center;border-bottom:1px solid #ffffff12;background:linear-gradient(180deg,#1c0b2b99,transparent)}
+.brand{font-size:clamp(2.5rem,8vw,5rem);font-weight:1000;letter-spacing:.12em;line-height:1;background:linear-gradient(90deg,#f4d8ff,#b45aff 45%,#f6c8ff);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 0 22px #b64cff88)}
+.tagline{margin:12px 0 0;color:#d8c2e9;letter-spacing:.16em;text-transform:uppercase;font-size:.78rem}
+.wrap{max-width:1400px;margin:auto;padding:24px 20px 60px}
+.hero{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:8px 0 22px;flex-wrap:wrap}
+.hero h1{font-size:clamp(1.35rem,3vw,2rem);margin:0 0 6px}.hero p{margin:0;color:var(--muted)}
+.stat{border:1px solid #8f4bc766;background:#1b0d2acc;padding:12px 17px;border-radius:15px;box-shadow:0 0 28px #a43dff18}
+.stat strong{font-size:1.25rem;color:#e6bdff}.stat span{display:block;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.1em}
+.toolbar{display:grid;grid-template-columns:minmax(220px,1fr) 190px 170px auto;gap:10px;margin:20px 0 18px}
+input,select,button{font:inherit;color:var(--text);background:#1a0d28;border:1px solid var(--line);border-radius:12px;padding:12px 14px;outline:none}
+input:focus,select:focus,button:focus-visible{border-color:var(--purple);box-shadow:0 0 0 3px #b65aff28}
+button{cursor:pointer;transition:.18s ease}button:hover{transform:translateY(-1px);border-color:#b45aff;background:#29113d}
+.primary{background:linear-gradient(110deg,#792bc1,#a444e9);border:0;font-weight:750}
+.exportbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 18px;padding:14px;border:1px solid #6f3b9070;border-radius:15px;background:#160b25aa}.exportbar p{margin:0;color:var(--muted);font-size:.86rem;flex:1;min-width:220px}.exportbar progress{width:min(260px,100%);accent-color:#bd68ff}.export-status{color:#e6bdff;font-size:.82rem;min-width:140px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:16px}
+.card{position:relative;overflow:hidden;min-height:230px;border:1px solid #6f3b9070;border-radius:19px;background:linear-gradient(145deg,#241037,#10091b 72%);padding:14px;text-align:left;cursor:pointer;transition:transform .2s,border-color .2s,box-shadow .2s}
+.card:hover{transform:translateY(-5px);border-color:#d18aff;box-shadow:0 12px 35px #a43dff30,0 0 22px #a43dff24}
+.card:before{content:"";position:absolute;width:150px;height:150px;border-radius:50%;background:#a12dff25;filter:blur(35px);top:30px;left:calc(50% - 75px);pointer-events:none}
+.art{height:145px;display:grid;place-items:center;position:relative;z-index:1}
+.art img{width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 0 9px #bd62ff) drop-shadow(0 0 18px #a33dff88)}
+.art canvas{max-width:100%;max-height:100%;object-fit:contain;filter:drop-shadow(0 0 9px #bd62ff) drop-shadow(0 0 19px #a33dff)}
+.dexno{position:absolute;top:0;left:0;color:#a98abf;font-size:.7rem;font-weight:700;letter-spacing:.06em}
+.name{font-weight:850;text-transform:capitalize;font-size:1rem;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.formname{color:#bca8cb;font-size:.72rem;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+.types{display:flex;gap:5px;margin-top:9px;flex-wrap:wrap}.type{font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;padding:4px 7px;border-radius:20px;background:#67328a66;border:1px solid #a45ed955;color:#ead5ff}
+.status{text-align:center;color:var(--muted);padding:34px 12px}.status.error{color:#ffb5c2}
+.pagination{display:flex;align-items:center;justify-content:center;gap:12px;margin:26px 0}.pagination span{color:var(--muted);font-size:.9rem}
+footer{text-align:center;color:#8f7aa1;font-size:.78rem;padding:28px 15px;border-top:1px solid #ffffff12}
+.modal{position:fixed;inset:0;background:#05020bdc;display:none;place-items:center;padding:18px;z-index:5;backdrop-filter:blur(9px)}.modal.open{display:grid}
+.detail{width:min(760px,100%);max-height:90vh;overflow:auto;border:1px solid #9e58cb88;border-radius:24px;background:linear-gradient(145deg,#27113b,#100819);padding:22px;box-shadow:0 0 65px #9d38e944;position:relative}
+.close{position:absolute;right:15px;top:15px;width:40px;height:40px;padding:0;font-size:1.2rem}
+.detailtop{display:grid;grid-template-columns:minmax(180px, .9fr) 1.1fr;gap:20px;align-items:center}
+.detailart{min-height:230px;display:grid;place-items:center}.detailart canvas{width:100%;max-height:270px;object-fit:contain;filter:drop-shadow(0 0 15px #c66cff) drop-shadow(0 0 35px #9d38e9)}
+.detail h2{text-transform:capitalize;font-size:2rem;margin:5px 0}.sub{color:var(--muted);text-transform:capitalize}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:17px}.statrow{background:#ffffff09;border:1px solid #ffffff12;border-radius:10px;padding:9px}.statrow small{display:block;color:#bca8cb;text-transform:capitalize}.statrow b{color:#f0d9ff}
+.loadingdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#d59bff;margin:0 4px;animation:pulse 1s infinite alternate}@keyframes pulse{to{opacity:.25;transform:scale(.6)}}
+@media(max-width:760px){.toolbar{grid-template-columns:1fr 1fr}.toolbar input{grid-column:1/-1}.detailtop{grid-template-columns:1fr}.detailart{min-height:190px}.grid{grid-template-columns:repeat(auto-fill,minmax(145px,1fr))}}
+@media(max-width:420px){.wrap{padding:18px 12px 45px}.grid{gap:10px}.card{min-height:205px;padding:10px}.art{height:130px}.toolbar{grid-template-columns:1fr}.toolbar input{grid-column:auto}}
+</style>
+</head>
+<body>
+<header><div class="brand">RADIANTDEX</div><p class="tagline">Discover the Radiant World</p></header>
+<main class="wrap">
+ <section class="hero">
+  <div><h1>Every Pokémon, reborn in purple.</h1><p>Explore official PokéAPI artwork transformed into a radiant, magical form.</p></div>
+  <div class="stat"><strong id="total">Loading…</strong><span>Pokémon & forms indexed</span></div>
+ </section>
+ <section class="toolbar" aria-label="Pokédex filters">
+  <input id="search" type="search" placeholder="Search Pokémon or form…" autocomplete="off">
+  <select id="generation"><option value="all">All generations</option><option value="1">Generation I</option><option value="2">Generation II</option><option value="3">Generation III</option><option value="4">Generation IV</option><option value="5">Generation V</option><option value="6">Generation VI</option><option value="7">Generation VII</option><option value="8">Generation VIII</option><option value="9">Generation IX</option></select>
+  <select id="sort"><option value="id">Pokédex order</option><option value="az">Name A–Z</option><option value="za">Name Z–A</option></select>
+  <button class="primary" id="searchBtn">Search</button>
+ </section>
+ <section class="exportbar" aria-label="Artwork export">
+  <p><b>Export the Radiant artwork:</b> generate full-resolution PNGs from the same purple effect shown on this website, packaged for MUFASA.</p>
+  <button class="primary" id="exportAll">Export all artwork (ZIP)</button>
+  <progress id="exportProgress" value="0" max="1" hidden></progress>
+  <span class="export-status" id="exportStatus" aria-live="polite">Ready to export</span>
+ </section>
+ <div id="status" class="status"><span class="loadingdot"></span> Connecting to PokéAPI…</div>
+ <section id="grid" class="grid" aria-live="polite"></section>
+ <div class="pagination"><button id="prev" disabled>← Previous</button><span id="page">Page 1</span><button id="next" disabled>Next →</button></div>
+</main>
+<footer>Artwork and Pokémon data provided by PokéAPI · RADIANTDEX is a fan-made project and is not affiliated with Nintendo, Game Freak or The Pokémon Company.</footer>
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Pokémon details"><div class="detail"><button class="close" id="close" aria-label="Close">×</button><div id="detailContent"></div></div></div>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+const API='https://pokeapi.co/api/v2';
+const PAGE_SIZE=48;
+const GEN_RANGES={1:[1,151],2:[152,251],3:[252,386],4:[387,493],5:[494,649],6:[650,721],7:[722,809],8:[810,905],9:[906,1025]};
+let all=[],filtered=[],page=1,detailCache=new Map(),listReady=false;
+const $=id=>document.getElementById(id);
+const status=(msg,error=false)=>{$('status').className='status'+(error?' error':'');$('status').innerHTML=msg;};
+function titleCase(s){return s.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}
+function idFromUrl(url){const m=url.match(/\/pokemon\/(\d+)\/?$/);return m?Number(m[1]):9999999}
+function generationFor(id){for(const [g,[a,b]] of Object.entries(GEN_RANGES))if(id>=a&&id<=b)return Number(g);return id>1025?9:1}
+function shade(r,g,b){
+ const y=(.2126*r+.7152*g+.0722*b)/255;
+ const stops=[[0,[25,3,48]],[.28,[83,13,139]],[.58,[157,42,226]],[.82,[211,126,255]],[1,[255,232,255]]];
+ let i=0;while(i<stops.length-2&&y>stops[i+1][0])i++;
+ const [p,a]=stops[i],[q,c]=stops[i+1],t=Math.max(0,Math.min(1,(y-p)/(q-p)));
+ return a.map((v,k)=>Math.round(v+(c[k]-v)*t));
+}
+function recolor(img,canvas){
+ const ctx=canvas.getContext('2d',{willReadFrequently:true});
+ const w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;
+ if(!w||!h)throw Error('Image unavailable');
+ const scale=Math.min(1,420/Math.max(w,h));canvas.width=Math.round(w*scale);canvas.height=Math.round(h*scale);
+ ctx.drawImage(img,0,0,canvas.width,canvas.height);
+ const frame=ctx.getImageData(0,0,canvas.width,canvas.height),d=frame.data;
+ for(let i=0;i<d.length;i+=4){if(d[i+3]===0)continue;const rgb=shade(d[i],d[i+1],d[i+2]);d[i]=rgb[0];d[i+1]=rgb[1];d[i+2]=rgb[2];}
+ ctx.putImageData(frame,0,0);
+}
+function imageUrl(p){return p.sprites?.other?.['official-artwork']?.front_default||p.sprites?.other?.home?.front_default||p.sprites?.front_default||''}
+async function drawRadiant(url,canvas){
+ if(!url){canvas.replaceWith(document.createTextNode('Artwork unavailable'));return}
+ const img=new Image();img.crossOrigin='anonymous';img.onload=()=>{try{recolor(img,canvas)}catch(e){const fallback=new Image();fallback.src=url;fallback.alt='Original Pokémon artwork';canvas.replaceWith(fallback)}};
+ img.onerror=()=>{canvas.replaceWith(document.createTextNode('Artwork unavailable'))};img.src=url;
+}
+async function getPokemon(entry){
+ if(detailCache.has(entry.name))return detailCache.get(entry.name);
+ const promise=fetch(entry.url).then(r=>{if(!r.ok)throw Error('PokéAPI request failed');return r.json()});
+ detailCache.set(entry.name,promise);return promise;
+}
+async function init(){
+ try{
+  const res=await fetch(`${API}/pokemon?limit=100000&offset=0`);if(!res.ok)throw Error('PokéAPI returned '+res.status);
+  const data=await res.json();
+  all=data.results.map(x=>({name:x.name,url:x.url,id:idFromUrl(x.url)})).sort((a,b)=>a.id-b.id||a.name.localeCompare(b.name));
+  $('total').textContent=all.length.toLocaleString();
+  listReady=true;applyFilters();
+ }catch(e){status('Could not load the PokéAPI list. Please check your connection and refresh. ('+e.message+')',true)}
+}
+function applyFilters(){
+ const q=$('search').value.trim().toLowerCase(),g=$('generation').value,sort=$('sort').value;
+ filtered=all.filter(x=>(!q||x.name.includes(q)||String(x.id)===q)&& (g==='all'||generationFor(x.id)===Number(g)));
+ if(sort==='az')filtered.sort((a,b)=>a.name.localeCompare(b.name));else if(sort==='za')filtered.sort((a,b)=>b.name.localeCompare(a.name));else filtered.sort((a,b)=>a.id-b.id||a.name.localeCompare(b.name));
+ page=1;render();
+}
+async function render(){
+ const grid=$('grid');grid.innerHTML='';
+ const pages=Math.max(1,Math.ceil(filtered.length/PAGE_SIZE));page=Math.min(page,pages);
+ $('page').textContent=`Page ${page} of ${pages} · ${filtered.length.toLocaleString()} results`;
+ $('prev').disabled=page<=1;$('next').disabled=page>=pages;
+ const slice=filtered.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE);
+ if(!slice.length){status('No Pokémon found. Try another name or filter.');return}
+ status(`<span class="loadingdot"></span> Loading ${slice.length} radiant forms…`);
+ const cards=slice.map(entry=>{
+  const card=document.createElement('article');card.className='card';card.tabIndex=0;card.setAttribute('role','button');card.setAttribute('aria-label','View '+entry.name);
+  card.innerHTML=`<span class="dexno">#${String(entry.id).padStart(4,'0')}</span><div class="art"><canvas aria-label="Radiant ${entry.name} artwork"></canvas></div><div class="name">${entry.name.replace(/-/g,' ')}</div><div class="formname">${entry.id>1025?'Alternate form / special entry':'Pokémon'}</div><div class="types"></div>`;
+  const open=()=>openDetail(entry);card.addEventListener('click',open);card.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open()}});
+  grid.appendChild(card);return {entry,card};
+ });
+ let index=0,done=0;
+ async function worker(){while(index<cards.length){const item=cards[index++];try{
+  const p=await getPokemon(item.entry);await drawRadiant(imageUrl(p),item.card.querySelector('canvas'));
+  item.card.querySelector('.formname').textContent=titleCase(p.name===p.species?.name?'Standard form':p.name.split('-').slice(1).join(' ')||'Standard form');
+  item.card.querySelector('.types').innerHTML=(p.types||[]).map(t=>`<span class="type">${t.type.name}</span>`).join('');
+ }catch(e){item.card.querySelector('.formname').textContent='Details unavailable'}
+ done++;if(done===cards.length)status(`Showing ${slice.length} radiant entries on this page.`);
+ }}
+ await Promise.all(Array.from({length:8},worker));
+}
+async function openDetail(entry){
+ $('modal').classList.add('open');$('detailContent').innerHTML='<div class="status"><span class="loadingdot"></span> Summoning radiant form…</div>';
+ try{
+  const p=await getPokemon(entry),species=p.species?.url?await fetch(p.species.url).then(r=>r.json()):null;
+  const canvas=document.createElement('canvas');canvas.className='radiant-detail-canvas';
+  const types=(p.types||[]).map(t=>`<span class="type">${t.type.name}</span>`).join('');
+  const stats=(p.stats||[]).map(s=>`<div class="statrow"><small>${s.stat.name.replace('-',' ')}</small><b>${s.base_stat}</b></div>`).join('');
+  const abilities=(p.abilities||[]).map(a=>titleCase(a.ability.name)).join(', ');
+  $('detailContent').innerHTML=`<div class="detailtop"><div class="detailart" id="detailArt"></div><div><div class="sub">#${String(p.id).padStart(4,'0')} · ${titleCase(p.name)}</div><h2>${titleCase(p.name)}</h2><div class="types">${types}</div><p class="sub">Height ${(p.height/10).toFixed(1)} m · Weight ${(p.weight/10).toFixed(1)} kg</p><p><b>Abilities:</b> ${abilities}</p><p class="sub">${species?.flavor_text_entries?.find(x=>x.language.name==='en')?.flavor_text?.replace(/\\f|\\n/g,' ')||'A radiant Pokémon form from the PokéAPI Pokédex.'}</p></div></div><h3>Base stats</h3><div class="stats">${stats}</div>`;
+  $('detailArt').appendChild(canvas);await drawRadiant(imageUrl(p),canvas);
+ }catch(e){$('detailContent').innerHTML='<p class="status error">Could not load this Pokémon right now. Please try again.</p>'}
+}
+
+function safeFileName(name){return name.toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-|-$/g,'')||'pokemon'}
+function loadImage(url){return new Promise((resolve,reject)=>{const img=new Image();img.crossOrigin='anonymous';img.onload=()=>resolve(img);img.onerror=()=>reject(Error('Image failed to load'));img.src=url;})}
+function radiantPngBlob(img){
+ const canvas=document.createElement('canvas');canvas.width=img.naturalWidth||img.width;canvas.height=img.naturalHeight||img.height;
+ const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(img,0,0);
+ const frame=ctx.getImageData(0,0,canvas.width,canvas.height),d=frame.data;
+ for(let i=0;i<d.length;i+=4){if(d[i+3]===0)continue;const rgb=shade(d[i],d[i+1],d[i+2]);d[i]=rgb[0];d[i+1]=rgb[1];d[i+2]=rgb[2];}
+ ctx.putImageData(frame,0,0);
+ return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(Error('PNG encoding failed')),'image/png'));
+}
+async function exportAllArtwork(){
+ const btn=$('exportAll'),progress=$('exportProgress'),label=$('exportStatus');
+ if(!listReady||!all.length){label.textContent='Pokémon list is still loading.';return}
+ if(typeof JSZip==='undefined'){label.textContent='ZIP library unavailable. Check your internet connection.';return}
+ btn.disabled=true;progress.hidden=false;progress.max=all.length;progress.value=0;
+ const zip=new JSZip(),folder=zip.folder('RADIANTDEX_Artwork');let cursor=0,finished=0,failed=[];
+ label.textContent=`Preparing ${all.length.toLocaleString()} PNGs…`;
+ async function worker(){while(true){const index=cursor++;if(index>=all.length)return;const entry=all[index];try{
+   const pokemon=await getPokemon(entry),url=imageUrl(pokemon);if(!url)throw Error('No artwork URL');
+   const img=await loadImage(url),blob=await radiantPngBlob(img);
+   const filename=`${String(pokemon.id).padStart(4,'0')}_${safeFileName(pokemon.name)}.png`;
+   folder.file(filename,blob);
+  }catch(err){failed.push(`${entry.name}: ${err.message}`)}
+  finished++;progress.value=finished;label.textContent=`Processed ${finished.toLocaleString()} / ${all.length.toLocaleString()} · ${failed.length} skipped`;
+ }}
+ try{
+  await Promise.all(Array.from({length:3},worker));
+  label.textContent='Building ZIP…';
+  const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE',compressionOptions:{level:5}},meta=>{label.textContent=`Building ZIP… ${Math.round(meta.percent)}%`});
+  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='RADIANTDEX_Radiant_Artwork.zip';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  label.textContent=`ZIP downloaded · ${all.length-failed.length} PNGs${failed.length?` · ${failed.length} skipped`:''}`;
+  if(failed.length)console.warn('RADIANTDEX export skipped entries:',failed);
+ }catch(err){label.textContent='Export failed: '+err.message;console.error(err)}
+ finally{btn.disabled=false;}
+}
+$('exportAll').addEventListener('click',exportAllArtwork);
+
+$('searchBtn').addEventListener('click',applyFilters);$('search').addEventListener('keydown',e=>{if(e.key==='Enter')applyFilters()});
+$('generation').addEventListener('change',applyFilters);$('sort').addEventListener('change',applyFilters);
+$('prev').addEventListener('click',()=>{if(page>1){page--;render();window.scrollTo({top:0,behavior:'smooth'})}});
+$('next').addEventListener('click',()=>{if(page<Math.ceil(filtered.length/PAGE_SIZE)){page++;render();window.scrollTo({top:0,behavior:'smooth'})}});
+$('close').addEventListener('click',()=>$('modal').classList.remove('open'));
+$('modal').addEventListener('click',e=>{if(e.target===$('modal'))$('modal').classList.remove('open')});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')$('modal').classList.remove('open')});
+init();
+</script>
+</body></html>
