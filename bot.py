@@ -4,6 +4,10 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 import aiohttp
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+except ImportError:
+    Image = ImageEnhance = ImageFilter = None
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -549,6 +553,41 @@ def sprite(d, shiny=False):
     if shiny:
         return art.get('front_shiny') or s.get('front_shiny') or art.get('front_default') or s.get('front_default')
     return art.get('front_default') or s.get('front_default')
+
+async def radiant_sprite_file(d):
+    """Download official artwork and create a purple Radiant variant for Discord embeds."""
+    if Image is None:
+        return None
+    source = sprite(d, shiny=False)
+    if not source:
+        return None
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(source) as response:
+            response.raise_for_status()
+            raw = await response.read()
+    image = Image.open(io.BytesIO(raw)).convert('RGBA')
+    # Purple/lavender color grade while preserving the original Pokémon silhouette.
+    alpha = image.getchannel('A')
+    rgb = image.convert('RGB')
+    rgb = ImageEnhance.Color(rgb).enhance(1.35)
+    rgb = ImageEnhance.Brightness(rgb).enhance(1.12)
+    overlay = Image.new('RGB', rgb.size, (151, 55, 255))
+    rgb = Image.blend(rgb, overlay, 0.38)
+    tinted = rgb.convert('RGBA')
+    tinted.putalpha(alpha)
+    # Soft violet aura behind the transparent artwork.
+    glow_mask = alpha.filter(ImageFilter.GaussianBlur(max(5, image.width // 35)))
+    glow = Image.new('RGBA', image.size, (177, 75, 255, 0))
+    glow.putalpha(glow_mask.point(lambda value: int(value * 0.72)))
+    canvas = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    canvas.alpha_composite(glow)
+    canvas.alpha_composite(tinted)
+    output = io.BytesIO()
+    canvas.save(output, format='PNG', optimize=True)
+    output.seek(0)
+    safe_name = re.sub(r'[^a-z0-9_-]+', '-', str(d.get('name', 'pokemon')).lower()).strip('-') or 'pokemon'
+    return discord.File(output, filename=f'radiant-{safe_name}.png')
 def max_hp(d,lvl,iv_hp=0): return max(1,int((2*stats(d).get('hp',50)*lvl)/100+lvl+10)+int(max(0,min(31,int(iv_hp or 0)))*max(1,int(lvl))/100))
 def hp_bar(current, maximum, width=12):
     maximum=max(1,maximum); filled=max(0,min(width,round(current/maximum*width)))
@@ -2006,10 +2045,18 @@ class Game(commands.Cog):
             elif shiny:
                 e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
                 e.color=discord.Color.gold()
-            art=sprite(d,shiny=shiny)
-            if art:e.set_image(url=art)
             if radiant:e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
-            await ctx.reply(embed=e, mention_author=False)
+            if radiant:
+                
+                try: radiant_file = await radiant_sprite_file(d)
+                except Exception: radiant_file = None
+                if radiant_file: e.set_image(url=f'attachment://{radiant_file.filename}')
+                if radiant_file: await ctx.reply(embed=e, file=radiant_file, mention_author=False)
+                else: await ctx.reply(embed=e, mention_author=False)
+            else:
+                art=sprite(d,shiny=shiny)
+                if art:e.set_image(url=art)
+                await ctx.reply(embed=e, mention_author=False)
         except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
 
     @commands.command(name='add',aliases=['addboss','bossadd'])
@@ -2775,21 +2822,27 @@ class Game(commands.Cog):
         held_label=(ITEM_BY_KEY[held][2] if held in ITEM_BY_KEY else held.replace('-', ' ').title()) if held else 'None'
         e.add_field(name='Condition',value=f'**Status:** {(status or "healthy").replace("-"," ").title()}\n**Held item:** {item_emoji(held) + " " if held else ""}{held_label}\n**Ability:** {abilities}',inline=True)
         # Set art before move lookup, so move/API/DB errors cannot remove the Pokémon picture.
+        radiant_file = None
         if d:
-            art = sprite(d, shiny=bool(shiny))
-            if art:
-                e.set_image(url=art)
+            if radiant:
+                try: radiant_file = await radiant_sprite_file(d)
+                except Exception: radiant_file = None
+                if radiant_file: e.set_image(url=f'attachment://{radiant_file.filename}')
+            else:
+                art = sprite(d, shiny=bool(shiny))
+                if art: e.set_image(url=art)
         e.set_footer(text=f'Pokémon species / Pokédex ID: {dex_id} • Live collection data • !info defaults to your selected Pokémon')
-        await ctx.send(embed=e)
+        if radiant_file: await ctx.send(embed=e, file=radiant_file)
+        else: await ctx.send(embed=e)
 
     @commands.command(name='moves', aliases=['pmoves'], description="Show a Pokémon's saved Fast and Charged Moves.")
     async def moves(self, ctx, pokemon_id: Optional[int] = None):
         with db() as c:
             if pokemon_id is None:
-                row = c.execute('SELECT * FROM pokemon WHERE user_id=? AND instance_id IN (SELECT instance_id FROM team WHERE user_id=? ORDER BY slot LIMIT 1)', (ctx.author.id, ctx.author.id)).fetchone()
+                row = c.execute('SELECT *,radiant FROM pokemon WHERE user_id=? AND instance_id IN (SELECT instance_id FROM team WHERE user_id=? ORDER BY slot LIMIT 1)', (ctx.author.id, ctx.author.id)).fetchone()
             else:
                 internal_id=resolve_box_id(c,ctx.author.id,pokemon_id)
-                row = c.execute('SELECT * FROM pokemon WHERE instance_id=? AND user_id=?', (internal_id, ctx.author.id)).fetchone() if internal_id else None
+                row = c.execute('SELECT *,radiant FROM pokemon WHERE instance_id=? AND user_id=?', (internal_id, ctx.author.id)).fetchone() if internal_id else None
         if not row:
             return await ctx.send('❌ Pokémon not found. Use `!moves <pokemon_id>` or add a Pokémon to your team first.')
         try:
@@ -2801,7 +2854,7 @@ class Game(commands.Cog):
             charged = await move_data(saved[1])
         except Exception:
             return await ctx.send('❌ Could not load this Pokémon’s saved moves. Try again in a moment.')
-        shiny = '✨ Shiny ' if row[6] else ''
+        shiny = (RADIANT_EMOJI + ' Radiant ') if bool(row[-1]) else ('✨ Shiny ' if row[6] else '')
         with db() as c: display_iid=get_box_id(c,ctx.author.id,row[0]) or row[0]
         name = str(row[3]).replace('-', ' ').title()
         description = (
@@ -2814,20 +2867,27 @@ class Game(commands.Cog):
         embed = discord.Embed(title=f'{shiny}{name} · Move Set', description=description, color=discord.Color.blurple())
         embed.add_field(name='Battle flow', value='Use **Fast Move twice** to charge your attack. Then the Fast Move locks and the **Charged Move** becomes available. Using the Charged Move resets the cycle.', inline=False)
         embed.add_field(name='Changing moves', value='Your moves are saved permanently for this Pokémon. They only change when you use a matching TM: `!usetm fast-tm <pokemon_id>` or `!usetm charged-tm <pokemon_id>`. Elite Charged TM lets you choose the new Charged Move.', inline=False)
+        radiant_file = None
         try:
             d = await pokemon_data(str(row[2]))
-            image_url = sprite(d, shiny=bool(row[6]))
-            if image_url: embed.set_thumbnail(url=image_url)
+            radiant_flag = bool(row[-1]) if len(row) > 15 else False
+            if radiant_flag:
+                radiant_file = await radiant_sprite_file(d)
+                if radiant_file: embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
+            else:
+                image_url = sprite(d, shiny=bool(row[6]))
+                if image_url: embed.set_thumbnail(url=image_url)
             embed.add_field(name='Type', value=type_text(d), inline=True)
         except Exception:
             pass
         embed.set_footer(text='Saved moves • !moves defaults to your team lead')
-        await ctx.send(embed=embed)
+        if radiant_file: await ctx.send(embed=embed, file=radiant_file)
+        else: await ctx.send(embed=embed)
 
     @commands.command(name='pokemonadd',aliases=['pokeadd'],description='Developer-only: add a normal, shiny, or radiant Pokémon to a trainer after confirmation.')
     async def pokemonadd(self,ctx,member:discord.Member,*,pokemon_name:str):
-        if ctx.author.id not in OWNER_IDS:
-            return await ctx.send('🔒 This command is restricted to configured PokéVanta developers.')
+        if not self.is_dev(ctx):
+            return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
         raw_name=pokemon_name.strip()
         radiant=raw_name.lower().replace(' ','').startswith('radiant')
         shiny=raw_name.lower().replace(' ','').startswith('shiny')
@@ -2836,7 +2896,7 @@ class Game(commands.Cog):
         try:
             d=await pokemon_data(lookup)
         except Exception:
-            return await ctx.send('❌ Pokémon not found. Example: `!pokemonadd @user shinyeternatus`')
+            return await ctx.send('❌ Pokémon not found. Examples: `!pokemonadd @user shiny eternatus` or `!pokemonadd @user radiant pikachu`')
         mh=max_hp(d,50); label=((RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else ''))+display_name(d)
         # Admin Pokémon-add confirmations stay available until confirmed or cancelled.
         view=TimedView(timeout=None, timeout_text='')
@@ -2861,15 +2921,41 @@ class Game(commands.Cog):
             if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Only the command user can cancel this.',ephemeral=True)
             await interaction.response.edit_message(content='❎ Addition cancelled.',embed=None,view=None)
         yes.callback=yes_cb; no.callback=no_cb; view.add_item(yes); view.add_item(no)
-        art=sprite(d,shiny=shiny); embed=discord.Embed(title='Confirm Pokémon addition',description=f'Add **{label}** Lv. 50 to {member.mention}?')
-        if art: embed.set_image(url=art)
-        view.message=await ctx.send(embed=embed,view=view)
+        embed=discord.Embed(title='Confirm Pokémon addition',description=f'Add **{label}** Lv. 50 to {member.mention}?')
+        
+        try: radiant_file = await radiant_sprite_file(d) if radiant else None
+        except Exception: radiant_file = None
+        if radiant_file: embed.set_image(url=f'attachment://{radiant_file.filename}')
+        else:
+            art=sprite(d,shiny=shiny)
+            if art: embed.set_image(url=art)
+        if radiant_file: view.message=await ctx.send(embed=embed,view=view,file=radiant_file)
+        else: view.message=await ctx.send(embed=embed,view=view)
+
+    @commands.command(name='radiantremove', aliases=['removeradiant'])
+    async def radiantremove(self, ctx, member: discord.Member, pokemon_id: int):
+        if not self.is_dev(ctx):
+            return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
+        with db() as c:
+            internal_id = resolve_box_id(c, member.id, pokemon_id)
+            row = c.execute('SELECT instance_id,name,level,radiant FROM pokemon WHERE instance_id=? AND user_id=?', (internal_id, member.id)).fetchone() if internal_id else None
+        if not row:
+            return await ctx.send('❌ That Pokémon ID is not in that trainer’s box.')
+        if not row[3]:
+            return await ctx.send('❌ That Pokémon is not Radiant. Use `!box radiant` to find Radiant Pokémon.')
+        def action():
+            with db() as c:
+                c.execute('DELETE FROM team WHERE instance_id=?', (row[0],))
+                c.execute('DELETE FROM pokemon WHERE instance_id=? AND user_id=?', (row[0], member.id))
+                compact_box_ids(c, member.id)
+            return f'Removed {RADIANT_EMOJI} **{row[1].title()}** Lv. {row[2]} (ID `{pokemon_id}`) from {member.mention}.'
+        await self.dev_confirmation(ctx, 'Confirm Radiant Pokémon removal', f'Remove {RADIANT_EMOJI} **{row[1].title()}** (ID `{pokemon_id}`) from {member.mention}?', action)
 
     @commands.command(name='shinyhunt', aliases=['spawnshiny','shinyspawn'])
     async def shinyhunt(self, ctx, *, pokemon_name: str = None):
         """Owner-only: spawn a random shiny, or specify one; first correct server guess wins."""
-        if ctx.author.id not in OWNER_IDS:
-            return
+        if not self.is_dev(ctx):
+            return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
 
         # No name supplied = choose a random Pokémon. A name supplied = spawn that one.
         if pokemon_name and pokemon_name.strip():
@@ -4525,7 +4611,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
     @commands.command(name='coinsadd',aliases=['addcoins'])
     async def coinsadd(self,ctx,member:discord.Member,amount:int):
-        if not self.is_dev(ctx): return
+        if not self.is_dev(ctx): return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
         if amount <= 0 or amount > 1_000_000_000: return await ctx.send('❌ Amount must be between 1 and 1,000,000,000 VantaCoins.')
         def action():
             add_progress(member.id,coins=amount)
@@ -4534,7 +4620,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
     @commands.command(name='removecoins',aliases=['takecoins'])
     async def removecoins(self,ctx,member:discord.Member,amount:int):
-        if not self.is_dev(ctx): return
+        if not self.is_dev(ctx): return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
         if amount <= 0 or amount > 1_000_000_000: return await ctx.send('❌ Amount must be between 1 and 1,000,000,000 VantaCoins.')
         def action():
             old=get_player(member.id)[0]; new=max(0,old-amount)
@@ -4544,19 +4630,20 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
     @commands.command(name='removepokemon',aliases=['removepoke'])
     async def removepokemon(self,ctx,member:discord.Member,pokemon_id:int):
-        if not self.is_dev(ctx): return
+        if not self.is_dev(ctx): return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
         public_box_id=pokemon_id
         with db() as c: pokemon_id=resolve_box_id(c,member.id,pokemon_id)
         if pokemon_id is None:return await ctx.send('❌ That Pokémon ID is not in that trainer’s box.')
-        with db() as c: row=c.execute('SELECT instance_id,name,shiny,level FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,member.id)).fetchone()
+        with db() as c: row=c.execute('SELECT instance_id,name,shiny,level,radiant FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,member.id)).fetchone()
         if not row: return await ctx.send('❌ That Pokémon ID does not belong to that user.')
         def action():
             with db() as c:
                 c.execute('DELETE FROM team WHERE instance_id=?',(pokemon_id,))
                 c.execute('DELETE FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,member.id))
                 compact_box_ids(c, member.id)
-            return f'Removed {"✨ Shiny " if row[2] else ""}**{row[1].title()}** Lv. {row[3]} (ID `{public_box_id}`) from {member.mention}. Their remaining box IDs have been reordered.'
-        await self.dev_confirmation(ctx,'Confirm Pokémon removal',f'Remove **{row[1].title()}** (ID `{public_box_id}`) from {member.mention}?',action)
+            return f'Removed **{row[1].title()}** Lv. {row[3]} (ID `{public_box_id}`) from {member.mention}. Their remaining box IDs have been reordered.'
+        variant = RADIANT_EMOJI + ' Radiant ' if len(row) > 4 and row[4] else ('✨ Shiny ' if row[2] else '')
+        await self.dev_confirmation(ctx,'Confirm Pokémon removal',f'Remove **{variant}{row[1].title()}** (ID `{public_box_id}`) from {member.mention}?',action)
 
     @commands.command(name='setupitememojis')
     @commands.guild_only()
@@ -7182,9 +7269,9 @@ class EventsMissions(commands.Cog):
     @commands.command(name='devhelp', aliases=['devcommands', 'devcmds'], description='Developer-only: list current Pokémon and event administration commands.')
     async def devhelp(self, ctx):
         if ctx.author.id not in OWNER_IDS:
-            return await ctx.send('🔒 This command is restricted to configured PokéVanta developers.')
+            return await ctx.send('🔒 This command is restricted to configured PokéVanta developers. Add your Discord user ID to OWNER_IDS / DISCORD_OWNER_IDS and restart the bot.')
         e = discord.Embed(title='🛠️ PokéVanta Developer Command Guide', description='Current developer tools for Pokémon gameplay, economy, and the Event Token shop. Double-check currency or inventory changes before confirming.', color=discord.Color.from_rgb(118, 83, 220))
-        e.add_field(name='🎮 Pokémon & gameplay', value='`!pokemonadd @user <pokemon name>` — add Pokémon (confirmation)\n`!removepokemon @user <box ID>` — remove Pokémon (confirmation)\n`!shinyhunt [pokemon name]` — spawn a server-wide shiny\n`!pass add @user <quantity>` — grant Raid Passes\n`!gameoff` / `!gameon` — maintenance pause/resume', inline=False)
+        e.add_field(name='🎮 Pokémon & gameplay', value='`!pokemonadd @user <pokemon name>` — add normal Pokémon; prefix with `shiny` or `radiant` for variants (confirmation)\n`!removepokemon @user <box ID>` — remove Pokémon (confirmation)\n`!radiantremove @user <box ID>` — remove only a Radiant Pokémon (confirmation)\n`!shinyhunt [pokemon name]` — spawn a server-wide shiny\n`!pass add @user <quantity>` — grant Raid Passes\n`!gameoff` / `!gameon` — maintenance pause/resume', inline=False)
         e.add_field(name='💰 Economy & inventory', value='`!coinsadd @user <amount>` / `!removecoins @user <amount>` — adjust VantaCoins\n`!eventtoken add @user <amount>` / `remove` — adjust Event Tokens\n`!eventitem add @user <event_relic|champion_trophy> <quantity>` / `remove` — manage shop collectibles', inline=False)
         e.add_field(name='🌌 Events & missions', value='`!event start <type>|<goal>|<hours>` — start global event\n`!event end` / `pause` / `resume` — manage event state\n`!event setgoal <points>` / `setduration <hours>` / `announce`\n`!eventimage set <event> <HTTPS URL>` / `show` / `remove` / `list`\n`!mprewards` / `!mpclaim` — weekly MP rewards (reset Monday 00:00 IST)', inline=False)
         e.add_field(name='🧩 Setup & logs', value='`!setupitememojis` — install shop item emojis\n`!setupvantacoin` — configure VantaCoin emoji\n`!gamelogs` — view developer Pokémon/trading/economy logs', inline=False)
