@@ -137,7 +137,7 @@ ITEM_EMOJI = {
  'spell-tag':'📜','dragon-fang':'🦷','silk-scarf':'🧵','sharp-beak':'🪶','poison-barb':'🦂',
  'soft-sand':'🏜️','hard-stone':'🪨','silver-powder':'✨','black-glasses':'🌑','twisted-spoon':'🥄',
  'metal-coat':'🛡️','pixie-plate':'🧚','potion':'🧪','super-potion':'⚗️','hyper-potion':'💉',
- 'max-potion':'❤️‍🩹','full-restore':'💖','fast-tm':'⚡','charged-tm':'🔋','elite-charged-tm':'🌟'
+ 'max-potion':'','full-restore':'','fast-tm':'⚡','charged-tm':'🔋','elite-charged-tm':'🌟'
 }
 # Official item sprites are uploaded to this Discord server as custom emojis by
 # !setupitememojis. The mapping is persisted beside bot.py so restarts keep working.
@@ -555,9 +555,9 @@ def sprite(d, shiny=False):
     return art.get('front_default') or s.get('front_default')
 
 async def radiant_sprite_file(d):
-    """Download official artwork and create a purple Radiant variant for Discord embeds."""
+    """Fetch PokeAPI official artwork and apply the bot-wide consistent violet Radiant treatment."""
     if Image is None:
-        return None
+        raise RuntimeError('Pillow is required for Radiant artwork. Install it with: python -m pip install pillow')
     source = sprite(d, shiny=False)
     if not source:
         return None
@@ -2049,7 +2049,9 @@ class Game(commands.Cog):
             if radiant:
                 
                 try: radiant_file = await radiant_sprite_file(d)
-                except Exception: radiant_file = None
+                except Exception as exc:
+                    print(f'Radiant artwork failed for {d.get("name", "unknown")}: {exc!r}')
+                    radiant_file = None
                 if radiant_file: e.set_image(url=f'attachment://{radiant_file.filename}')
                 if radiant_file: await ctx.reply(embed=e, file=radiant_file, mention_author=False)
                 else: await ctx.reply(embed=e, mention_author=False)
@@ -2826,7 +2828,9 @@ class Game(commands.Cog):
         if d:
             if radiant:
                 try: radiant_file = await radiant_sprite_file(d)
-                except Exception: radiant_file = None
+                except Exception as exc:
+                    print(f'Radiant artwork failed for {d.get("name", "unknown")}: {exc!r}')
+                    radiant_file = None
                 if radiant_file: e.set_image(url=f'attachment://{radiant_file.filename}')
             else:
                 art = sprite(d, shiny=bool(shiny))
@@ -2925,7 +2929,8 @@ class Game(commands.Cog):
         
         try: radiant_file = await radiant_sprite_file(d) if radiant else None
         except Exception: radiant_file = None
-        if radiant_file: embed.set_image(url=f'attachment://{radiant_file.filename}')
+        if radiant:
+            if radiant_file: embed.set_image(url=f'attachment://{radiant_file.filename}')
         else:
             art=sprite(d,shiny=shiny)
             if art: embed.set_image(url=art)
@@ -4662,6 +4667,18 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         except (OSError, ValueError, TypeError):
             pass
 
+        # Discard stale custom-emoji mappings whose emoji was deleted from every
+        # server the bot can access. This lets !setupitememojis recreate deleted sprites.
+        available_emoji_ids = {
+            str(emoji.id)
+            for source_guild in self.bot.guilds
+            for emoji in source_guild.emojis
+        }
+        for item_key, markup in list(saved.items()):
+            match = re.search(r':(\d{15,})>', str(markup))
+            if match and match.group(1) not in available_emoji_ids:
+                saved.pop(item_key, None)
+
         # Reuse item emojis from ANY server this bot belongs to, instead of
         # trying to upload a duplicate into the server where the command ran.
         # Discord custom emoji markup (str(emoji)) stores both the name and ID.
@@ -4701,7 +4718,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             candidates = [key]
             if key in fallback_by_item:
                 candidates.append(fallback_by_item[key])
-            if key in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}:
+            if key in {'max-potion', 'full-restore'}:
+                # These have their own official sprites; never substitute Potion art.
+                pass
+            elif key in {'potion', 'super-potion', 'hyper-potion'}:
                 candidates.append(fallback_by_group['potion'])
             elif 'tm' in key:
                 candidates.append(fallback_by_group['tm'])
