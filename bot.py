@@ -5501,46 +5501,63 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         daily_raid_passes = 2
         daily_rare_candies = 3
         daily_booster_coins = 10000 if booster_active else 0
-        coins,xp,l,last,streak=get_player(uid)
         now=int(time.time())
-        if last and now-last<86400:
-            remaining=max(0,86400-(now-last))
-            hours,seconds=divmod(remaining,3600)
-            minutes=(seconds//60)
-            return await ctx.send(f'⏳ Your daily reward is already claimed. Come back in **{hours}h {minutes}m**.')
         if not POKEMON_LIST:
             return await ctx.send('⚠️ The Pokémon list is still loading. Your daily reward has not been claimed; please try again shortly.')
-        if last and now-last<=172800:
-            streak+=1
-        else:
-            streak=1
-        legendary=streak%50==0
-        if legendary:
-            candidates=[x for x in POKEMON_LIST if x.get('name') in LEGENDARY_NAMES]
-        else:
-            candidates=[x for x in POKEMON_LIST if x.get('name') not in LEGENDARY_NAMES]
-        # Avoid a crash if the API's loaded catalogue has no entries in one category.
-        if not candidates:
-            candidates=list(POKEMON_LIST)
+
+        # Load the Pokémon before claiming, so an API failure never consumes a daily.
+        # The actual cooldown check and reward write are then serialized by SQLite.
         try:
+            with db() as c:
+                row=c.execute('SELECT daily,daily_streak FROM players WHERE user_id=?',(uid,)).fetchone()
+            last,streak = (row[0],row[1]) if row else (None,0)
+            if last and now-int(last)<=172800:
+                candidates=[x for x in POKEMON_LIST if x.get('name') in LEGENDARY_NAMES] if (int(streak)+1)%50==0 else [x for x in POKEMON_LIST if x.get('name') not in LEGENDARY_NAMES]
+            else:
+                candidates=[x for x in POKEMON_LIST if x.get('name') not in LEGENDARY_NAMES]
+            if not candidates:
+                candidates=list(POKEMON_LIST)
             pick=await pokemon_data(random.choice(candidates)['name'])
-        except Exception:
+        except Exception as exc:
+            print(f'[DAILY PREP ERROR] user={uid}: {type(exc).__name__}: {exc}')
             return await ctx.send('⚠️ Could not load your daily Pokémon right now. No reward or streak was consumed; please try again shortly.')
+
         lvl=random.randint(10,30); mh=max_hp(pick,lvl)
-        with db() as c:
-            owned, capacity = pokemon_storage_status(c, uid)
-            storage_full = owned >= capacity
-            c.execute('UPDATE players SET daily=?,daily_streak=?,coins=coins+? WHERE user_id=?',(now,streak,daily_booster_coins,uid))
-            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', ?) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+excluded.amount",(uid,daily_raid_passes))
-            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', ?) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+excluded.amount",(uid,daily_rare_candies))
-            box_id = None
-            if not storage_full:
-                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh))
-                iid=cur.lastrowid
-                assign_box_id(c,uid,iid)
-                box_id=get_box_id(c,uid,iid)
-                if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
-                    c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
+        try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                c.execute('INSERT OR IGNORE INTO players(user_id) VALUES(?)',(uid,))
+                row=c.execute('SELECT daily,daily_streak FROM players WHERE user_id=?',(uid,)).fetchone()
+                last,old_streak=row if row else (None,0)
+                if last and now-int(last)<86400:
+                    remaining=max(0,86400-(now-int(last)))
+                    hours,seconds=divmod(remaining,3600)
+                    minutes=seconds//60
+                    c.rollback()
+                    return await ctx.send(f'⏳ Your daily reward is already claimed. Come back in **{hours}h {minutes}m**.')
+                streak=int(old_streak)+1 if last and now-int(last)<=172800 else 1
+                legendary=streak%50==0
+                # Re-select from the correct pool if another concurrent claim changed the streak.
+                if legendary != (pick.get('name') in LEGENDARY_NAMES):
+                    c.rollback()
+                    return await ctx.send('⚠️ Your daily reward was being claimed at the same time. Please run `!daily` again.')
+                owned, capacity = pokemon_storage_status(c, uid)
+                storage_full = owned >= capacity
+                c.execute('UPDATE players SET daily=?,daily_streak=?,coins=coins+? WHERE user_id=?',(now,streak,daily_booster_coins,uid))
+                c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', ?) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+excluded.amount",(uid,daily_raid_passes))
+                c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', ?) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+excluded.amount",(uid,daily_rare_candies))
+                box_id = None
+                if not storage_full:
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh))
+                    iid=cur.lastrowid
+                    assign_box_id(c,uid,iid)
+                    box_id=get_box_id(c,uid,iid)
+                    if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
+                        c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
+        except sqlite3.Error as exc:
+            print(f'[DAILY DATABASE ERROR] user={uid}: {type(exc).__name__}: {exc}')
+            return await ctx.send('❌ Your daily reward could not be saved. Please try again shortly.')
+
         booster_text = f'\n💜 Server Booster bonus: +{daily_booster_coins:,} VantaCoins!' if booster_active else ''
         if storage_full:
             await ctx.send(f'🎁 **Daily reward claimed!**\n{item_display("raid-pass", "Raid Passes")} +{daily_raid_passes} • {item_display("rare-candy", "Rare Candies")} +{daily_rare_candies}{booster_text}\n⚠️ No daily Pokémon was added because your storage is full ({owned}/{capacity}).\n' + pokemon_storage_full_message(owned, capacity))
@@ -7806,6 +7823,13 @@ class CarlStyleExtensions(commands.Cog):
         if role.is_default() or role.managed: return await ctx.send('Choose a normal, assignable role.')
         emoji=emoji.strip()
         try:
+            parsed_emoji=discord.PartialEmoji.from_str(emoji)
+            emoji=str(parsed_emoji) if parsed_emoji.id else emoji
+            bot_member=ctx.guild.me
+            if not bot_member or not bot_member.guild_permissions.manage_roles:
+                return await ctx.send('❌ I need **Manage Roles** permission to assign reaction roles.')
+            if role >= bot_member.top_role:
+                return await ctx.send('❌ Move my bot role above the reaction role in **Server Settings → Roles**, then try again.')
             msg=await ctx.channel.fetch_message(message_id)
             await msg.add_reaction(emoji)
         except discord.NotFound:
@@ -8308,10 +8332,21 @@ class CarlStyleExtensions(commands.Cog):
         with db() as c: settings=dict(c.execute('SELECT key,value FROM cv_settings WHERE guild_id=?',(member.guild.id,)).fetchall())
         role_id=settings.get('autorole_id')
         if role_id:
-            role=member.guild.get_role(int(role_id))
-            if role and not role.managed:
-                try: await member.add_roles(role,reason='Configured PokéVanta autorole')
-                except (discord.Forbidden,discord.HTTPException): pass
+            try:
+                role=member.guild.get_role(int(role_id))
+                me=member.guild.me
+                if role is None:
+                    print(f'[AUTOROLE ERROR] guild={member.guild.id}: configured role {role_id} no longer exists; run !setautorole again.')
+                elif role.is_default() or role.managed:
+                    print(f'[AUTOROLE ERROR] guild={member.guild.id}: configured role {role_id} is not assignable.')
+                elif me is None or not me.guild_permissions.manage_roles:
+                    print(f'[AUTOROLE ERROR] guild={member.guild.id}: bot is missing Manage Roles permission.')
+                elif role >= me.top_role:
+                    print(f'[AUTOROLE ERROR] guild={member.guild.id}: role {role.name!r} is at/above the bot highest role. Move the bot role above it.')
+                else:
+                    await member.add_roles(role,reason='Configured PokéVanta autorole')
+            except (ValueError, discord.Forbidden, discord.HTTPException) as exc:
+                print(f'[AUTOROLE ASSIGNMENT FAILED] guild={member.guild.id} user={member.id}: {type(exc).__name__}: {exc}')
         channel_id=settings.get('welcome_channel'); channel=member.guild.get_channel(int(channel_id)) if channel_id else None
         if channel:
             template=settings.get('welcome_message','Welcome {user} to {server}!')
@@ -8401,6 +8436,9 @@ class CarlStyleExtensions(commands.Cog):
                     member=None
             role=guild.get_role(rr[0])
             if member and role and not member.bot:
+                if role >= guild.me.top_role or not guild.me.guild_permissions.manage_roles:
+                    print(f'[REACTION ROLE CONFIG ERROR] guild={payload.guild_id}: bot cannot assign role={rr[0]}; check Manage Roles and role hierarchy.')
+                    return
                 try:
                     await member.add_roles(role,reason='Configured reaction role')
                 except (discord.Forbidden,discord.HTTPException) as exc:
@@ -10658,6 +10696,7 @@ class Bot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True  # Required for reliable member lists and join/leave events.
+        intents.guild_reactions = True  # Required for reaction-role add/remove events.
         super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
         self.add_check(self._check_command_blacklist)
 
