@@ -578,49 +578,61 @@ _RADIANT_ASSET_CACHE = {}
 _RADIANT_ARCHIVE_INDEX = None
 
 async def radiant_sprite_file(d):
-    """Prefer the exact exported RADIANTDEX PNG for this PokéAPI Pokémon.
-
-    Put RADIANTDEX_Radiant_Artwork.zip beside bot.py (or extract it into
-    RADIANTDEX_Artwork/). If an exported file is unavailable, fall back to
-    the same palette conversion so the command can still show artwork.
-    """
+    """Load exported Radiant artwork from either the PNG or HQ WebP archive."""
     pokemon_id = d.get('id')
     pokemon_name = str(d.get('name', 'pokemon')).lower()
     safe_asset_name = re.sub(r'[^a-zA-Z0-9._-]+', '_', pokemon_name)
-    asset_basename = f'{int(pokemon_id):04d}_{safe_asset_name}.png' if str(pokemon_id).isdigit() else None
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    if asset_basename:
-        if asset_basename in _RADIANT_ASSET_CACHE:
-            return discord.File(io.BytesIO(_RADIANT_ASSET_CACHE[asset_basename]), filename=f'radiant-{safe_asset_name}.png')
+    if str(pokemon_id).isdigit():
+        stem = f'{int(pokemon_id):04d}_{safe_asset_name}'
+        archive_names = (
+            'RADIANTDEX_Radiant_Artwork_HQ.zip',
+            'RadiantDex_Artwork_HQ.zip',
+            'RADIANTDEX_Radiant_Artwork.zip',
+            'RADIANTDEX_Radiant_Artwork_1.zip',
+            'RADIANTDEX_Radiant_Artwork_2.zip',
+        )
+        for extension, output_extension in (('.webp', '.webp'), ('.png', '.png')):
+            asset_basename = stem + extension
+            cache_key = asset_basename
+            if cache_key in _RADIANT_ASSET_CACHE:
+                return discord.File(io.BytesIO(_RADIANT_ASSET_CACHE[cache_key]),
+                                    filename=f'radiant-{safe_asset_name}{output_extension}')
 
-        # First support an already-extracted artwork folder.
-        extracted_path = os.path.join(base_dir, 'RADIANTDEX_Artwork', asset_basename)
-        try:
-            if os.path.isfile(extracted_path):
-                with open(extracted_path, 'rb') as asset_file:
-                    asset_bytes = asset_file.read()
-                if asset_bytes:
-                    _RADIANT_ASSET_CACHE[asset_basename] = asset_bytes
-                    return discord.File(io.BytesIO(asset_bytes), filename=f'radiant-{safe_asset_name}.png')
-        except OSError:
-            pass
+            # Also support artwork extracted into the conventional folder.
+            extracted_path = os.path.join(base_dir, 'RADIANTDEX_Artwork', asset_basename)
+            try:
+                if os.path.isfile(extracted_path):
+                    with open(extracted_path, 'rb') as asset_file:
+                        asset_bytes = asset_file.read()
+                    if asset_bytes:
+                        _RADIANT_ASSET_CACHE[cache_key] = asset_bytes
+                        return discord.File(io.BytesIO(asset_bytes),
+                                            filename=f'radiant-{safe_asset_name}{output_extension}')
+            except OSError:
+                pass
 
-        # Or read the matching PNG directly from the generated artwork ZIP.
-        archive_path = os.path.join(base_dir, 'RADIANTDEX_Radiant_Artwork.zip')
-        try:
-            if os.path.isfile(archive_path):
-                with zipfile.ZipFile(archive_path, 'r') as archive:
-                    match = next((member for member in archive.namelist()
-                                  if member.rsplit('/', 1)[-1] == asset_basename), None)
-                    if match:
-                        asset_bytes = archive.read(match)
-                        if asset_bytes:
-                            _RADIANT_ASSET_CACHE[asset_basename] = asset_bytes
-                            return discord.File(io.BytesIO(asset_bytes), filename=f'radiant-{safe_asset_name}.png')
-        except (OSError, zipfile.BadZipFile, KeyError):
-            pass
+            # Look up the exact member name inside the uploaded archive.
+            for archive_name in archive_names:
+                archive_path = os.path.join(base_dir, archive_name)
+                try:
+                    if not os.path.isfile(archive_path):
+                        continue
+                    with zipfile.ZipFile(archive_path, 'r') as archive:
+                        match = next((member for member in archive.namelist()
+                                      if member.rsplit('/', 1)[-1].lower() == asset_basename.lower()), None)
+                        if match:
+                            asset_bytes = archive.read(match)
+                            if asset_bytes:
+                                _RADIANT_ASSET_CACHE[cache_key] = asset_bytes
+                                return discord.File(io.BytesIO(asset_bytes),
+                                                    filename=f'radiant-{safe_asset_name}{output_extension}')
+                except (OSError, zipfile.BadZipFile, KeyError):
+                    continue
 
+    # If this Pokémon is not included in the exported set, retain the original
+    # PokéAPI-to-Radiant conversion fallback below.
     if Image is None:
         raise RuntimeError('Pillow is not installed. Install it with: python -m pip install pillow')
     sprites = d.get('sprites') or {}
@@ -651,7 +663,6 @@ async def radiant_sprite_file(d):
     try:
         image = Image.open(io.BytesIO(raw)).convert('RGBA')
         image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
-        # This is the same palette and luminance mapping as radiantdex_export.py.
         stops = [(0.0, (25, 3, 48)), (0.28, (83, 13, 139)),
                  (0.58, (157, 42, 226)), (0.82, (211, 126, 255)),
                  (1.0, (255, 232, 255))]
@@ -1719,16 +1730,34 @@ class BoxView(TimedView):
                 embed.add_field(name=field_name[:256], value=details[:1024], inline=False)
         embed.set_footer(text=f'Pokémon Box — {labels.get(self.category, "All Pokémon")} • Page {self.page+1}/{self.pages} • {len(self.entries)} Pokémon')
         return embed
+    async def render_page(self):
+        embed = self.make_embed()
+        artwork = None
+        current = self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]
+        if self.category == 'radiant':
+            radiant_row = next((row for row in current if len(row) > 9 and bool(row[9])), None)
+            if radiant_row:
+                try:
+                    pokemon = await pokemon_data(str(radiant_row[8]))
+                    artwork = await radiant_sprite_file(pokemon)
+                    embed.set_image(url=f'attachment://{artwork.filename}')
+                except Exception as exc:
+                    print(f'RADIANTDEX box artwork failed: {exc!r}')
+        return embed, artwork
     async def interaction_check(self, interaction):
         if interaction.user.id!=self.owner_id:
             await interaction.response.send_message('Only the player who opened this box can change pages.',ephemeral=True); return False
         return True
     @discord.ui.button(label='Previous',emoji='⬅️',style=discord.ButtonStyle.secondary)
     async def previous(self,interaction,button):
-        self.page=max(0,self.page-1); self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(),view=self)
+        self.page=max(0,self.page-1); self.update_buttons()
+        embed, artwork = await self.render_page()
+        await interaction.response.edit_message(embed=embed,attachments=[artwork] if artwork else [],view=self)
     @discord.ui.button(label='Next',emoji='➡️',style=discord.ButtonStyle.primary)
     async def next(self,interaction,button):
-        self.page=min(self.pages-1,self.page+1); self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(),view=self)
+        self.page=min(self.pages-1,self.page+1); self.update_buttons()
+        embed, artwork = await self.render_page()
+        await interaction.response.edit_message(embed=embed,attachments=[artwork] if artwork else [],view=self)
 
 
 class DexView(TimedView):
@@ -1758,6 +1787,18 @@ class DexView(TimedView):
             ('\n'.join(f"{'✅' if caught else '⬜'} `{self.id_prefix + format(dex_id, '03d') if self.id_prefix else '#' + format(dex_id, '04d')}` {name.replace('-', ' ').title()}" for dex_id,name,caught in current) if current else 'No species found for this category.'))
         embed.set_footer(text='Radiant Dex IDs are separate from National Dex IDs' if self.id_prefix else '✅ Registered • ⬜ Not registered • Normal and shiny entries are separate')
         return embed
+    async def render_page(self):
+        embed = self.make_embed()
+        artwork = None
+        current = self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]
+        if self.id_prefix == 'R' and current:
+            try:
+                pokemon = await pokemon_data(str(current[0][1]))
+                artwork = await radiant_sprite_file(pokemon)
+                embed.set_image(url=f'attachment://{artwork.filename}')
+            except Exception as exc:
+                print(f'RADIANTDEX Pokédex page artwork failed: {exc!r}')
+        return embed, artwork
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message('Only the player who opened this Pokédex can change pages.', ephemeral=True)
@@ -1765,10 +1806,14 @@ class DexView(TimedView):
         return True
     @discord.ui.button(label='Previous',emoji='⬅️',style=discord.ButtonStyle.secondary)
     async def previous(self,interaction,button):
-        self.page=max(0,self.page-1); self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(),view=self)
+        self.page=max(0,self.page-1); self.update_buttons()
+        embed, artwork = await self.render_page()
+        await interaction.response.edit_message(embed=embed,attachments=[artwork] if artwork else [],view=self)
     @discord.ui.button(label='Next',emoji='➡️',style=discord.ButtonStyle.primary)
     async def next(self,interaction,button):
-        self.page=min(self.pages-1,self.page+1); self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(),view=self)
+        self.page=min(self.pages-1,self.page+1); self.update_buttons()
+        embed, artwork = await self.render_page()
+        await interaction.response.edit_message(embed=embed,attachments=[artwork] if artwork else [],view=self)
 
 
 class Game(commands.Cog):
@@ -2866,7 +2911,9 @@ class Game(commands.Cog):
                 radiant_rows=c.execute('SELECT radiant_dex_id,name FROM radiant_pokedex_entries WHERE user_id=? ORDER BY radiant_dex_id',(ctx.author.id,)).fetchall()
             entries=[(int(r[0]),str(r[1]),True) for r in radiant_rows]
             view=DexView(ctx.author.id,entries,False,'Radiant Pokédex',len(entries),len(entries),id_prefix='R')
-            msg=await ctx.send(embed=view.make_embed(),view=view); view.message=msg
+            dex_embed, dex_artwork = await view.render_page()
+            msg=await ctx.send(embed=dex_embed,view=view,file=dex_artwork) if dex_artwork else await ctx.send(embed=dex_embed,view=view)
+            view.message=msg
             return
         gen_ranges={1:(1,151,'Kanto (Gen 1)'),2:(152,251,'Johto (Gen 2)'),3:(252,386,'Hoenn (Gen 3)'),4:(387,493,'Sinnoh (Gen 4)'),5:(494,649,'Unova (Gen 5)'),6:(650,721,'Kalos (Gen 6)'),7:(722,809,'Alola (Gen 7)'),8:(810,905,'Galar (Gen 8)'),9:(906,1025,'Paldea (Gen 9)')}
         region_aliases={'kanto':1,'johto':2,'hoenn':3,'sinnoh':4,'unova':5,'kalos':6,'alola':7,'galar':8,'paldea':9}
@@ -2974,7 +3021,8 @@ class Game(commands.Cog):
         entries=[(r[0],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[1],r[9]) for r in rows]
         await ensure_box_pokemon_emojis(ctx.guild, entries[:BoxView.ITEMS_PER_PAGE])
         view=BoxView(ctx.author.id,entries,category,ctx.guild)
-        view.message=await ctx.send(embed=view.make_embed(),view=view)
+        box_embed, box_artwork = await view.render_page()
+        view.message=await ctx.send(embed=box_embed,view=view,file=box_artwork) if box_artwork else await ctx.send(embed=box_embed,view=view)
 
     @commands.command(name='info',aliases=['pinfo','stats'],description="Show a Pokémon's current HP, stats and status conditions.")
     async def info(self,ctx,pokemon_id:Optional[int]=None):
