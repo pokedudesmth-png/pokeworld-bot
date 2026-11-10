@@ -6181,8 +6181,22 @@ class CarlStyleExtensions(commands.Cog):
             return await ctx.send('❌ I could not find that message in this channel. Run `!reactionrole` in the same channel as the target message.')
         except discord.Forbidden:
             return await ctx.send('❌ I lack **View Channel**, **Read Message History**, or **Add Reactions** permission in this channel.')
-        except (discord.HTTPException, discord.InvalidArgument) as exc:
-            return await ctx.send(f'❌ I could not add that reaction (`{type(exc).__name__}`). Check the emoji is valid and the bot can use it.')
+        except discord.HTTPException as exc:
+            # Discord error 10014 means the custom emoji is unknown/unavailable
+            # to this bot (deleted emoji, typo, or emoji from an inaccessible server).
+            if getattr(exc, 'code', None) == 10014:
+                return await ctx.send(
+                    '❌ **Unknown emoji.** Use a standard emoji such as `🎮`, or a custom emoji '
+                    'that is available to this bot. For custom emoji, try pasting its full '
+                    'Discord emoji (for example, `<:name:123456789012345678>`).'
+                )
+            return await ctx.send(
+                f'❌ Discord rejected that reaction (HTTP {getattr(exc, "status", "unknown")}, '
+                f'code {getattr(exc, "code", "unknown")}). Check the emoji and the bot’s '
+                'Add Reactions permission.'
+            )
+        except (TypeError, ValueError) as exc:
+            return await ctx.send(f'❌ Invalid emoji input: {exc}')
         with db() as c:
             c.execute('INSERT OR REPLACE INTO cv_reaction_roles VALUES(?,?,?,?,?)',(ctx.guild.id,msg.channel.id,msg.id,emoji,role.id))
         await ctx.send(f'✅ Reaction role configured: react with {emoji} on [this message]({msg.jump_url}) to receive {role.mention}.')
@@ -6338,28 +6352,60 @@ class CarlStyleExtensions(commands.Cog):
             await ctx.send(f'✅ Removed {role.mention} from {member.mention}.')
         except discord.Forbidden: await ctx.send('❌ Discord denied the role change; check Manage Roles and role hierarchy.')
 
-    @commands.hybrid_command(name='rolecreate', description='Create a server role. Optional color can be a hex value like #5865F2.')
-    async def rolecreate(self, ctx, name: str, color: str = None):
-        """Create a new server role: !rolecreate <name> [hex_color]."""
+    @commands.hybrid_command(name='rolecreate', description='Create a server role with an optional colour name in angle brackets, e.g. <yellow>.')
+    async def rolecreate(self, ctx, *, role_details: str):
+        """Create a role: !rolecreate king of the world <yellow>."""
         if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'): return
         if not ctx.guild: return await ctx.send('❌ This command only works in a server.')
-        name = name.strip()
-        if not name or len(name) > 100:
-            return await ctx.send('❌ Role names must be between 1 and 100 characters.')
-        role_color = discord.Color.default()
-        if color:
-            try:
-                value = color.strip().removeprefix('#').removeprefix('0x')
-                if len(value) not in (3, 6) or any(ch not in '0123456789abcdefABCDEF' for ch in value):
-                    raise ValueError('invalid hex color')
-                if len(value) == 3:
-                    value = ''.join(ch * 2 for ch in value)
-                role_color = discord.Color(int(value, 16))
-            except (TypeError, ValueError):
-                return await ctx.send('❌ Invalid color. Use a hex color such as `#5865F2`, or omit the color.')
+
+        role_details = role_details.strip()
+        colour_names = {
+            'default': discord.Color.default(),
+            'white': discord.Color.from_rgb(255, 255, 255),
+            'black': discord.Color.from_rgb(0, 0, 0),
+            'red': discord.Color.from_rgb(237, 66, 69),
+            'dark red': discord.Color.from_rgb(153, 0, 0),
+            'orange': discord.Color.from_rgb(230, 126, 34),
+            'gold': discord.Color.from_rgb(241, 196, 15),
+            'yellow': discord.Color.from_rgb(255, 230, 0),
+            'green': discord.Color.from_rgb(46, 204, 113),
+            'dark green': discord.Color.from_rgb(0, 100, 0),
+            'lime': discord.Color.from_rgb(166, 255, 0),
+            'teal': discord.Color.from_rgb(26, 188, 156),
+            'cyan': discord.Color.from_rgb(0, 220, 220),
+            'blue': discord.Color.from_rgb(52, 152, 219),
+            'dark blue': discord.Color.from_rgb(0, 51, 153),
+            'navy': discord.Color.from_rgb(0, 0, 128),
+            'purple': discord.Color.from_rgb(155, 89, 182),
+            'violet': discord.Color.from_rgb(138, 43, 226),
+            'magenta': discord.Color.from_rgb(255, 0, 255),
+            'pink': discord.Color.from_rgb(255, 105, 180),
+            'hot pink': discord.Color.from_rgb(255, 20, 147),
+            'brown': discord.Color.from_rgb(139, 69, 19),
+            'gray': discord.Color.from_rgb(128, 128, 128),
+            'grey': discord.Color.from_rgb(128, 128, 128),
+            'light gray': discord.Color.from_rgb(211, 211, 211),
+            'light grey': discord.Color.from_rgb(211, 211, 211),
+        }
+        match = re.search(r'\s+<([^<>]+)>\s*$', role_details)
+        colour_label = None
+        if match:
+            colour_label = match.group(1).strip().casefold()
+            role_name = role_details[:match.start()].strip()
+            if colour_label not in colour_names:
+                choices = ', '.join(sorted(colour_names))
+                return await ctx.send(f'❌ Unknown colour **{match.group(1).strip()}**. Try one of: {choices}.')
+            role_color = colour_names[colour_label]
+        else:
+            role_name = role_details
+            role_color = discord.Color.default()
+
+        if not role_name or len(role_name) > 100:
+            return await ctx.send('❌ Role names must be between 1 and 100 characters. Example: `!rolecreate king of the world <yellow>`.')
         try:
-            role = await ctx.guild.create_role(name=name, color=role_color, reason=f'Role created by {ctx.author} ({ctx.author.id})')
-            await ctx.send(f'✅ Created role {role.mention} (`{role.name}`).', allowed_mentions=discord.AllowedMentions.none())
+            role = await ctx.guild.create_role(name=role_name, color=role_color, reason=f'Role created by {ctx.author} ({ctx.author.id})')
+            colour_text = f' with **{colour_label}** colour' if colour_label else ' with the default colour'
+            await ctx.send(f'✅ Created role {role.mention} (`{role.name}`){colour_text}.', allowed_mentions=discord.AllowedMentions.none())
         except discord.Forbidden:
             await ctx.send('❌ I cannot create roles. Give the bot Manage Roles permission and move its highest role above the roles it manages.')
         except discord.HTTPException as exc:
