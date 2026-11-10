@@ -1063,7 +1063,21 @@ async def send_developer_log(bot, category, title, description, *, guild=None, u
         if user is not None:
             e.add_field(name='Trainer', value=f'{discord.utils.escape_markdown(str(user))} (`{user.id}`)', inline=True)
         await channel.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+        # Store only events that were successfully delivered to the private log channel.
+        with db() as c:
+            c.execute(
+                'INSERT INTO game_logs(created_at,category,user_id,guild_id,command,details) VALUES(?,?,?,?,?,?)',
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    category,
+                    getattr(user, 'id', None),
+                    getattr(guild, 'id', None),
+                    title[:100],
+                    re.sub(r'\s+', ' ', discord.utils.escape_mentions(description))[:1000],
+                )
+            )
     except Exception as exc:
+        # Delivery/database failures remain in the host console; they are never posted as event logs.
         print(f'[DEVELOPER LOG ERROR] category={category}: {type(exc).__name__}: {exc}')
 
 
@@ -2643,7 +2657,7 @@ class Game(commands.Cog):
             'tag': 'Tags & Custom Commands', 'tags': 'Tags & Custom Commands', 'tagset': 'Tags & Custom Commands', 'tagdelete': 'Tags & Custom Commands', 'ccset': 'Tags & Custom Commands', 'ccdelete': 'Tags & Custom Commands',
             'mute': 'Moderation', 'unmute': 'Moderation', 'kick': 'Moderation', 'clear': 'Moderation', 'slowmode': 'Moderation', 'lock': 'Moderation', 'unlock': 'Moderation', 'warn': 'Moderation', 'warnings': 'Moderation', 'clearwarnings': 'Moderation', 'removewarn': 'Moderation', 'role': 'Moderation', 'dump': 'Moderation',
             'ping': 'Utilities',
-            'setwelcome': 'Server Setup', 'setgoodbye': 'Server Setup', 'setlog': 'Server Setup', 'setautorole': 'Server Setup', 'setstarboard': 'Server Setup', 'rradd': 'Server Setup', 'rrremove': 'Server Setup', 'automodword': 'Server Setup', 'automodwords': 'Server Setup', 'setnick': 'Server Setup', 'roleadd': 'Server Setup', 'roleremove': 'Server Setup', 'rolecreate': 'Server Setup', 'roledelete': 'Server Setup', 'announce': 'Server Setup',
+            'setwelcome': 'Server Setup', 'setgoodbye': 'Server Setup', 'setlog': 'Server Setup', 'setautorole': 'Server Setup', 'setstarboard': 'Server Setup', 'rradd': 'Server Setup', 'rrremove': 'Server Setup', 'automodword': 'Server Setup', 'automodwords': 'Server Setup', 'setnick': 'Server Setup', 'rolecreate': 'Server Setup', 'roledelete': 'Server Setup', 'announce': 'Server Setup',
             'banbot': 'Developer Controls', 'unbanbot': 'Developer Controls', 'ban': 'Developer Controls', 'unban': 'Developer Controls', 'coinsadd': 'Developer Controls', 'removecoins': 'Developer Controls', 'removepokemon': 'Developer Controls', 'pokemonadd': 'Developer Controls', 'shinyhunt': 'Developer Controls', 'pass': 'Developer Controls', 'eventimage': 'Developer Controls', 'eventtoken': 'Developer Controls', 'eventitem': 'Developer Controls', 'gamelogs': 'Developer Controls', 'devhelp': 'Developer Controls', 'setupitememojis': 'Developer Setup', 'setupvantacoin': 'Developer Setup'
         }
         category_aliases = {
@@ -5923,16 +5937,113 @@ class CarlStyleExtensions(commands.Cog):
     async def setlog(self, ctx, channel: discord.TextChannel):
         if not await self.require_permission(ctx, 'manage_guild', 'Manage Server'): return
         if not ctx.guild: return
+        if channel.guild.id != ctx.guild.id:
+            return await ctx.send('❌ Choose a log channel from this server.')
+        me = ctx.guild.me
+        if me is None or not me.guild_permissions.manage_channels:
+            return await ctx.send('❌ I need **Manage Channels** to make the moderation log channel private.')
+        try:
+            # Hide the dedicated audit channel from @everyone and ordinary roles.
+            # Preserve access for server staff roles, the configuring moderator, and the bot.
+            for role in ctx.guild.roles:
+                overwrite = channel.overwrites_for(role)
+                if role.is_default():
+                    overwrite.view_channel = False
+                elif (role.permissions.administrator or role.permissions.manage_guild
+                      or role.permissions.manage_messages):
+                    overwrite.view_channel = True
+                    overwrite.read_message_history = True
+                else:
+                    overwrite.view_channel = False
+                await channel.set_permissions(
+                    role, overwrite=overwrite,
+                    reason='Restrict moderation audit logs to server staff'
+                )
+            staff_overwrite = channel.overwrites_for(ctx.author)
+            staff_overwrite.view_channel = True
+            staff_overwrite.read_message_history = True
+            await channel.set_permissions(
+                ctx.author, overwrite=staff_overwrite,
+                reason='Allow the moderator configuring the audit log to view it'
+            )
+            bot_overwrite = channel.overwrites_for(me)
+            bot_overwrite.view_channel = True
+            bot_overwrite.read_message_history = True
+            bot_overwrite.send_messages = True
+            bot_overwrite.embed_links = True
+            await channel.set_permissions(
+                me, overwrite=bot_overwrite,
+                reason='Allow the bot to write moderation audit logs'
+            )
+        except discord.Forbidden:
+            return await ctx.send('❌ I could not update this channel’s permissions. Check my **Manage Channels** permission and role position.')
+        except discord.HTTPException as exc:
+            return await ctx.send(f'❌ Discord rejected the channel permission update ({type(exc).__name__}).')
         self.setting(ctx.guild.id, 'log_channel', channel.id)
-        await ctx.send(f'✅ This server’s moderation and ticket log channel is set to {channel.mention}. Routine commands and button clicks will not be logged here. Developer game logs are configured separately with `!setpokemonlog`, `!settradinglog`, and `!setcoinlog`.')
+        await ctx.send(f'✅ This server’s moderation log channel is set to {channel.mention} and is now private to server staff. Staff roles with **Administrator**, **Manage Server**, or **Manage Messages** can view it, along with you and the bot. Routine commands and button clicks are not logged. Developer game logs remain separate.')
+
+    async def _make_developer_log_channel_private(self, ctx, channel):
+        """Lock a dedicated developer log channel to configured bot developers."""
+        if not ctx.guild or channel.guild.id != ctx.guild.id:
+            await ctx.send('❌ Choose a log channel from this server.')
+            return False
+        me = ctx.guild.me
+        if me is None or not me.guild_permissions.manage_channels:
+            await ctx.send('❌ I need **Manage Channels** to make this developer log channel private.')
+            return False
+        if not OWNER_IDS:
+            await ctx.send('❌ No developer IDs are configured. Set OWNER_IDS / DISCORD_OWNER_IDS and restart first.')
+            return False
+        try:
+            # Deny visibility to @everyone and every server role. Explicit member
+            # overwrites below grant access only to configured developers and the bot.
+            for role in ctx.guild.roles:
+                overwrite = channel.overwrites_for(role)
+                overwrite.view_channel = False
+                await channel.set_permissions(
+                    role, overwrite=overwrite,
+                    reason='Restrict PokéVanta developer logs to configured developers'
+                )
+            for owner_id in OWNER_IDS:
+                member = ctx.guild.get_member(owner_id)
+                if member is None:
+                    try:
+                        member = await ctx.guild.fetch_member(owner_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        continue
+                overwrite = channel.overwrites_for(member)
+                overwrite.view_channel = True
+                overwrite.read_message_history = True
+                await channel.set_permissions(
+                    member, overwrite=overwrite,
+                    reason='Grant configured PokéVanta developer access to private logs'
+                )
+            if me:
+                overwrite = channel.overwrites_for(me)
+                overwrite.view_channel = True
+                overwrite.read_message_history = True
+                overwrite.send_messages = True
+                overwrite.embed_links = True
+                await channel.set_permissions(
+                    me, overwrite=overwrite,
+                    reason='Allow PokéVanta to write private developer logs'
+                )
+            return True
+        except discord.Forbidden:
+            await ctx.send('❌ I could not lock that channel. Give me **Manage Channels**, then try again.')
+        except discord.HTTPException as exc:
+            await ctx.send(f'❌ Discord could not update the log-channel permissions ({type(exc).__name__}).')
+        return False
 
     @commands.hybrid_command(name='setpokemonlog')
     async def set_pokemon_log(self, ctx, channel: discord.TextChannel):
         if not self.is_dev(ctx):
             return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setpokemonlog`.')
         if not ctx.guild: return
+        if not await self._make_developer_log_channel_private(ctx, channel):
+            return
         self.setting(0, 'log_channel_pokemon', channel.id)
-        await ctx.send(f'✅ Global developer Pokémon event logs will be sent to {channel.mention} from every server where PokéVanta is installed. Routine commands are not logged.')
+        await ctx.send(f'✅ Global developer Pokémon event logs will be sent to {channel.mention}. Only successful rare Pokémon events are logged.')
 
     @commands.hybrid_command(name='rarespawn', description='Configure the public channel for shiny rare Pokémon acquisitions.')
     @commands.guild_only()
@@ -5951,16 +6062,20 @@ class CarlStyleExtensions(commands.Cog):
         if not self.is_dev(ctx):
             return await ctx.send('❌ Only configured PokéVanta bot developers can use `!settradinglog`.')
         if not ctx.guild: return
+        if not await self._make_developer_log_channel_private(ctx, channel):
+            return
         self.setting(0, 'log_channel_trading', channel.id)
-        await ctx.send(f'✅ Global developer trading logs will be sent to {channel.mention}; only successful completed trades are logged.')
+        await ctx.send(f'✅ Global developer trading logs will be sent to {channel.mention}; only successfully completed trades are logged.')
 
     @commands.hybrid_command(name='setcoinlog', aliases=['setcoinslog'])
     async def set_coins_log(self, ctx, channel: discord.TextChannel):
         if not self.is_dev(ctx):
             return await ctx.send('❌ Only configured PokéVanta bot developers can use `!setcoinlog`.')
         if not ctx.guild: return
+        if not await self._make_developer_log_channel_private(ctx, channel):
+            return
         self.setting(0, 'log_channel_coins', channel.id)
-        await ctx.send(f'✅ Global developer VantaCoin logs will be sent to {channel.mention}; only meaningful successful transactions are logged.')
+        await ctx.send(f'✅ Global developer VantaCoin logs will be sent to {channel.mention}; only successful transactions are logged.')
 
 
     @commands.hybrid_command(name='ticketsetup', description='Post the PokéVanta ticket panel in a channel.')
@@ -6335,22 +6450,6 @@ class CarlStyleExtensions(commands.Cog):
         with db() as c:
             c.execute('DELETE FROM cv_nickname_history WHERE guild_id=? AND user_id=?', (ctx.guild.id, member.id))
         await ctx.send(f'✅ {member.mention}’s original nickname has been restored and the freeze removed.')
-
-    @commands.hybrid_command(name='roleadd')
-    async def roleadd(self, ctx, member: discord.Member, role: discord.Role):
-        if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'): return
-        try:
-            await member.add_roles(role, reason=f'PokéVanta developer action by {ctx.author} ({ctx.author.id})')
-            await ctx.send(f'✅ Added {role.mention} to {member.mention}.')
-        except discord.Forbidden: await ctx.send('❌ Discord denied the role change; check Manage Roles and role hierarchy.')
-
-    @commands.hybrid_command(name='roleremove')
-    async def roleremove(self, ctx, member: discord.Member, role: discord.Role):
-        if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'): return
-        try:
-            await member.remove_roles(role, reason=f'PokéVanta developer action by {ctx.author} ({ctx.author.id})')
-            await ctx.send(f'✅ Removed {role.mention} from {member.mention}.')
-        except discord.Forbidden: await ctx.send('❌ Discord denied the role change; check Manage Roles and role hierarchy.')
 
     @commands.hybrid_command(name='rolecreate', description='Create a server role with an optional colour name in angle brackets, e.g. <yellow>.')
     async def rolecreate(self, ctx, *, role_details: str):
@@ -8995,7 +9094,7 @@ class Bot(commands.Bot):
         moderation_commands = {
             'ban', 'unban', 'kick', 'mute', 'unmute', 'timeout', 'untimeout',
             'warn', 'warnings', 'clearwarnings', 'removewarn', 'clear', 'purge',
-            'lock', 'unlock', 'slowmode', 'roleadd', 'roleremove', 'rolecreate',
+            'lock', 'unlock', 'slowmode', 'role', 'rolecreate',
             'roledelete', 'setnick', 'automodword', 'automodwords'
         }
         if command_name not in moderation_commands:
@@ -9025,10 +9124,10 @@ class Bot(commands.Bot):
         """Developer-only view of Pokémon, trading, coins and command logs."""
         if ctx.author.id not in OWNER_IDS:
             return await ctx.send('❌ This command is restricted to the bot developers.')
-        allowed = {'all', 'pokemon', 'trading', 'coins', 'commands'}
+        allowed = {'all', 'pokemon', 'trading', 'coins'}
         category = category.lower()
         if category not in allowed:
-            return await ctx.send('Use `!gamelogs [all|pokemon|trading|coins|commands] [limit]`.')
+            return await ctx.send('Use `!gamelogs [all|pokemon|trading|coins] [limit]`.')
         limit = max(1, min(int(limit), 50))
         with db() as c:
             if category == 'all':
@@ -9044,7 +9143,7 @@ class Bot(commands.Bot):
             lines.append(f'`{stamp} UTC` **{cat}** · <@{uid}> · `{command}` · `{safe[:180]}`')
         embed = discord.Embed(title=f'🔒 Developer Game Logs · {category.title()}', description='\n'.join(lines)[:4000], color=discord.Color.dark_grey())
         embed.set_footer(text='Visible only to configured developers. Logs contain command text and user/server IDs.')
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     async def on_command_error(self, ctx, error):
         # Handle expected command/input problems separately. Unexpected exceptions
