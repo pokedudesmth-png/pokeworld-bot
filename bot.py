@@ -133,7 +133,7 @@ ITEM_EMOJI = {
  'charcoal':'🪵','mystic-water':'💧','magnet':'🧲','miracle-seed':'🌱','never-melt-ice':'🧊',
  'spell-tag':'📜','dragon-fang':'🦷','silk-scarf':'🧵','sharp-beak':'🪶','poison-barb':'🦂',
  'soft-sand':'🏜️','hard-stone':'🪨','silver-powder':'✨','black-glasses':'🌑','twisted-spoon':'🥄',
- 'metal-coat':'🛡️','pixie-plate':'🧚','pokemon-storage':'','potion':'🧪','super-potion':'⚗️','hyper-potion':'💉',
+ 'metal-coat':'🛡️','pixie-plate':'🧚','pokemon-storage':'','rare-candy':'🍬','raid-pass':'🎟️','potion':'🧪','super-potion':'⚗️','hyper-potion':'💉',
  'max-potion':'','full-restore':'','fast-tm':'⚡','charged-tm':'🔋','elite-charged-tm':'🌟'
 }
 # Official item sprites are uploaded to this Discord server as custom emojis by
@@ -983,30 +983,86 @@ def pokemon_ivs(row):
     # The IV columns are appended to the pokemon table after its original 12 columns.
     return {name:max(0,min(31,int(row[15+i] or 0))) for i,name in enumerate(names)}
 
-def radiant_stat_multiplier(species):
-    """Radiant boosts only naturally strong species; low-BST Pokémon stay weak."""
+def radiant_stat_profile(species):
+    """Return per-stat Radiant multipliers, with curated species exceptions.
+
+    Radiants are not universally stronger: some species are deliberately nerfed,
+    others receive focused boosts, and elite species get restrained improvements.
+    Values are applied consistently in battle and the Radiant Pokédex.
+    """
     base = stats(species)
     total = sum(int(value or 0) for value in base.values())
-    if total >= 600:
-        return 1.45
-    if total >= 500:
-        return 1.35
-    return 1.0
+    # Broad fallback for species without a hand-tuned entry.
+    if total < 300:
+        default = 0.90
+    elif total < 400:
+        default = 0.96
+    elif total < 500:
+        default = 1.02
+    elif total < 600:
+        default = 1.07
+    else:
+        default = 1.10
+    profile = {key: default for key in ('hp','attack','defense','special-attack','special-defense','speed')}
+
+    # Per-species profiles: HP, Attack, Defense, Sp. Attack, Sp. Defense, Speed.
+    # These are intentionally mixed rather than one blanket multiplier.
+    curated = {
+        6:   (1.08,1.16,1.02,1.18,1.05,1.12),  # Charizard
+        25:  (0.92,0.94,0.88,1.02,0.90,1.08),  # Pikachu: fast, but fragile
+        94:  (0.96,1.02,0.90,1.18,0.98,1.14),  # Gengar
+        129: (0.72,0.68,0.75,0.70,0.72,0.80),  # Magikarp
+        130: (1.08,1.16,0.98,0.88,0.98,1.02),  # Gyarados
+        149: (1.12,1.14,1.04,1.08,1.10,1.02),  # Dragonite
+        150: (1.10,1.18,1.08,1.20,1.12,1.10),  # Mewtwo
+        151: (1.02,1.04,1.02,1.06,1.04,1.06),  # Mew
+        248: (1.10,1.16,1.12,0.92,1.02,0.96),  # Tyranitar
+        384: (1.12,1.18,1.08,1.18,1.06,1.14),  # Rayquaza
+        386: (0.98,1.08,0.96,1.14,0.96,1.12),  # Deoxys
+        445: (1.08,1.16,1.06,0.92,1.00,1.10),  # Garchomp
+        448: (1.00,1.12,1.04,1.06,1.02,1.14),  # Lucario
+        493: (1.12,1.12,1.12,1.12,1.12,1.12),  # Arceus
+        658: (0.98,1.04,0.94,1.10,0.96,1.18),  # Greninja
+        700: (1.00,0.92,0.98,1.12,1.06,1.12),  # Sylveon
+        778: (0.90,1.10,0.88,1.06,0.92,1.14),  # Mimikyu
+        887: (1.08,1.14,1.02,0.96,1.00,1.10),  # Dragapult
+        1007:(1.12,1.16,1.08,1.06,1.04,1.16), # Koraidon
+        1008:(1.08,1.04,1.08,1.18,1.12,1.12), # Miraidon
+    }
+    entry = curated.get(int(species.get('id', 0) or 0))
+    if entry:
+        for key, value in zip(('hp','attack','defense','special-attack','special-defense','speed'), entry):
+            profile[key] = value
+    return profile
+
+
+def radiant_stat_multiplier(species):
+    """Average Radiant multiplier, retained for display/backward compatibility."""
+    profile = radiant_stat_profile(species)
+    return sum(profile.values()) / max(1, len(profile))
+
+
+def radiant_adjusted_stats(species):
+    """Return the displayed level-100 Radiant statline (without trainer IVs)."""
+    return iv_adjusted_stats(species, {}, 100, radiant=True)
+
+
+def item_display(item, label=None):
+    """Consistent inventory emoji + item name for all player-facing messages."""
+    return f"{item_emoji(item)} **{label or item.replace('-', ' ').title()}**"
 
 def iv_adjusted_stats(species, ivs=None, level=100, radiant=False):
     result=stats(species)
     for stat_name, iv in (ivs or {}).items():
         if stat_name in result:
             result[stat_name] += int(max(0,min(31,int(iv))) * max(1,int(level)) / 100)
-    # Apply the Radiant bonus to battle stats before STAB, type effectiveness,
-    # critical hits, and held-item effects. Weak species (base-stat total < 500)
-    # intentionally receive no Radiant stat bonus.
+    # Apply the per-species, per-stat Radiant balance before battle modifiers.
+    # Some Radiants are intentionally weaker than their normal counterparts.
     if radiant:
-        multiplier = radiant_stat_multiplier(species)
-        if multiplier > 1:
-            for stat_name in ('hp', 'attack', 'defense', 'special-attack', 'special-defense', 'speed'):
-                if stat_name in result:
-                    result[stat_name] = max(1, int(result[stat_name] * multiplier))
+        profile = radiant_stat_profile(species)
+        for stat_name, multiplier in profile.items():
+            if stat_name in result:
+                result[stat_name] = max(1, int(result[stat_name] * multiplier))
     return result
 
 def calc_damage(attacker, defender, move, level, attacker_ivs=None, defender_ivs=None, defender_level=None, attacker_radiant=False, defender_radiant=False):
@@ -1332,7 +1388,7 @@ class NPCBattleView(TimedView):
         em=discord.Embed(title=('🌟 Raid Battle — Pokémon switched!' if self.raid else '🔥 Legendary 3v1 — Pokémon switched!'),description=f'**Active:** {target[3].title()} Lv.{target[4]}\nHP {hp_bar(self.player_hp,target[9])}\nStatus: **{status_label(self.player_status)}**\n**Boss:** {display_name(self.enemy)} Lv.{self.enemy["_level"]}\nHP {hp_bar(self.enemy_hp,self.enemy_max_hp)}\nStatus: **{status_label(self.enemy_status)}**\n🎙️ **Commentator:** {target[3].title()} enters the arena. Use the move buttons below, or Switch Pokémon to select a healthy teammate.')
         boss_art = None
         try:
-            boss_art = await radiant_sprite_file(self.enemy)
+            boss_art = await radiant_sprite_file(self.enemy, require_archive=False)
             em.set_image(url=f'attachment://{boss_art.filename}')
         except Exception as exc:
             print(f'RADIANTDEX battle-switch artwork failed: {exc!r}')
@@ -1361,13 +1417,13 @@ class NPCBattleView(TimedView):
                 own=await pokemon_data(self.row[2])
                 battle_art_files=[]
                 try:
-                    own_art=await radiant_sprite_file(own)
+                    own_art=await radiant_sprite_file(own, require_archive=False)
                     e.set_thumbnail(url=f'attachment://{own_art.filename}')
                     battle_art_files.append(own_art)
                 except Exception as exc:
                     print(f'RADIANTDEX player battle artwork failed: {exc!r}')
                 try:
-                    enemy_art=await radiant_sprite_file(self.enemy)
+                    enemy_art=await radiant_sprite_file(self.enemy, require_archive=False)
                     e.set_image(url=f'attachment://{enemy_art.filename}')
                     battle_art_files.append(enemy_art)
                 except Exception as exc:
@@ -1615,13 +1671,13 @@ class PvPBattle:
         da=await pokemon_data(self.ra[2]); dbb=await pokemon_data(self.rb[2])
         self.radiant_art_files=[]
         try:
-            left_art=await radiant_sprite_file(da)
+            left_art=await radiant_sprite_file(da, require_archive=False)
             e.set_thumbnail(url=f'attachment://{left_art.filename}')
             self.radiant_art_files.append(left_art)
         except Exception as exc:
             print(f'RADIANTDEX PvP challenger artwork failed: {exc!r}')
         try:
-            right_art=await radiant_sprite_file(dbb)
+            right_art=await radiant_sprite_file(dbb, require_archive=False)
             e.set_image(url=f'attachment://{right_art.filename}')
             self.radiant_art_files.append(right_art)
         except Exception as exc:
@@ -2016,7 +2072,7 @@ class Game(commands.Cog):
                 + '**Booster-exclusive perk**\n'
                 + '• **+10,000 VantaCoins** every time you claim `!daily`\n\n'
                 + '**Daily reward for all trainers**\n'
-                + '• **2 Raid Passes** and **3 Rare Candies** per daily claim, plus a Pokémon\n\n'
+                + f'• {item_display("raid-pass", "2 Raid Passes")} and {item_display("rare-candy", "3 Rare Candies")} per daily claim, plus a Pokémon\n\n'
                 + 'Perks are checked automatically and remain active only while you are boosting this server. '
                 + 'These benefits are separate from donation packages and do not unlock donor-tier Radiant privileges.'
             ),
@@ -2981,8 +3037,8 @@ class Game(commands.Cog):
                     'catch': 'Attempt to catch the currently encountered Pokémon.',
                     'cancel': 'Cancel your current hunt, challenge, or battle.',
                     'raid': 'View or start available raid content.',
-                    'candy': 'Use Rare Candies to level up a Pokémon.',
-                    'candyquests': 'Complete daily catching, battle, and fishing challenges to earn up to 20 Rare Candies per day.',
+                    'candy': f'Use {item_display("rare-candy", "Rare Candies")} to level up a Pokémon.',
+                    'candyquests': f'Complete daily catching, battle, and fishing challenges to earn up to 20 {item_emoji("rare-candy")} Rare Candies per day.',
                     'trade': 'Start a Pokémon trade with another trainer.',
                     'tradeadd': 'Add one of your Pokémon or items to the active trade.',
                     'traderemove': 'Remove an offer from the active trade.',
@@ -3172,6 +3228,57 @@ class Game(commands.Cog):
         elif tokens and tokens[-1] in ('shiny','shinies'):
             shiny=True; tokens=tokens[:-1]
         key=' '.join(tokens).strip()
+
+        # Direct Radiant species lookup: !dex radiant pikachu, !dex R0025, !dex R25.
+        radiant_lookup = False
+        radiant_species_key = ''
+        radiant_id_match = re.fullmatch(r'r0*(\d{1,4})', key, re.I)
+        if radiant_id_match:
+            radiant_lookup = True
+            radiant_species_key = str(int(radiant_id_match.group(1)))
+        elif key.startswith('radiant '):
+            radiant_lookup = True
+            radiant_species_key = key[len('radiant '):].strip()
+        if radiant_lookup:
+            try:
+                d = await pokemon_data(radiant_species_key)
+                base_stats = stats(d)
+                radiant_stats = radiant_adjusted_stats(d)
+                species_data = await api_get(f'/pokemon-species/{d["id"]}')
+                gen = species_data.get('generation', {}).get('name', 'unknown-generation').replace('generation-', '').upper()
+                gen_label = {'I':'Generation I','II':'Generation II','III':'Generation III','IV':'Generation IV','V':'Generation V','VI':'Generation VI','VII':'Generation VII','VIII':'Generation VIII','IX':'Generation IX'}.get(gen, f'Generation {gen}')
+                multiplier = radiant_stat_multiplier(d)
+                abilities = ', '.join(a['ability']['name'].replace('-', ' ').title() + (' (Hidden)' if a.get('is_hidden') else '') for a in d.get('abilities', [])) or 'Unknown'
+                base_total = sum(base_stats.values())
+                radiant_total = sum(radiant_stats.values())
+                e = discord.Embed(
+                    title=f'{RADIANT_EMOJI} R{int(d["id"]):04d} — Radiant {display_name(d)}',
+                    description=(f'**Type:** {type_text(d)}\n**Generation:** {gen_label}\n**Abilities:** {abilities}\n'
+                                 f'**Average stat modifier:** ×{multiplier:.2f}  •  **BST:** {base_total} → **{radiant_total}**\n'
+                                 '**Radiant stats are individually balanced:** some stats/species are boosted and others are nerfed.')
+                )
+                for stat_key, stat_label in [('hp','❤️ HP'),('attack','⚔️ Attack'),('defense','🛡️ Defense'),('special-attack','✨ Sp. Atk'),('special-defense','🔰 Sp. Def'),('speed','💨 Speed')]:
+                    e.add_field(name=stat_label, value=f'**{radiant_stats[stat_key]}**  _(Normal: {base_stats[stat_key]})_', inline=True)
+                e.set_footer(text='Radiant Dex ID is separate: R + National Dex number')
+                radiant_art = None
+                try:
+                    radiant_art = await radiant_sprite_file(d, require_archive=True)
+                except FileNotFoundError as art_exc:
+                    print(f'RADIANTDEX individual artwork missing: {art_exc!r}')
+                if radiant_art:
+                    e.set_image(url=f'attachment://{radiant_art.filename}')
+                    return await ctx.send(embed=e, file=radiant_art)
+                # Keep the Radiant stat entry usable even if the local artwork ZIP
+                # is missing; never silently pretend normal art is Radiant art.
+                e.description += '\n\n⚠️ Radiant artwork file is missing from the installed artwork archive.'
+                normal_art = sprite(d)
+                if normal_art:
+                    e.set_image(url=normal_art)
+                return await ctx.send(embed=e)
+            except Exception as exc:
+                print(f'RADIANTDEX individual lookup failed: {type(exc).__name__}: {exc}')
+                return await ctx.send('❌ Radiant Pokémon not found. Try `!dex radiant pikachu`, `!dex R0025`, or `!dex R25`.')
+
         if key in ('radiant','radiants'):
             # Every National Dex species has a permanent Radiant entry; only owned Radiants are checked.
             if not POKEMON_LIST:
@@ -3677,13 +3784,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.color=discord.Color.red()
         battle_art_files=[]
         try:
-            own_art=await radiant_sprite_file(own_data)
+            own_art=await radiant_sprite_file(own_data, require_archive=False)
             e.set_thumbnail(url=f'attachment://{own_art.filename}')
             battle_art_files.append(own_art)
         except Exception as exc:
             print(f'RADIANTDEX NPC player artwork failed: {exc!r}')
         try:
-            enemy_art=await radiant_sprite_file(enemy)
+            enemy_art=await radiant_sprite_file(enemy, require_archive=False)
             e.set_image(url=f'attachment://{enemy_art.filename}')
             battle_art_files.append(enemy_art)
         except Exception as exc:
@@ -4286,7 +4393,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 active=c.execute('SELECT name,level FROM raid_encounters WHERE user_id=?',(uid,)).fetchone()
                 passes=c.execute("SELECT amount FROM inventory WHERE user_id=? AND item='raid-pass'",(uid,)).fetchone()
                 if active:return await ctx.send(f'⚠️ You already have an active raid: ✨ **{active[0].title()}** Lv.{active[1]}. Use `!add` to select six Pokémon, then `!raid battle`.')
-                if not passes or passes[0]<1:return await ctx.send('❌ You need a Raid Pass. Claim `!daily` for up to 2 daily Raid Passes.')
+                if not passes or passes[0]<1:return await ctx.send(f'❌ You need a {item_display("raid-pass", "Raid Pass")}. Claim `!daily` for up to 2 daily Raid Passes.')
                 c.execute("UPDATE inventory SET amount=amount-1 WHERE user_id=? AND item='raid-pass'",(uid,))
                 c.execute("DELETE FROM inventory WHERE user_id=? AND item='raid-pass' AND amount<=0",(uid,))
             special_names={'nihilego','buzzwole','pheromosa','xurkitree','celesteela','kartana','guzzlord','poipole','naganadel','stakataka','blacephalon','meltan','melmetal'}
@@ -4297,7 +4404,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 return await ctx.send('❌ Special Pokémon data is not loaded yet; your Raid Pass was refunded.')
             chosen=random.choice(pool); data=await pokemon_data(chosen['name'])
             with db() as c:c.execute('INSERT OR REPLACE INTO raid_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,1)',(uid,data['id'],data['name'],0))
-            return await ctx.send(f'🌟 **Raid spawned!** A shiny special Pokémon — **{display_name(data)}** — is waiting!\n🎟️ 1 Raid Pass used. Use `!add <ID1> <ID2> <ID3> <ID4> <ID5> <ID6>`, then `!raid battle`.')
+            return await ctx.send(f'🌟 **Raid spawned!** A shiny special Pokémon — **{display_name(data)}** — is waiting!\n{item_display("raid-pass", "1 Raid Pass")} used. Use `!add <ID1> <ID2> <ID3> <ID4> <ID5> <ID6>`, then `!raid battle`.')
         with db() as c:
             passes=c.execute("SELECT amount FROM inventory WHERE user_id=? AND item='raid-pass'",(uid,)).fetchone()
             active=c.execute('SELECT name,level FROM raid_encounters WHERE user_id=?',(uid,)).fetchone()
@@ -4305,17 +4412,17 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e=discord.Embed(
             title='🌟 Raid Center — How Raids Work',
             description=(
-                f'🎟️ **Your Raid Passes: {passes[0] if passes else 0}**\n\n'
+                f'{item_display("raid-pass", f"Your Raid Passes: {passes[0] if passes else 0}")}\n\n'
                 'Challenge an exceptionally powerful **shiny special Pokémon** with a squad of six Pokémon. While a raid is active, `!hunt`, `!legendarybattle`, and `!battle` are blocked until you win or cancel. '
                 'Raids use the existing move-and-switch battle controls.'
             ),
             color=discord.Color.gold()
         )
-        e.add_field(name='🗺️ 1. Spawn a Raid', value='`!raid spawn`\nSpends **1 Raid Pass** to spawn a shiny Legendary, Mythical, or Ultra Beast. You can only have one active raid at a time.', inline=False)
+        e.add_field(name='🗺️ 1. Spawn a Raid', value=f'`!raid spawn`\nSpends {item_display("raid-pass", "1 Raid Pass")} to spawn a shiny Legendary, Mythical, or Ultra Beast. You can only have one active raid at a time.', inline=False)
         e.add_field(name='👥 2. Choose Your Six Pokémon', value='`!add <ID1> <ID2> <ID3> <ID4> <ID5> <ID6>`\nSelect **exactly six Pokémon IDs** you own. Your boss level is **100 levels above your highest-level selected Pokémon**.', inline=False)
         e.add_field(name='⚔️ 3. Start the Battle', value='`!raid battle`\nUse **Choose Move** and switch between your squad during the battle. Finish any other active battle first, and make sure your team can fight.', inline=False)
-        e.add_field(name='🏆 Victory Rewards', value='Win to receive **50 Rare Candies** and add the shiny raid boss to your box at **75 levels below its raid level** (maximum Pokémon level: **300**). A failed raid gives no victory rewards, and the pass is not refunded.', inline=False)
-        e.add_field(name='🍬 Level Up', value='`!candy <pokemon_id> <amount>` — spend Rare Candies to level up one of your Pokémon, up to **Lv. 300**.\n`!daily` — claim your daily reward, including **2 Raid Passes** (daily limit).', inline=False)
+        e.add_field(name='🏆 Victory Rewards', value=f'Win to receive {item_display("rare-candy", "50 Rare Candies")} and add the shiny raid boss to your box at **75 levels below its raid level** (maximum Pokémon level: **300**). A failed raid gives no victory rewards, and the pass is not refunded.', inline=False)
+        e.add_field(name='🍬 Level Up', value=f'`!candy <pokemon_id> <amount>` — spend {item_display("rare-candy", "Rare Candies")} to level up one of your Pokémon, up to **Lv. 300**.\n`!daily` — claim your daily reward, including {item_display("raid-pass", "2 Raid Passes")} (daily limit).', inline=False)
         if active:
             raid_level=str(active[1]) if active[1] else 'set when battle starts'
             e.add_field(name='🚨 Your Active Raid',value=f'✨ **{active[0].title()}** • Boss level: **{raid_level}**\nSelected squad: **{len(party)}/6 Pokémon**\n' + ('Run `!add` to complete your squad, then `!raid battle`.' if len(party)<6 else 'Your squad is ready. Run `!raid battle` to begin.'),inline=False)
@@ -4338,20 +4445,20 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             with db() as c:
                 c.execute('UPDATE pv_candy_quests SET claimed=1 WHERE user_id=? AND day_key=? AND claimed=0', (uid, day))
                 c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 20) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+20", (uid,))
-            return await ctx.send('🎉 **Candy Trail completed!** You earned **20 Rare Candies**. Use `!candy <pokemon_id> <amount>` to level up your Pokémon!')
+            return await ctx.send(f'🎉 **Candy Trail completed!** You earned {item_display("rare-candy", "20 Rare Candies")}. Use `!candy <pokemon_id> <amount>` to level up your Pokémon!')
         tasks = [("🌿 Wild Collector", catches, 5, 5, "Catch 5 Pokémon with `!catch`"), ("⚔️ Battle Trainer", wins, 3, 7, "Win 3 battles"), ("🎣 Patient Angler", fish, 3, 8, "Catch 3 fish with `!fish`")]
         total = sum(reward for _, progress, goal, reward, _ in tasks if progress >= goal)
         ready = all(progress >= goal for _, progress, goal, _reward, _desc in tasks)
-        e = discord.Embed(title='🍬 The Daily Candy Trail', description='Three daily challenges. Complete the full trail to earn **20 Rare Candies maximum per day** for leveling up your Pokémon! Progress resets daily at **00:00 IST (India Standard Time)**.', color=discord.Color.purple())
+        e = discord.Embed(title='🍬 The Daily Candy Trail', description=f'Three daily challenges. Complete the full trail to earn {item_display("rare-candy", "20 Rare Candies maximum per day")} for leveling up your Pokémon! Progress resets daily at **00:00 IST (India Standard Time)**.', color=discord.Color.purple())
         for name, progress, goal, reward, desc in tasks:
             status = '✅ Complete' if progress >= goal else f'**{progress}/{goal}**'
-            e.add_field(name=f'{name} · {reward} Rare Candies', value=f'{desc}\nProgress: {status}', inline=False)
+            e.add_field(name=f'{name} · {item_emoji("rare-candy")} {reward} Rare Candies', value=f'{desc}\nProgress: {status}', inline=False)
         if claimed:
-            e.add_field(name='🎁 Reward status', value='You have already claimed today’s **20 Rare Candies**. Come back after 00:00 IST!', inline=False)
+            e.add_field(name='🎁 Reward status', value=f'You have already claimed today’s {item_display("rare-candy", "20 Rare Candies")}. Come back after 00:00 IST!', inline=False)
         elif ready:
-            e.add_field(name='🎁 Reward ready!', value='Use `!candyquests claim` to collect **20 Rare Candies**.', inline=False)
+            e.add_field(name='🎁 Reward ready!', value=f'Use `!candyquests claim` to collect {item_display("rare-candy", "20 Rare Candies")}.', inline=False)
         else:
-            e.add_field(name='🎁 Reward', value=f'Complete all three challenges to claim **20 Rare Candies**. You have **{total}** reward candies unlocked so far, but the full trail must be completed to claim.', inline=False)
+            e.add_field(name='🎁 Reward', value=f'Complete all three challenges to claim {item_display("rare-candy", "20 Rare Candies")}. You have **{total}** reward candies unlocked so far, but the full trail must be completed to claim.', inline=False)
         e.set_footer(text=f'Rare Candies in inventory: {candy_row[0] if candy_row else 0} • Use !candyquests claim when complete')
         # Support claim as an argument without creating a second command.
         await ctx.send(embed=e)
@@ -4368,7 +4475,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if not row:return await ctx.send('❌ That Pokémon ID is not yours.')
             if row[1]>=300:return await ctx.send('⭐ This Pokémon is already at the maximum level (300).')
             need=min(amount,300-row[1])
-            if not inv or inv[0]<need:return await ctx.send(f'🍬 You need **{need} Rare Candies** but have **{inv[0] if inv else 0}**. Win raids to earn more.')
+            if not inv or inv[0]<need:return await ctx.send(f'You need {item_display("rare-candy", f"{need} Rare Candies")} but have **{inv[0] if inv else 0}**. Win raids to earn more.')
             newlevel=row[1]+need
             species=c.execute('SELECT dex_id,name,shiny,hp,max_hp FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
             # Inventory and level updates are committed together below; max HP is recalculated afterward.
@@ -4381,7 +4488,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             old_max=max(1,current[3]); new_hp=min(new_max,max(1,int(current[2]/old_max*new_max))) if current[2]>0 else 0
             with db() as c:c.execute('UPDATE pokemon SET max_hp=?,hp=? WHERE instance_id=? AND user_id=?',(new_max,new_hp,pokemon_id,ctx.author.id))
         except Exception:pass
-        await ctx.send(f'🍬 Used **{need} Rare Candies** on **{row[0].title()}**: Lv.{row[1]} → **Lv.{newlevel}**. Maximum level is 300.')
+        await ctx.send(f'Used {item_display("rare-candy", f"{need} Rare Candies")} on **{row[0].title()}**: Lv.{row[1]} → **Lv.{newlevel}**. Maximum level is 300.')
 
     @commands.command(name='daily',aliases=['d','claim'],description='Claim your daily Pokémon, Raid Passes and Rare Candies.')
     async def daily(self,ctx):
@@ -4432,14 +4539,14 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                     c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
         booster_text = f'\n💜 Server Booster bonus: +{daily_booster_coins:,} VantaCoins!' if booster_active else ''
         if storage_full:
-            await ctx.send(f'🎁 **Daily reward claimed!**\n🎟️ +{daily_raid_passes} Raid Passes • 🍬 +{daily_rare_candies} Rare Candies{booster_text}\n⚠️ No daily Pokémon was added because your storage is full ({owned}/{capacity}).\n' + pokemon_storage_full_message(owned, capacity))
+            await ctx.send(f'🎁 **Daily reward claimed!**\n{item_display("raid-pass", "Raid Passes")} +{daily_raid_passes} • {item_display("rare-candy", "Rare Candies")} +{daily_rare_candies}{booster_text}\n⚠️ No daily Pokémon was added because your storage is full ({owned}/{capacity}).\n' + pokemon_storage_full_message(owned, capacity))
         elif legendary:
-            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +{daily_raid_passes} Raid Passes • 🎒 +{daily_rare_candies} Rare Candies{booster_text}')
+            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n{item_display("raid-pass", "Raid Passes")} +{daily_raid_passes} • {item_display("rare-candy", "Rare Candies")} +{daily_rare_candies}{booster_text}')
         else:
-            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +{daily_raid_passes} Raid Passes • 🍬 +{daily_rare_candies} Rare Candies\n🔥 Current streak: **{streak}** days{booster_text}')
+            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n{item_display("raid-pass", "Raid Passes")} +{daily_raid_passes} • {item_display("rare-candy", "Rare Candies")} +{daily_rare_candies}\n🔥 Current streak: **{streak}** days{booster_text}')
         if ctx.guild:
             pokemon_log = f'**{display_name(pick)} Lv. {lvl}**' if not storage_full else '**No Pokémon added (storage full)**'
-            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **{daily_booster_coins:,} VantaCoins**, **{daily_rare_candies} Rare Candies**, and **{daily_raid_passes} Raid Passes**.\n**Pokémon:** {pokemon_log}\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
+            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **{daily_booster_coins:,} VantaCoins**, {item_display("rare-candy", f"{daily_rare_candies} Rare Candies")}, and {item_display("raid-pass", f"{daily_raid_passes} Raid Passes")}.\n**Pokémon:** {pokemon_log}\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
     @commands.command(name='balance',aliases=['bal','money'],description='View your VantaCoins, level and XP.')
     async def balance(self,ctx):
         coins,xp,level,_,_=get_player(ctx.author.id)
