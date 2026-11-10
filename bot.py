@@ -2540,29 +2540,9 @@ class Game(commands.Cog):
                 response+='\n\n'+f'🔥 **Legendary boss unlocked!** Your next encounter is ready — use `!add <pokemon_id>` to select three Pokémon, then `!legendarybattle`.'
                 await ctx.send(response)
                 return await ctx.send(embed=boss_embed)
-        catch_embed=discord.Embed(
-            title=(f'{RADIANT_EMOJI} Radiant Pokémon registered!' if radiant else f'🎉 {display_name(d)} added to your Box!'),
-            description=response,
-            color=discord.Color.from_rgb(145,65,230) if radiant else (discord.Color.gold() if enc[2] else discord.Color.blurple())
-        )
-        if radiant:
-            # Only genuine Radiant catches may use the special RadiantDex artwork.
-            try:
-                radiant_file=await radiant_sprite_file(d, require_archive=True)
-                catch_embed.set_image(url=f'attachment://{radiant_file.filename}')
-                return await ctx.send(embed=catch_embed,file=radiant_file)
-            except Exception as exc:
-                print(f'RADIANTDEX catch artwork failed for {d.get("name", "unknown")}: {type(exc).__name__}: {exc}')
-                normal_art=sprite(d)
-                if normal_art:
-                    catch_embed.set_image(url=normal_art)
-                catch_embed.set_footer(text='Radiant artwork unavailable; the Pokémon is still registered as Radiant.')
-                return await ctx.send(embed=catch_embed)
-        # Normal and Shiny catches must never call the Radiant artwork loader.
-        catch_art=sprite(d, shiny=bool(enc[2]))
-        if catch_art:
-            catch_embed.set_image(url=catch_art)
-        return await ctx.send(embed=catch_embed)
+        # Successful catches use a compact text-only confirmation.
+        # Do not attach Pokémon artwork or create a catch embed for any variant.
+        return await ctx.send(response)
 
     @commands.command(name='cancel',aliases=['stop','quit'])
     async def cancel(self,ctx):
@@ -6506,7 +6486,7 @@ class CarlStyleExtensions(commands.Cog):
                 await interaction.response.edit_message(content='Choose the first team role:', view=current_view)
 
         view = MatchRoleView()
-        msg = await ctx.send('⚔️ **Match announcement setup**\\nPress the button to choose the first team role.', view=view)
+        msg = await ctx.send('⚔️ **Match announcement setup**\nPress the button to choose the first team role.', view=view)
         view.message = msg
 
         try:
