@@ -600,6 +600,17 @@ async def radiant_sprite_file(d, require_archive=False):
     def norm_name(value):
         return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
 
+    def discord_compatible_png(asset_bytes):
+        # Discord embed attachment images are most reliable as PNG/JPEG.
+        # The supplied RadiantDex archive is WebP, so convert it before upload.
+        if Image is None:
+            raise RuntimeError('Pillow is required to render RadiantDex WebP artwork. Install it with: pip install pillow')
+        with Image.open(io.BytesIO(asset_bytes)) as source_image:
+            converted = source_image.convert('RGBA')
+            output = io.BytesIO()
+            converted.save(output, format='PNG', optimize=True)
+            return output.getvalue()
+
     def find_archive_paths():
         found = []
         checked_dirs = []
@@ -669,9 +680,10 @@ async def radiant_sprite_file(d, require_archive=False):
             asset_bytes = archive.read(member)
         if not asset_bytes:
             return None
-        filename = f'radiant-{safe_asset_name}.{extension}'
-        _RADIANT_ASSET_CACHE[cache_prefix] = (asset_bytes, filename)
-        return discord.File(io.BytesIO(asset_bytes), filename=filename)
+        png_bytes = discord_compatible_png(asset_bytes)
+        filename = f'radiant-{safe_asset_name}.png'
+        _RADIANT_ASSET_CACHE[cache_prefix] = (png_bytes, filename)
+        return discord.File(io.BytesIO(png_bytes), filename=filename)
 
     # Also support an extracted artwork folder.
     for directory in dict.fromkeys((base_dir, os.getcwd())):
@@ -684,7 +696,8 @@ async def radiant_sprite_file(d, require_archive=False):
                         with open(extracted_path, 'rb') as asset_file:
                             asset_bytes = asset_file.read()
                         if asset_bytes:
-                            return discord.File(io.BytesIO(asset_bytes), filename=f'radiant-{safe_asset_name}{extension}')
+                            png_bytes = discord_compatible_png(asset_bytes)
+                            return discord.File(io.BytesIO(png_bytes), filename=f'radiant-{safe_asset_name}.png')
                 except OSError:
                     pass
 
