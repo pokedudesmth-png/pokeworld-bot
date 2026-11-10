@@ -1734,19 +1734,10 @@ class BoxView(TimedView):
         embed.set_footer(text=f'Pokémon Box — {labels.get(self.category, "All Pokémon")} • Page {self.page+1}/{self.pages} • {len(self.entries)} Pokémon')
         return embed
     async def render_page(self):
-        embed = self.make_embed()
-        artwork = None
-        current = self.entries[self.page*self.ITEMS_PER_PAGE:(self.page+1)*self.ITEMS_PER_PAGE]
-        if self.category == 'radiant':
-            radiant_row = next((row for row in current if len(row) > 9 and bool(row[9])), None)
-            if radiant_row:
-                try:
-                    pokemon = await pokemon_data(str(radiant_row[2]))
-                    artwork = await radiant_sprite_file(pokemon, require_archive=True)
-                    embed.set_image(url=f'attachment://{artwork.filename}')
-                except Exception as exc:
-                    print(f'RADIANTDEX box artwork failed: {exc!r}')
-        return embed, artwork
+        # Box pages are intentionally text-only. A single Radiant artwork image
+        # cannot represent a page containing multiple different Pokémon and was
+        # causing unrelated artwork (for example Diglett) to appear.
+        return self.make_embed(), None
     async def interaction_check(self, interaction):
         if interaction.user.id!=self.owner_id:
             await interaction.response.send_message('Only the player who opened this box can change pages.',ephemeral=True); return False
