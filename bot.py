@@ -618,7 +618,7 @@ async def radiant_sprite_file(d, require_archive=False):
         try:
             with zipfile.ZipFile(archive_path, 'r') as archive:
                 for member in archive.namelist():
-                    match = re.match(r'^(\\d+)_([a-z0-9._-]+)\\.(webp|png)$', member.rsplit('/', 1)[-1], re.I)
+                    match = re.match(r'^(\d+)_([a-z0-9._-]+)\.(webp|png)$', member.rsplit('/', 1)[-1], re.I)
                     if not match:
                         continue
                     file_id = int(match.group(1))
