@@ -708,9 +708,23 @@ def type_text(d): return ' / '.join(x['type']['name'].title() for x in d['types'
 
 def stats(d): return {x['stat']['name']:x['base_stat'] for x in d['stats']}
 def sprite(d, shiny=False):
-    s=d.get('sprites',{}); art=s.get('other',{}).get('official-artwork',{})
+    s=d.get('sprites',{}) or {}
+    other=s.get('other',{}) or {}
+    art=other.get('official-artwork',{}) or {}
     if shiny:
-        return art.get('front_shiny') or s.get('front_shiny') or art.get('front_default') or s.get('front_default')
+        # Prefer an actual shiny asset. Official Artwork does not expose
+        # front_shiny consistently, so check HOME and the regular sprite too.
+        home=other.get('home',{}) or {}
+        shiny_url=(art.get('front_shiny') or home.get('front_shiny') or s.get('front_shiny'))
+        if shiny_url:
+            return shiny_url
+        # PokeAPI's canonical shiny sprite path is available even when the
+        # API's nested sprite payload omits front_shiny.
+        pokemon_id=d.get('id')
+        if pokemon_id:
+            return f'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/shiny/{int(pokemon_id)}.png'
+        # Never silently show normal artwork for a Shiny Pokémon.
+        return None
     return art.get('front_default') or s.get('front_default')
 
 _RADIANT_ASSET_CACHE = {}
@@ -4560,7 +4574,7 @@ class Game(commands.Cog):
         mh=max_hp(d,50); label=((RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else ''))+display_name(d)
         with db() as c:
             owned_count, storage_capacity = pokemon_storage_status(c, member.id)
-        if not (shiny or radiant) and owned_count >= storage_capacity:
+        if owned_count >= storage_capacity:
             return await ctx.send(f'❌ {member.mention} cannot receive another Pokémon. ' + pokemon_storage_full_message(owned_count, storage_capacity))
         # Admin Pokémon-add confirmations stay available until confirmed or cancelled.
         view=TimedView(timeout=None, timeout_text='')
@@ -4575,22 +4589,25 @@ class Game(commands.Cog):
             try:
                 with db() as c:
                     owned_count, storage_capacity = pokemon_storage_status(c, member.id)
-                    if not (shiny or radiant) and owned_count >= storage_capacity:
+                    if owned_count >= storage_capacity:
                         raise ValueError('POKEMON_STORAGE_FULL')
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant)))
+                    # Insert as normal first so the automatic rare-reward trigger
+                    # does not divert developer-granted Shiny/Radiant Pokémon to
+                    # Unclaimed. Then set the variant flags; the route trigger is
+                    # INSERT-only, so the Pokémon remains claimed in the Box.
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,0,mh,mh,0))
                     iid=cur.lastrowid
+                    c.execute('UPDATE pokemon SET shiny=?,radiant=? WHERE instance_id=? AND user_id=?',(int(shiny),int(radiant),iid,member.id))
                     stored_row=c.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(iid,member.id)).fetchone()
                     assign_box_id(c,member.id,iid) if stored_row else None
                     radiant_id=assign_radiant_dex_id(c,member.id,int(d['id']),d['name']) if radiant and stored_row else None
                     public_id=get_box_id(c,member.id,iid) if stored_row else None
-                    if stored_row and not stored_row[0] and not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
+                    if stored_row and not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
                         c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
                 if not stored_row:
-                    result=f'⚠️ {label} could not be kept because {member.mention} has reached the 10/10 Unclaimed Storage limit.'
-                elif stored_row[0]:
-                    result=f'✅ Added **{label}** to {member.mention}\'s `!unclaimed` collection (Unclaimed ID `{iid}`).'
+                    result=f'❌ {label} could not be added to the regular Box. Check the trainer storage capacity and try again.'
                 else:
-                    result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:04d}`.' if radiant_id else '.')
+                    result=f'✅ Added **{label}** directly to {member.mention}\'s regular Box (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:04d}`.' if radiant_id else '.')
             except Exception as exc:
                 if 'POKEMON_STORAGE_FULL' in str(exc):
                     result=f'❌ {member.mention} Pokémon Storage became full before confirmation. Upgrade storage or make room first.'
@@ -7963,6 +7980,76 @@ class CarlStyleExtensions(commands.Cog):
             await ctx.send(f'✅ Added {role.mention} to {member.mention}.')
         except discord.Forbidden: await ctx.send('❌ Discord denied the role change; check Manage Roles and role hierarchy.')
 
+    @commands.command(name='roleall')
+    @commands.guild_only()
+    async def roleall(self, ctx, role: discord.Role, confirmation: str = None):
+        """Add a role to every current server member. Usage: !roleall @Role confirm."""
+        if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'):
+            return
+
+        guild = ctx.guild
+        bot_member = guild.me or guild.get_member(self.bot.user.id)
+        if role.is_default() or role.managed:
+            return await ctx.send('❌ Choose a normal, assignable server role. @everyone and integration-managed roles cannot be mass-assigned.')
+        if not bot_member or not bot_member.guild_permissions.manage_roles:
+            return await ctx.send('❌ I need the **Manage Roles** permission to do this.')
+        if role >= bot_member.top_role:
+            return await ctx.send('❌ I cannot assign that role because it is equal to or higher than my highest role. Move my role above it first.')
+        if guild.owner_id != ctx.author.id and role >= ctx.author.top_role:
+            return await ctx.send('❌ You cannot mass-assign a role equal to or higher than your highest role.')
+
+        if (confirmation or '').strip().lower() != 'confirm':
+            return await ctx.send(
+                f'⚠️ This will add {role.mention} to **every current server member**, including bots, who does not already have it.\n'
+                f'Current server member count: **{guild.member_count or "unknown"}**.\n\n'
+                f'To proceed, run `!roleall {role.id} confirm`.',
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+
+        status = await ctx.send(f'⏳ Fetching the current member list before assigning {role.mention}…',
+                                 allowed_mentions=discord.AllowedMentions.none())
+        try:
+            # Fetch the full member list instead of relying on a possibly incomplete cache.
+            members = [member async for member in guild.fetch_members(limit=None)]
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            return await status.edit(content=(
+                '❌ I could not fetch the complete server member list, so no mass role assignment was started. '
+                f'Check the Server Members Intent and my permissions. (`{type(exc).__name__}`)'
+            ))
+
+        added = 0
+        already_had = 0
+        failed = 0
+        for index, member in enumerate(members, start=1):
+            if role in member.roles:
+                already_had += 1
+                continue
+            try:
+                await member.add_roles(role, reason=f'Mass role assignment by {ctx.author} ({ctx.author.id})')
+                added += 1
+            except discord.Forbidden:
+                failed += 1
+                # A hierarchy/permission rejection is unlikely to succeed for later members either.
+                break
+            except discord.HTTPException:
+                failed += 1
+            if index % 25 == 0:
+                try:
+                    await status.edit(content=f'⏳ Assigning {role.name}: **{index}/{len(members)}** checked · **{added}** added · **{already_had}** already had it · **{failed}** failed.')
+                except discord.HTTPException:
+                    pass
+            # Keep requests sequential and gentle; discord.py also handles Discord rate limits.
+            await asyncio.sleep(0.2)
+
+        result = (f'✅ **Mass role assignment finished** for {role.mention}.\n'
+                  f'• Members checked: **{min(len(members), added + already_had + failed)} / {len(members)}**\n'
+                  f'• Role added: **{added}**\n'
+                  f'• Already had role: **{already_had}**\n'
+                  f'• Failed: **{failed}**')
+        if added + already_had + failed < len(members):
+            result += '\n⚠️ The assignment stopped early, likely because Discord rejected a role update. Check my role hierarchy and permissions.'
+        await status.edit(content=result, allowed_mentions=discord.AllowedMentions.none())
+
     @commands.hybrid_command(name='roleremove')
     async def roleremove(self, ctx, member: discord.Member, role: discord.Role):
         if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'): return
@@ -10666,7 +10753,7 @@ class Bot(commands.Bot):
         moderation_commands = {
             'ban', 'unban', 'kick', 'mute', 'unmute', 'timeout', 'untimeout',
             'warn', 'warnings', 'clearwarnings', 'removewarn', 'clear', 'purge',
-            'lock', 'unlock', 'slowmode', 'roleadd', 'roleremove', 'rolecreate',
+            'lock', 'unlock', 'slowmode', 'roleadd', 'roleall', 'roleremove', 'rolecreate',
             'roledelete', 'setnick', 'automodword', 'automodwords'
         }
         if command_name not in moderation_commands:
