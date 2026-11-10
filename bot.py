@@ -577,62 +577,127 @@ def sprite(d, shiny=False):
 _RADIANT_ASSET_CACHE = {}
 _RADIANT_ARCHIVE_INDEX = None
 
-async def radiant_sprite_file(d):
-    """Load exported Radiant artwork from either the PNG or HQ WebP archive."""
+async def radiant_sprite_file(d, require_archive=False):
+    """Load the matching RadiantDex export, preferring the uploaded HQ WebP archive.
+
+    The archive is searched beside bot.py and in the process working directory.
+    A name-based lookup is also used because some PokéAPI form IDs do not line up
+    with the exported artwork IDs.
+    """
+    global _RADIANT_ARCHIVE_INDEX
     pokemon_id = d.get('id')
-    pokemon_name = str(d.get('name', 'pokemon')).lower()
+    pokemon_name = str(d.get('name', 'pokemon')).strip().lower()
     safe_asset_name = re.sub(r'[^a-zA-Z0-9._-]+', '_', pokemon_name)
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    archive_names = (
+        'RadiantDex_Artwork_HQ.zip',
+        'RADIANTDEX_Radiant_Artwork_HQ.zip',
+        'RADIANTDEX_Radiant_Artwork.zip',
+        'RADIANTDEX_Radiant_Artwork_1.zip',
+        'RADIANTDEX_Radiant_Artwork_2.zip',
+    )
 
-    if str(pokemon_id).isdigit():
-        stem = f'{int(pokemon_id):04d}_{safe_asset_name}'
-        archive_names = (
-            'RADIANTDEX_Radiant_Artwork_HQ.zip',
-            'RadiantDex_Artwork_HQ.zip',
-            'RADIANTDEX_Radiant_Artwork.zip',
-            'RADIANTDEX_Radiant_Artwork_1.zip',
-            'RADIANTDEX_Radiant_Artwork_2.zip',
-        )
-        for extension, output_extension in (('.webp', '.webp'), ('.png', '.png')):
-            asset_basename = stem + extension
-            cache_key = asset_basename
-            if cache_key in _RADIANT_ASSET_CACHE:
-                return discord.File(io.BytesIO(_RADIANT_ASSET_CACHE[cache_key]),
-                                    filename=f'radiant-{safe_asset_name}{output_extension}')
+    def norm_name(value):
+        return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
 
-            # Also support artwork extracted into the conventional folder.
-            extracted_path = os.path.join(base_dir, 'RADIANTDEX_Artwork', asset_basename)
+    def find_archive_paths():
+        found = []
+        checked_dirs = []
+        for directory in (base_dir, os.getcwd()):
+            directory = os.path.abspath(directory)
+            if directory not in checked_dirs:
+                checked_dirs.append(directory)
+        for directory in checked_dirs:
+            for filename in archive_names:
+                path = os.path.join(directory, filename)
+                if os.path.isfile(path) and path not in found:
+                    found.append(path)
+            # Wispbyte and other hosts sometimes place uploaded assets one folder down.
             try:
-                if os.path.isfile(extracted_path):
-                    with open(extracted_path, 'rb') as asset_file:
-                        asset_bytes = asset_file.read()
-                    if asset_bytes:
-                        _RADIANT_ASSET_CACHE[cache_key] = asset_bytes
-                        return discord.File(io.BytesIO(asset_bytes),
-                                            filename=f'radiant-{safe_asset_name}{output_extension}')
+                for child in os.listdir(directory):
+                    child_path = os.path.join(directory, child)
+                    if os.path.isdir(child_path):
+                        for filename in archive_names:
+                            path = os.path.join(child_path, filename)
+                            if os.path.isfile(path) and path not in found:
+                                found.append(path)
             except OSError:
                 pass
+        return found
 
-            # Look up the exact member name inside the uploaded archive.
-            for archive_name in archive_names:
-                archive_path = os.path.join(base_dir, archive_name)
+    def read_from_archive():
+        global _RADIANT_ARCHIVE_INDEX
+        target_name = norm_name(pokemon_name)
+        target_id = int(pokemon_id) if str(pokemon_id).isdigit() else None
+        cache_prefix = f'{target_id or 0}_{target_name}'
+        if cache_prefix in _RADIANT_ASSET_CACHE:
+            cached = _RADIANT_ASSET_CACHE[cache_prefix]
+            return discord.File(io.BytesIO(cached[0]), filename=cached[1])
+
+        # Build a reusable index of exported artwork members: (numeric ID, slug, archive path, member).
+        if not _RADIANT_ARCHIVE_INDEX:
+            index = []
+            for archive_path in find_archive_paths():
                 try:
-                    if not os.path.isfile(archive_path):
-                        continue
                     with zipfile.ZipFile(archive_path, 'r') as archive:
-                        match = next((member for member in archive.namelist()
-                                      if member.rsplit('/', 1)[-1].lower() == asset_basename.lower()), None)
-                        if match:
-                            asset_bytes = archive.read(match)
-                            if asset_bytes:
-                                _RADIANT_ASSET_CACHE[cache_key] = asset_bytes
-                                return discord.File(io.BytesIO(asset_bytes),
-                                                    filename=f'radiant-{safe_asset_name}{output_extension}')
-                except (OSError, zipfile.BadZipFile, KeyError):
+                        for member in archive.namelist():
+                            basename = member.rsplit('/', 1)[-1]
+                            match = re.match(r'^(\\d+)_([a-z0-9._-]+)\\.(webp|png)$', basename, re.I)
+                            if match:
+                                index.append((int(match.group(1)), norm_name(match.group(2)), archive_path, member, match.group(3).lower()))
+                except (OSError, zipfile.BadZipFile):
                     continue
+            _RADIANT_ARCHIVE_INDEX = index
 
-    # If this Pokémon is not included in the exported set, retain the original
-    # PokéAPI-to-Radiant conversion fallback below.
+        if not _RADIANT_ARCHIVE_INDEX:
+            return None
+        matches = [item for item in _RADIANT_ARCHIVE_INDEX if item[1] == target_name]
+        if not matches:
+            # Permit punctuation/spacing differences without matching a different species.
+            compact_target = target_name.replace('-', '')
+            matches = [item for item in _RADIANT_ARCHIVE_INDEX if item[1].replace('-', '') == compact_target]
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (0 if target_id is not None and item[0] == target_id else 1, 0 if item[4] == 'webp' else 1, item[0]))
+        _, _, archive_path, member, extension = matches[0]
+        with zipfile.ZipFile(archive_path, 'r') as archive:
+            asset_bytes = archive.read(member)
+        if not asset_bytes:
+            return None
+        filename = f'radiant-{safe_asset_name}.{extension}'
+        _RADIANT_ASSET_CACHE[cache_prefix] = (asset_bytes, filename)
+        return discord.File(io.BytesIO(asset_bytes), filename=filename)
+
+    # Also support an extracted artwork folder.
+    for directory in dict.fromkeys((base_dir, os.getcwd())):
+        for extension in ('.webp', '.png'):
+            basename = f'{int(pokemon_id):04d}_{safe_asset_name}{extension}' if str(pokemon_id).isdigit() else None
+            if basename:
+                extracted_path = os.path.join(directory, 'RADIANTDEX_Artwork', basename)
+                try:
+                    if os.path.isfile(extracted_path):
+                        with open(extracted_path, 'rb') as asset_file:
+                            asset_bytes = asset_file.read()
+                        if asset_bytes:
+                            return discord.File(io.BytesIO(asset_bytes), filename=f'radiant-{safe_asset_name}{extension}')
+                except OSError:
+                    pass
+
+    try:
+        archive_file = read_from_archive()
+        if archive_file:
+            return archive_file
+    except Exception as exc:
+        print(f'RADIANTDEX archive lookup failed for {pokemon_name}: {type(exc).__name__}: {exc}')
+
+    if require_archive:
+        raise FileNotFoundError(
+            f'RadiantDex artwork for {pokemon_name!r} was not found. '
+            f'Keep RadiantDex_Artwork_HQ.zip beside bot.py (or in the bot working folder).'
+        )
+
+    # Legacy fallback for non-Radiant contexts only; Radiant collection commands
+    # pass require_archive=True so they never silently display ordinary PokéAPI art.
     if Image is None:
         raise RuntimeError('Pillow is not installed. Install it with: python -m pip install pillow')
     sprites = d.get('sprites') or {}
@@ -678,17 +743,14 @@ async def radiant_sprite_file(d):
                     upper, cb = stops[i+1]
                     if lower <= luminance <= upper:
                         t = (luminance-lower)/(upper-lower)
-                        pixels[x, y] = (round(ca[0]+(cb[0]-ca[0])*t),
-                                        round(ca[1]+(cb[1]-ca[1])*t),
-                                        round(ca[2]+(cb[2]-ca[2])*t), a)
+                        pixels[x, y] = tuple(int(ca[j] + (cb[j]-ca[j])*t) for j in range(3)) + (a,)
                         break
-        output = io.BytesIO()
-        image.save(output, format='PNG', optimize=True)
-        output.seek(0)
+        out = io.BytesIO()
+        image.save(out, format='PNG', optimize=True)
+        return discord.File(io.BytesIO(out.getvalue()), filename=f'radiant-{safe_asset_name}.png')
     except Exception as exc:
-        raise RuntimeError(f'Could not process Radiant artwork: {type(exc).__name__}: {exc}') from exc
-    safe_name = re.sub(r'[^a-z0-9_-]+', '-', str(d.get('name', 'pokemon')).lower()).strip('-') or 'pokemon'
-    return discord.File(output, filename=f'radiant-{safe_name}.png')
+        raise RuntimeError(f'Could not convert artwork for {pokemon_name}: {exc}') from exc
+
 
 def max_hp(d,lvl,iv_hp=0): return max(1,int((2*stats(d).get('hp',50)*lvl)/100+lvl+10)+int(max(0,min(31,int(iv_hp or 0)))*max(1,int(lvl))/100))
 def hp_bar(current, maximum, width=12):
@@ -1739,7 +1801,7 @@ class BoxView(TimedView):
             if radiant_row:
                 try:
                     pokemon = await pokemon_data(str(radiant_row[8]))
-                    artwork = await radiant_sprite_file(pokemon)
+                    artwork = await radiant_sprite_file(pokemon, require_archive=True)
                     embed.set_image(url=f'attachment://{artwork.filename}')
                 except Exception as exc:
                     print(f'RADIANTDEX box artwork failed: {exc!r}')
@@ -1794,7 +1856,7 @@ class DexView(TimedView):
         if self.id_prefix == 'R' and current:
             try:
                 pokemon = await pokemon_data(str(current[0][1]))
-                artwork = await radiant_sprite_file(pokemon)
+                artwork = await radiant_sprite_file(pokemon, require_archive=True)
                 embed.set_image(url=f'attachment://{artwork.filename}')
             except Exception as exc:
                 print(f'RADIANTDEX Pokédex page artwork failed: {exc!r}')
@@ -2232,7 +2294,7 @@ class Game(commands.Cog):
             if radiant:e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
             # RADIANTDEX: all wild Pokémon artwork is recoloured purple, not only rare Radiant spawns.
             try:
-                radiant_file = await radiant_sprite_file(d)
+                radiant_file = await radiant_sprite_file(d, require_archive=radiant)
             except Exception as exc:
                 print(f'RADIANTDEX hunt artwork failed for {d.get("name", "unknown")}: {exc!r}')
                 radiant_file = None
@@ -2240,9 +2302,12 @@ class Game(commands.Cog):
                 e.set_image(url=f'attachment://{radiant_file.filename}')
                 await ctx.reply(embed=e, file=radiant_file, mention_author=False)
             else:
-                art=sprite(d,shiny=shiny)
-                if art:e.set_image(url=art)
-                e.set_footer(text='RADIANTDEX artwork unavailable for this entry; showing source artwork.')
+                if not radiant:
+                    art=sprite(d,shiny=shiny)
+                    if art:e.set_image(url=art)
+                    e.set_footer(text='RADIANTDEX artwork unavailable for this entry; showing source artwork.')
+                else:
+                    e.set_footer(text='RadiantDex artwork file missing. Keep RadiantDex_Artwork_HQ.zip beside bot.py.')
                 await ctx.reply(embed=e, mention_author=False)
         except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
 
@@ -2525,7 +2590,7 @@ class Game(commands.Cog):
                 await ctx.send(response)
                 return await ctx.send(embed=boss_embed)
         try:
-            radiant_file=await radiant_sprite_file(d)
+            radiant_file=await radiant_sprite_file(d, require_archive=bool(radiant))
             catch_embed=discord.Embed(
                 title=(f'{RADIANT_EMOJI} Radiant Pokémon registered!' if radiant else f'🎉 {display_name(d)} added to your Box!'),
                 description=response,
@@ -3058,12 +3123,12 @@ class Game(commands.Cog):
         radiant_file = None
         if d:
             try:
-                radiant_file = await radiant_sprite_file(d)
+                radiant_file = await radiant_sprite_file(d, require_archive=radiant)
             except Exception as exc:
                 print(f'RADIANTDEX info artwork failed for {d.get("name", "unknown")}: {exc!r}')
             if radiant_file:
                 e.set_image(url=f'attachment://{radiant_file.filename}')
-            else:
+            elif not radiant:
                 art = sprite(d, shiny=bool(shiny))
                 if art: e.set_image(url=art)
         footer=f'Pokémon species / National Dex ID: {dex_id} • Live collection data • !info defaults to your selected Pokémon'
@@ -3107,10 +3172,10 @@ class Game(commands.Cog):
         radiant_file = None
         try:
             d = await pokemon_data(str(row[2]))
-            radiant_file = await radiant_sprite_file(d)
+            radiant_file = await radiant_sprite_file(d, require_archive=bool(row[-1]))
             if radiant_file:
                 embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
-            else:
+            elif not bool(row[-1]):
                 image_url = sprite(d, shiny=bool(row[6]))
                 if image_url: embed.set_thumbnail(url=image_url)
             embed.add_field(name='Type', value=type_text(d), inline=True)
@@ -3167,13 +3232,13 @@ class Game(commands.Cog):
         yes.callback=yes_cb; no.callback=no_cb; view.add_item(yes); view.add_item(no)
         embed=discord.Embed(title='Confirm Pokémon addition',description=f'Add **{label}** Lv. 50 to {member.mention}?')
         
-        try: radiant_file = await radiant_sprite_file(d)
+        try: radiant_file = await radiant_sprite_file(d, require_archive=radiant)
         except Exception as exc:
             print(f'RADIANTDEX Pokémon-add preview failed: {exc!r}')
             radiant_file = None
         if radiant_file:
             embed.set_image(url=f'attachment://{radiant_file.filename}')
-        else:
+        elif not radiant:
             art=sprite(d,shiny=shiny)
             if art: embed.set_image(url=art)
         if radiant_file: view.message=await ctx.send(embed=embed,view=view,file=radiant_file)
