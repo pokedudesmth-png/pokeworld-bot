@@ -4174,16 +4174,11 @@ class Game(commands.Cog):
             abilities=', '.join(a['ability']['name'].replace('-', ' ').title() + (' (Hidden)' if a.get('is_hidden') else '') for a in d.get('abilities',[])) or 'Unknown'
             e=discord.Embed(title=f'#{d["id"]} — {label}',description=f'**Type:** {type_text(d)}\n**BST:** {sum(s.values())}\n**Generation:** {gen_label}\n**Abilities:** {abilities}')
             for k,l in [('hp','❤️ HP'),('attack','⚔️ Attack'),('defense','🛡️ Defense'),('special-attack','✨ Sp. Atk'),('special-defense','🔰 Sp. Def'),('speed','💨 Speed')]:e.add_field(name=l,value=str(s[k]))
-            radiant_file=None
-            try: radiant_file=await radiant_sprite_file(d)
-            except Exception as exc: print(f'RADIANTDEX Pokédex artwork failed: {exc!r}')
-            if radiant_file:
-                e.set_image(url=f'attachment://{radiant_file.filename}')
-                await ctx.send(embed=e,file=radiant_file)
-            else:
-                art=sprite(d,shiny=shiny)
-                if art:e.set_image(url=art)
-                await ctx.send(embed=e)
+            # This command displays Normal or Shiny species artwork only.
+            # The Radiant archive must never override the requested shiny sprite.
+            art=sprite(d,shiny=shiny)
+            if art:e.set_image(url=art)
+            await ctx.send(embed=e)
         except Exception: await ctx.send('❌ Pokémon not found. Try `!pokedex eternatus` or `!pokedex shinyeternatus`.')
     @commands.command(name='dex',description='View normal/shiny Pokédex by generation or category.')
     async def dex(self,ctx,*,query:str=''):
@@ -4334,12 +4329,8 @@ class Game(commands.Cog):
                 abilities=', '.join(a['ability']['name'].replace('-', ' ').title() + (' (Hidden)' if a.get('is_hidden') else '') for a in d.get('abilities',[])) or 'Unknown'
                 e=discord.Embed(title=f'#{d["id"]} — {label}',description=f'**Type:** {type_text(d)}\n**BST:** {sum(s.values())}\n**Generation:** {gen_label}\n**Abilities:** {abilities}')
                 for stat_key,stat_label in [('hp','❤️ HP'),('attack','⚔️ Attack'),('defense','🛡️ Defense'),('special-attack','✨ Sp. Atk'),('special-defense','🔰 Sp. Def'),('speed','💨 Speed')]: e.add_field(name=stat_label,value=str(s[stat_key]))
-                radiant_file=None
-                try: radiant_file=await radiant_sprite_file(d)
-                except Exception as exc: print(f'RADIANTDEX Dex artwork failed: {exc!r}')
-                if radiant_file:
-                    e.set_image(url=f'attachment://{radiant_file.filename}')
-                    return await ctx.send(embed=e,file=radiant_file)
+                # Direct species lookup respects the requested variant.
+                # Do not call the Radiant artwork loader for Normal/Shiny entries.
                 art=sprite(d,shiny=shiny)
                 if art: e.set_image(url=art)
                 return await ctx.send(embed=e)
@@ -4540,15 +4531,16 @@ class Game(commands.Cog):
         radiant_file = None
         try:
             d = await pokemon_data(str(row[2]))
-            radiant_file = await radiant_sprite_file(d, require_archive=bool(row[-1]))
-            if radiant_file:
-                embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
-            elif not bool(row[-1]):
+            if bool(row[-1]):
+                radiant_file = await radiant_sprite_file(d, require_archive=True)
+                if radiant_file:
+                    embed.set_thumbnail(url=f'attachment://{radiant_file.filename}')
+            else:
                 image_url = sprite(d, shiny=bool(row[6]))
                 if image_url: embed.set_thumbnail(url=image_url)
             embed.add_field(name='Type', value=type_text(d), inline=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f'Pokémon moves artwork failed: {exc!r}')
         embed.set_footer(text='Saved moves • !moves defaults to your team lead')
         if radiant_file: await ctx.send(embed=embed, file=radiant_file)
         else: await ctx.send(embed=embed)
@@ -4625,7 +4617,10 @@ class Game(commands.Cog):
         embed=discord.Embed(title='Confirm Pokémon addition',description=f'Add **{label}** Lv. 50 to {member.mention}?')
         
         try:
-            radiant_file = await radiant_sprite_file(d, require_archive=radiant)
+            if radiant:
+                radiant_file = await radiant_sprite_file(d, require_archive=True)
+            else:
+                radiant_file = None
         except Exception as exc:
             print(f'RADIANTDEX Pokémon-add preview failed: {type(exc).__name__}: {exc}')
             if radiant:
