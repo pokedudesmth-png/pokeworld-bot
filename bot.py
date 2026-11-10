@@ -5380,12 +5380,62 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             'held': 'leftovers',
         }
 
+        async def download_special_pogo_sprite(key):
+            # Look up the real Pokémon GO item artwork through the wiki image API,
+            # then upload those original files as Discord custom emojis.
+            file_titles = {
+                'pokemon-storage': [
+                    'File:Pokémon Storage Upgrade.png',
+                    'File:Pokemon Storage Upgrade.png',
+                    'File:Pokémon Storage.png',
+                    'File:Pokemon Storage.png',
+                ],
+                'raid-pass': [
+                    'File:Raid Pass.png',
+                    'File:GO Raid Pass.png',
+                ],
+            }.get(key, [])
+            last_error = 'original Pokémon GO sprite not found on the item-art source'
+            for title in file_titles:
+                try:
+                    timeout = aiohttp.ClientTimeout(total=20)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        api_url = 'https://pokemongo.fandom.com/api.php'
+                        params = {
+                            'action': 'query', 'titles': title, 'prop': 'imageinfo',
+                            'iiprop': 'url', 'format': 'json', 'origin': '*'
+                        }
+                        async with session.get(api_url, params=params, headers={'User-Agent': 'PokeVantaBot/1.0 (item sprite setup)'}) as response:
+                            if response.status != 200:
+                                last_error = f'{title}: image API HTTP {response.status}'
+                                continue
+                            payload = await response.json(content_type=None)
+                        pages = payload.get('query', {}).get('pages', {})
+                        image_url = next((info.get('url') for page in pages.values() for info in page.get('imageinfo', []) if info.get('url')), None)
+                        if not image_url:
+                            last_error = f'{title}: no image listed'
+                            continue
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            async with session.get(image_url, headers={'User-Agent': 'PokeVantaBot/1.0 (item sprite setup)'}) as response:
+                                if response.status != 200:
+                                    last_error = f'{title}: image HTTP {response.status}'
+                                    continue
+                                data = await response.read()
+                        if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+                            last_error = f'{title}: image is not PNG'
+                            continue
+                        if len(data) > 256 * 1024:
+                            last_error = f'{title}: sprite exceeds Discord 256 KB limit'
+                            continue
+                        return data, title
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                    last_error = f'{title}: {type(exc).__name__}'
+            raise RuntimeError(last_error)
+
         async def download_png(key):
             candidates = [key]
-            if key == 'pokemon-storage':
-                raise RuntimeError('Original Pokémon Storage sprite is not available in the bot assets. Add the original sprite as a server emoji named item_pokemon_storage (or pokemon_storage) and rerun !setupitememojis.')
-            if key == 'raid-pass':
-                raise RuntimeError('Original Raid Pass sprite is not available in the bot assets. Add the Raid Pass sprite as a server emoji named item_raid_pass (or raid_pass) and rerun !setupitememojis.')
+            if key in {'pokemon-storage', 'raid-pass'}:
+                return await download_special_pogo_sprite(key)
             if key in fallback_by_item:
                 candidates.append(fallback_by_item[key])
             if key in {'max-potion', 'full-restore'}:
