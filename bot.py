@@ -4,10 +4,6 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 import aiohttp
-try:
-    from PIL import Image, ImageEnhance, ImageFilter
-except ImportError:
-    Image = ImageEnhance = ImageFilter = None
 import discord
 from discord import app_commands
 from discord.ext import commands
