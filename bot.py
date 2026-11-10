@@ -600,17 +600,6 @@ async def radiant_sprite_file(d, require_archive=False):
     def norm_name(value):
         return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
 
-    def discord_compatible_png(asset_bytes):
-        # Discord embed attachment images are most reliable as PNG/JPEG.
-        # The supplied RadiantDex archive is WebP, so convert it before upload.
-        if Image is None:
-            raise RuntimeError('Pillow is required to render RadiantDex WebP artwork. Install it with: pip install pillow')
-        with Image.open(io.BytesIO(asset_bytes)) as source_image:
-            converted = source_image.convert('RGBA')
-            output = io.BytesIO()
-            converted.save(output, format='PNG', optimize=True)
-            return output.getvalue()
-
     def find_archive_paths():
         found = []
         checked_dirs = []
@@ -680,10 +669,18 @@ async def radiant_sprite_file(d, require_archive=False):
             asset_bytes = archive.read(member)
         if not asset_bytes:
             return None
-        png_bytes = discord_compatible_png(asset_bytes)
+        # Convert the original RadiantDex WebP/PNG to a Discord-friendly PNG.
+        # Preserve transparency and cache the converted bytes for later commands.
+        if Image is None:
+            raise RuntimeError('Pillow is required to convert RadiantDex artwork. Install pillow.')
+        with Image.open(io.BytesIO(asset_bytes)) as source_image:
+            converted = source_image.convert('RGBA')
+            output = io.BytesIO()
+            converted.save(output, format='PNG', optimize=True)
+            upload_bytes = output.getvalue()
         filename = f'radiant-{safe_asset_name}.png'
-        _RADIANT_ASSET_CACHE[cache_prefix] = (png_bytes, filename)
-        return discord.File(io.BytesIO(png_bytes), filename=filename)
+        _RADIANT_ASSET_CACHE[cache_prefix] = (upload_bytes, filename)
+        return discord.File(io.BytesIO(upload_bytes), filename=filename)
 
     # Also support an extracted artwork folder.
     for directory in dict.fromkeys((base_dir, os.getcwd())):
@@ -696,8 +693,13 @@ async def radiant_sprite_file(d, require_archive=False):
                         with open(extracted_path, 'rb') as asset_file:
                             asset_bytes = asset_file.read()
                         if asset_bytes:
-                            png_bytes = discord_compatible_png(asset_bytes)
-                            return discord.File(io.BytesIO(png_bytes), filename=f'radiant-{safe_asset_name}.png')
+                            if Image is None:
+                                raise RuntimeError('Pillow is required to convert RadiantDex artwork. Install pillow.')
+                            with Image.open(io.BytesIO(asset_bytes)) as source_image:
+                                converted = source_image.convert('RGBA')
+                                output = io.BytesIO()
+                                converted.save(output, format='PNG', optimize=True)
+                            return discord.File(io.BytesIO(output.getvalue()), filename=f'radiant-{safe_asset_name}.png')
                 except OSError:
                     pass
 
@@ -3122,7 +3124,11 @@ class Game(commands.Cog):
         radiant=bool(tail[6]) if len(tail)>6 else False
         with db() as c: display_iid=get_box_id(c,ctx.author.id,iid) or iid
         try:
-            d=await pokemon_data(str(dex_id)); iv_map=dict(zip(('hp','attack','defense','special-attack','special-defense','speed'),iv_values)); base=iv_adjusted_stats(d,iv_map,level); types=type_text(d); abilities=', '.join(a['ability']['name'].replace('-',' ').title() for a in d.get('abilities',[])) or 'Unknown'
+            try:
+                d=await pokemon_data(str(name))
+            except Exception:
+                d=await pokemon_data(str(dex_id))
+            iv_map=dict(zip(('hp','attack','defense','special-attack','special-defense','speed'),iv_values)); base=iv_adjusted_stats(d,iv_map,level); types=type_text(d); abilities=', '.join(a['ability']['name'].replace('-',' ').title() for a in d.get('abilities',[])) or 'Unknown'
         except Exception:
             base={}; types='Unknown'; abilities='Unknown'; d=None
         hp=max(0,min(hp,maxhp)); maxhp=max(1,maxhp); ratio=hp/maxhp
@@ -3210,7 +3216,12 @@ class Game(commands.Cog):
         raw_name=pokemon_name.strip()
         radiant=raw_name.lower().replace(' ','').startswith('radiant')
         shiny=raw_name.lower().replace(' ','').startswith('shiny')
-        lookup=raw_name[7:] if radiant else (raw_name[5:] if shiny else raw_name)
+        if radiant:
+            lookup=re.sub(r'^radiant(?:\s+|[-_:]*)', '', raw_name, flags=re.I)
+        elif shiny:
+            lookup=re.sub(r'^shiny(?:\s+|[-_:]*)', '', raw_name, flags=re.I)
+        else:
+            lookup=raw_name
         lookup=lookup.strip().lower().replace(' ','-')
         try:
             d=await pokemon_data(lookup)
