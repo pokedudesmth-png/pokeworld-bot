@@ -578,7 +578,11 @@ _RADIANT_ASSET_CACHE = {}
 _RADIANT_ARCHIVE_INDEX = None
 
 async def radiant_sprite_file(d, require_archive=False):
-    """Load the exact matching RadiantDex export as a PNG Discord attachment."""
+    """Load a pre-rendered RadiantDex image from the artwork ZIP.
+
+    The ZIP already contains the purple artwork, so Pillow is not needed:
+    Discord can accept the original PNG/WebP bytes directly.
+    """
     pokemon_id = d.get('id')
     pokemon_name = str(d.get('name', 'pokemon')).strip().lower()
     safe_asset_name = re.sub(r'[^a-zA-Z0-9-]+', '-', pokemon_name).strip('-') or 'pokemon'
@@ -586,8 +590,6 @@ async def radiant_sprite_file(d, require_archive=False):
     def norm(value):
         return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
 
-    # Search script folder and working folder. Do not cache an empty index:
-    # Wispbyte can make the ZIP available after the bot process has started.
     directories = list(dict.fromkeys((os.path.dirname(os.path.abspath(__file__)), os.getcwd())))
     archive_paths = []
     for directory in directories:
@@ -620,7 +622,7 @@ async def radiant_sprite_file(d, require_archive=False):
         try:
             with zipfile.ZipFile(archive_path, 'r') as archive:
                 for member in archive.namelist():
-                    match = re.match(r'^(\d+)_([a-z0-9._-]+)\.(webp|png)$', member.rsplit('/', 1)[-1], re.I)
+                    match = re.match(r'^(\\d+)_([a-z0-9._-]+)\\.(webp|png)$', member.rsplit('/', 1)[-1], re.I)
                     if not match:
                         continue
                     file_id = int(match.group(1))
@@ -636,50 +638,51 @@ async def radiant_sprite_file(d, require_archive=False):
         matches.sort(key=lambda x: (x[0], x[1], x[2]))
         _, _, archive_path, member = matches[0]
         with zipfile.ZipFile(archive_path, 'r') as archive:
-            raw = archive.read(member)
-        if Image is None:
-            raise RuntimeError('Pillow is required for RadiantDex image conversion. Install pillow.')
-        with Image.open(io.BytesIO(raw)) as source:
-            converted = source.convert('RGBA')
-            output = io.BytesIO()
-            converted.save(output, format='PNG', optimize=True)
-        png_bytes = output.getvalue()
-        filename = f'radiant-{safe_asset_name}.png'
-        _RADIANT_ASSET_CACHE[cache_key] = (png_bytes, filename)
-        print(f'RADIANTDEX: selected {member} from {archive_path}; uploaded as {filename}')
-        return discord.File(io.BytesIO(png_bytes), filename=filename)
+            image_bytes = archive.read(member)
+        extension = os.path.splitext(member)[1].lower()
+        filename = f'radiant-{safe_asset_name}{extension}'
+        _RADIANT_ASSET_CACHE[cache_key] = (image_bytes, filename)
+        print(f'RADIANTDEX: selected {member} from {archive_path}; uploaded original {extension} bytes as {filename}')
+        return discord.File(io.BytesIO(image_bytes), filename=filename)
 
     if require_archive:
-        raise FileNotFoundError(f'No RadiantDex image match for name={pokemon_name!r}, id={pokemon_id!r}; searched archives={archive_paths or "NONE"}')
+        raise FileNotFoundError(
+            f'No RadiantDex image match for name={pokemon_name!r}, id={pokemon_id!r}; '
+            f'searched archives={archive_paths or "NONE"}'
+        )
 
-    # Non-Radiant callers retain their legacy PokéAPI artwork behavior.
-    if Image is None:
-        raise RuntimeError('Pillow is not installed. Install pillow.')
+    # Preserve the legacy PokéAPI artwork attachment behavior without converting it.
     sprites = d.get('sprites') or {}
     other = sprites.get('other') or {}
     official = other.get('official-artwork') or {}
     home = other.get('home') or {}
-    candidates = list(dict.fromkeys(url for url in (official.get('front_default'), home.get('front_default'), sprites.get('front_default')) if url))
+    candidates = list(dict.fromkeys(
+        url for url in (
+            official.get('front_default'),
+            home.get('front_default'),
+            sprites.get('front_default')
+        ) if url
+    ))
     if not candidates:
         return None
-    raw = None
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
+
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         for url in candidates:
             try:
                 async with session.get(url) as response:
-                    if response.status == 200:
-                        raw = await response.read()
-                        if raw:
-                            break
-            except Exception:
-                pass
-    if not raw:
-        return None
-    with Image.open(io.BytesIO(raw)) as source:
-        converted = source.convert('RGBA')
-        output = io.BytesIO()
-        converted.save(output, format='PNG', optimize=True)
-    return discord.File(io.BytesIO(output.getvalue()), filename=f'{safe_asset_name}.png')
+                    if response.status != 200:
+                        continue
+                    image_bytes = await response.read()
+                    if not image_bytes:
+                        continue
+                    # PokéAPI artwork is generally PNG; retain WebP when the URL says so.
+                    extension = '.webp' if '.webp' in url.lower() else '.png'
+                    filename = f'{safe_asset_name}{extension}'
+                    return discord.File(io.BytesIO(image_bytes), filename=filename)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+    return None
 
 def max_hp(d,lvl,iv_hp=0): return max(1,int((2*stats(d).get('hp',50)*lvl)/100+lvl+10)+int(max(0,min(31,int(iv_hp or 0)))*max(1,int(lvl))/100))
 def hp_bar(current, maximum, width=12):
