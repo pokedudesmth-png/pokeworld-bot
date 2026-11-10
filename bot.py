@@ -2500,7 +2500,9 @@ class Game(commands.Cog):
         fossil_species = {'omanyte','omastar','kabuto','kabutops','aerodactyl','lileep','cradily','anorith','armaldo','cranidos','rampardos','shieldon','bastiodon','tirtouga','carracosta','archen','archeops','tyrunt','tyrantrum','amaura','aurorus'}
         if str(d.get('name','')).strip().lower().replace(' ','-') in fossil_species:
             pv_record_activity(uid,'fossil_catch',1,getattr(ctx.guild,'id',None))
-        loot=grant_game_reward(uid,xp=25,rolls=3,guaranteed_items={'rare-candy':5,'elite-charged-tm':1} if is_global else None)
+        # Catching a Pokémon gives a clear, predictable reward: 50 coins + 25 XP.
+        # Do not roll random inventory loot for ordinary or server-wide catches.
+        add_progress(uid,coins=50,xp=25)
         if bool(enc[2]) and ctx.guild:
             await log_rare_shiny_event(ctx.guild, ctx.author, display_name(d), action='caught', level=enc[3], image_url=sprite(d, shiny=True))
         boss_unlocked=False
@@ -2519,7 +2521,7 @@ class Game(commands.Cog):
                 c.execute('UPDATE hunt_counts SET count=? WHERE user_id=?',(catch_progress,uid))
         note=' **You were the first to guess it!**' if is_global else ''
         variant=(RADIANT_EMOJI + ' RADIANT ') if radiant else ('✨ SHINY ' if enc[2] else '')
-        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + f'\n🎒 Reward: **{loot}** • +25 XP. Check `!inventory`.'
+        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + '\n💰 Reward: **+50 coins** • ⭐ **+25 XP**.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -2538,18 +2540,29 @@ class Game(commands.Cog):
                 response+='\n\n'+f'🔥 **Legendary boss unlocked!** Your next encounter is ready — use `!add <pokemon_id>` to select three Pokémon, then `!legendarybattle`.'
                 await ctx.send(response)
                 return await ctx.send(embed=boss_embed)
-        try:
-            radiant_file=await radiant_sprite_file(d, require_archive=bool(radiant))
-            catch_embed=discord.Embed(
-                title=(f'{RADIANT_EMOJI} Radiant Pokémon registered!' if radiant else f'🎉 {display_name(d)} added to your Box!'),
-                description=response,
-                color=discord.Color.from_rgb(145,65,230)
-            )
-            catch_embed.set_image(url=f'attachment://{radiant_file.filename}')
-            return await ctx.send(embed=catch_embed,file=radiant_file)
-        except Exception as exc:
-            print(f'RADIANTDEX catch artwork failed for {d.get("name", "unknown")}: {type(exc).__name__}: {exc}')
-            return await ctx.send(response + '\n⚠️ Radiant artwork could not be rendered; showing text only.')
+        catch_embed=discord.Embed(
+            title=(f'{RADIANT_EMOJI} Radiant Pokémon registered!' if radiant else f'🎉 {display_name(d)} added to your Box!'),
+            description=response,
+            color=discord.Color.from_rgb(145,65,230) if radiant else (discord.Color.gold() if enc[2] else discord.Color.blurple())
+        )
+        if radiant:
+            # Only genuine Radiant catches may use the special RadiantDex artwork.
+            try:
+                radiant_file=await radiant_sprite_file(d, require_archive=True)
+                catch_embed.set_image(url=f'attachment://{radiant_file.filename}')
+                return await ctx.send(embed=catch_embed,file=radiant_file)
+            except Exception as exc:
+                print(f'RADIANTDEX catch artwork failed for {d.get("name", "unknown")}: {type(exc).__name__}: {exc}')
+                normal_art=sprite(d)
+                if normal_art:
+                    catch_embed.set_image(url=normal_art)
+                catch_embed.set_footer(text='Radiant artwork unavailable; the Pokémon is still registered as Radiant.')
+                return await ctx.send(embed=catch_embed)
+        # Normal and Shiny catches must never call the Radiant artwork loader.
+        catch_art=sprite(d, shiny=bool(enc[2]))
+        if catch_art:
+            catch_embed.set_image(url=catch_art)
+        return await ctx.send(embed=catch_embed)
 
     @commands.command(name='cancel',aliases=['stop','quit'])
     async def cancel(self,ctx):
