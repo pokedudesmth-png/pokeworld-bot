@@ -122,6 +122,7 @@ SHOP_ITEMS = {
   52: ('fast-tm', 'Fast TM', 5000, 'Changes a Pokémon’s Fast Move randomly', 'ftm52'),
   53: ('charged-tm', 'Charged TM', 10000, 'Changes a Pokémon’s Charged Move randomly', 'ctm53'),
   54: ('elite-charged-tm', 'Elite Charged TM', 25000, 'Choose the Pokémon’s new Charged Move', 'ectm54'),
+  55: ('pokemon-storage', 'Pokémon Storage', 50000, 'Permanent upgrade: adds 50 Pokémon storage spaces per purchase. Trainers start with 50 spaces; maximum capacity is 200.', 'pst55'),
 }
 ITEM_BY_KEY = {v[0]: (k, *v) for k,v in SHOP_ITEMS.items()}
 # Display-only emojis; no catalog, pricing, or game mechanics are changed.
@@ -132,7 +133,7 @@ ITEM_EMOJI = {
  'charcoal':'🪵','mystic-water':'💧','magnet':'🧲','miracle-seed':'🌱','never-melt-ice':'🧊',
  'spell-tag':'📜','dragon-fang':'🦷','silk-scarf':'🧵','sharp-beak':'🪶','poison-barb':'🦂',
  'soft-sand':'🏜️','hard-stone':'🪨','silver-powder':'✨','black-glasses':'🌑','twisted-spoon':'🥄',
- 'metal-coat':'🛡️','pixie-plate':'🧚','potion':'🧪','super-potion':'⚗️','hyper-potion':'💉',
+ 'metal-coat':'🛡️','pixie-plate':'🧚','pokemon-storage':'','potion':'🧪','super-potion':'⚗️','hyper-potion':'💉',
  'max-potion':'','full-restore':'','fast-tm':'⚡','charged-tm':'🔋','elite-charged-tm':'🌟'
 }
 # Official item sprites are uploaded to this Discord server as custom emojis by
@@ -147,6 +148,11 @@ def get_vantacoin_emoji():
     except (OSError, ValueError, TypeError):
         pass
     return ''  # Do not substitute a generic coin emoji when the custom sprite is unavailable.
+
+
+def is_server_booster(member):
+    """Return whether this guild member is currently boosting this server."""
+    return bool(member and getattr(member, 'premium_since', None))
 
 # Actual user-provided VantaCoin artwork, resized to Discord's 128px emoji dimensions.
 VANTACOIN_SPRITE_B64 = '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'
@@ -169,7 +175,8 @@ except (OSError, ValueError, TypeError):
     pass
 
 def item_emoji(item):
-    return ITEM_EMOJI.get(item, '🎒')
+    # Prefer the same uploaded custom sprite used by !shop; keep Unicode only as a fallback.
+    return SHOP_ITEM_EMOJI.get(item) or ITEM_EMOJI.get(item, '🎒')
 SHOP_ALIASES = {}
 for _pid, (_key, _label, _cost, _desc, _short) in SHOP_ITEMS.items():
     for _alias in (_key, _label, _short, str(_pid)):
@@ -317,6 +324,14 @@ def setup():
             # Existing trainers were already playing before this feature existed.
             c.execute('UPDATE players SET started=1')
         c.execute('CREATE TABLE IF NOT EXISTS pokemon(instance_id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,dex_id INTEGER,name TEXT,level INTEGER DEFAULT 5,xp INTEGER DEFAULT 0,shiny INTEGER DEFAULT 0,nickname TEXT DEFAULT "",hp INTEGER DEFAULT 1,max_hp INTEGER DEFAULT 1,held_item TEXT DEFAULT "",status_condition TEXT DEFAULT "")')
+        c.execute('CREATE TABLE IF NOT EXISTS pv_pokemon_storage(user_id INTEGER PRIMARY KEY, capacity INTEGER NOT NULL DEFAULT 50 CHECK(capacity BETWEEN 50 AND 200))')
+        # Preserve existing collections during migration; existing owners get the
+        # smallest 50-slot tier that can contain their current box, capped at 200.
+        existing_storage_owners = c.execute('SELECT user_id,COUNT(*) FROM pokemon WHERE user_id IS NOT NULL AND user_id<>0 GROUP BY user_id').fetchall()
+        for storage_uid, owned_count in existing_storage_owners:
+            preserved_capacity = min(200, max(50, ((int(owned_count) + 49) // 50) * 50))
+            c.execute('INSERT OR IGNORE INTO pv_pokemon_storage(user_id,capacity) VALUES(?,?)', (storage_uid,preserved_capacity))
+        # Storage triggers are installed after all Pokémon columns are migrated below.
         c.execute("CREATE TABLE IF NOT EXISTS pokedex_entries(user_id INTEGER NOT NULL,dex_id INTEGER NOT NULL,name TEXT NOT NULL,shiny INTEGER NOT NULL DEFAULT 0,registered_at INTEGER DEFAULT 0,PRIMARY KEY(user_id,dex_id,shiny))")
         c.execute("CREATE TABLE IF NOT EXISTS radiant_pokedex_entries(user_id INTEGER NOT NULL,radiant_dex_id INTEGER NOT NULL,dex_id INTEGER NOT NULL,name TEXT NOT NULL,registered_at INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,radiant_dex_id),UNIQUE(user_id,dex_id))")
         pcols=[r[1] for r in c.execute('PRAGMA table_info(pokemon)').fetchall()]
@@ -334,6 +349,38 @@ def setup():
         if 'fast_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN fast_move TEXT DEFAULT ""')
         if 'charged_move' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN charged_move TEXT DEFAULT ""')
         if 'box_id' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN box_id INTEGER')
+        if 'unclaimed' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN unclaimed INTEGER NOT NULL DEFAULT 0')
+        # All newly awarded Shiny/Radiant Pokémon enter the separate Unclaimed
+        # holding area automatically, regardless of which reward path inserted them.
+        c.execute('DROP TRIGGER IF EXISTS pokemon_storage_limit_insert')
+        c.execute('''CREATE TRIGGER pokemon_storage_limit_insert BEFORE INSERT ON pokemon
+            WHEN NEW.user_id IS NOT NULL AND NEW.user_id<>0
+                 AND COALESCE(NEW.shiny,0)=0 AND COALESCE(NEW.radiant,0)=0
+            BEGIN
+              SELECT CASE WHEN (SELECT COUNT(*) FROM pokemon WHERE user_id=NEW.user_id AND COALESCE(unclaimed,0)=0) >=
+                COALESCE((SELECT capacity FROM pv_pokemon_storage WHERE user_id=NEW.user_id),50)
+                THEN RAISE(ABORT,'POKEMON_STORAGE_FULL') END;
+            END''')
+        c.execute('DROP TRIGGER IF EXISTS pokemon_storage_limit_transfer')
+        c.execute('''CREATE TRIGGER pokemon_storage_limit_transfer BEFORE UPDATE OF user_id ON pokemon
+            WHEN NEW.user_id IS NOT NULL AND NEW.user_id<>0 AND NEW.user_id<>OLD.user_id
+                 AND COALESCE(NEW.unclaimed,0)=0
+            BEGIN
+              SELECT CASE WHEN (SELECT COUNT(*) FROM pokemon WHERE user_id=NEW.user_id AND COALESCE(unclaimed,0)=0) >=
+                COALESCE((SELECT capacity FROM pv_pokemon_storage WHERE user_id=NEW.user_id),50)
+                THEN RAISE(ABORT,'POKEMON_STORAGE_FULL') END;
+            END''')
+        c.execute('DROP TRIGGER IF EXISTS pokemon_route_rare_to_unclaimed')
+        c.execute('''CREATE TRIGGER pokemon_route_rare_to_unclaimed AFTER INSERT ON pokemon
+            WHEN NEW.user_id IS NOT NULL AND NEW.user_id<>0
+                 AND (COALESCE(NEW.shiny,0)=1 OR COALESCE(NEW.radiant,0)=1)
+            BEGIN
+              UPDATE pokemon SET unclaimed=1,box_id=NULL
+                WHERE instance_id=NEW.instance_id;
+              DELETE FROM pokemon
+                WHERE instance_id=NEW.instance_id
+                  AND (SELECT COUNT(*) FROM pokemon WHERE user_id=NEW.user_id AND unclaimed=1)>10;
+            END''')
         iv_columns=('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed')
         iv_schema_missing=any(col not in pcols for col in iv_columns)
         for iv_col in iv_columns:
@@ -371,11 +418,12 @@ def setup():
               WHERE instance_id=NEW.instance_id;
             END''')
         # Backfill stable, per-owner collection IDs. Listed Pokémon are unowned and receive an ID on return/purchase.
-        owners=c.execute('SELECT DISTINCT user_id FROM pokemon WHERE user_id IS NOT NULL AND user_id<>0').fetchall()
+        c.execute('UPDATE pokemon SET box_id=NULL WHERE COALESCE(unclaimed,0)=1')
+        owners=c.execute('SELECT DISTINCT user_id FROM pokemon WHERE user_id IS NOT NULL AND user_id<>0 AND COALESCE(unclaimed,0)=0').fetchall()
         for (owner_id,) in owners:
-            existing={int(r[0]) for r in c.execute('SELECT box_id FROM pokemon WHERE user_id=? AND box_id IS NOT NULL',(owner_id,)).fetchall()}
+            existing={int(r[0]) for r in c.execute('SELECT box_id FROM pokemon WHERE user_id=? AND box_id IS NOT NULL AND COALESCE(unclaimed,0)=0',(owner_id,)).fetchall()}
             next_id=max(existing,default=0)+1
-            missing=c.execute('SELECT instance_id FROM pokemon WHERE user_id=? AND box_id IS NULL ORDER BY instance_id',(owner_id,)).fetchall()
+            missing=c.execute('SELECT instance_id FROM pokemon WHERE user_id=? AND box_id IS NULL AND COALESCE(unclaimed,0)=0 ORDER BY instance_id',(owner_id,)).fetchall()
             for (global_id,) in missing:
                 while next_id in existing: next_id+=1
                 c.execute('UPDATE pokemon SET box_id=? WHERE instance_id=?',(next_id,global_id)); existing.add(next_id); next_id+=1
@@ -387,6 +435,14 @@ def setup():
         c.execute('CREATE TABLE IF NOT EXISTS raid_party(user_id INTEGER,slot INTEGER,instance_id INTEGER,PRIMARY KEY(user_id,slot),UNIQUE(user_id,instance_id))')
         c.execute('UPDATE pokemon SET level=300 WHERE level>300')
         c.execute('CREATE TABLE IF NOT EXISTS team(user_id INTEGER,slot INTEGER,instance_id INTEGER,PRIMARY KEY(user_id,slot))')
+        c.execute('DROP TRIGGER IF EXISTS team_block_unclaimed_pokemon')
+        c.execute('''CREATE TRIGGER team_block_unclaimed_pokemon BEFORE INSERT ON team
+            WHEN NOT EXISTS (SELECT 1 FROM pokemon WHERE instance_id=NEW.instance_id AND user_id=NEW.user_id AND COALESCE(unclaimed,0)=0)
+            BEGIN SELECT RAISE(IGNORE); END''')
+        c.execute('DROP TRIGGER IF EXISTS team_update_block_unclaimed_pokemon')
+        c.execute('''CREATE TRIGGER team_update_block_unclaimed_pokemon BEFORE UPDATE OF instance_id ON team
+            WHEN NOT EXISTS (SELECT 1 FROM pokemon WHERE instance_id=NEW.instance_id AND user_id=NEW.user_id AND COALESCE(unclaimed,0)=0)
+            BEGIN SELECT RAISE(IGNORE); END''')
         c.execute('CREATE TABLE IF NOT EXISTS inventory(user_id INTEGER,item TEXT,amount INTEGER,PRIMARY KEY(user_id,item))')
         c.execute("DELETE FROM inventory WHERE item LIKE '%-berry'")
         c.execute("UPDATE pokemon SET held_item='' WHERE held_item LIKE '%-berry'")
@@ -427,31 +483,81 @@ def get_radiant_dex_id(conn, uid, dex_id):
 
 def assign_box_id(conn, uid, instance_id):
     if uid is None or int(uid)==0: return None
+    exists=conn.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(instance_id,uid)).fetchone()
+    if not exists or bool(exists[0]): return None
     current=get_box_id(conn,uid,instance_id)
     if current is not None: return current
-    row=conn.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=?',(uid,)).fetchone()
+    row=conn.execute('SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=? AND COALESCE(unclaimed,0)=0',(uid,)).fetchone()
     new_id=int(row[0] or 1)
-    conn.execute('UPDATE pokemon SET box_id=? WHERE instance_id=? AND user_id=?',(new_id,instance_id,uid))
+    conn.execute('UPDATE pokemon SET box_id=? WHERE instance_id=? AND user_id=? AND COALESCE(unclaimed,0)=0',(new_id,instance_id,uid))
     return new_id
 
-def transfer_pokemon_owner(conn, instance_id, old_uid, new_uid):
-    """Transfer a Pokémon and keep both affected player boxes contiguous.
+POKEMON_STORAGE_BASE = 50
+POKEMON_STORAGE_STEP = 50
+POKEMON_STORAGE_MAX = 200
 
-    Internal instance_id is never changed; only the user-facing box_id is
-    compacted, so teams and other internal references remain stable.
-    """
+def pokemon_storage_status(conn, uid):
+    """Return (owned_count, capacity), defaulting new trainers to 50 slots."""
+    owned = int(conn.execute('SELECT COUNT(*) FROM pokemon WHERE user_id=? AND COALESCE(unclaimed,0)=0', (uid,)).fetchone()[0] or 0)
+    row = conn.execute('SELECT capacity FROM pv_pokemon_storage WHERE user_id=?', (uid,)).fetchone()
+    capacity = int(row[0]) if row else POKEMON_STORAGE_BASE
+    return owned, min(POKEMON_STORAGE_MAX, max(POKEMON_STORAGE_BASE, capacity))
+
+def pokemon_storage_status_for_user(uid):
+    with db() as conn:
+        return pokemon_storage_status(conn, uid)
+
+def pokemon_storage_full_message(owned, capacity):
+    return (f'📦 **Your Pokémon Storage is full ({owned}/{capacity}).**\n'
+            f'Buy `Pokémon Storage` with `!shop buy pst55` to add **50 spaces** (up to **200 Pokémon**), '
+            'or release/trade a Pokémon before claiming another.')
+
+def pokemon_storage_has_room(conn, uid):
+    owned, capacity = pokemon_storage_status(conn, uid)
+    return owned < capacity
+
+def transfer_pokemon_owner(conn, instance_id, old_uid, new_uid):
+    """Transfer a Pokémon, routing incoming Shiny/Radiant variants to Unclaimed."""
+    pokemon_row = conn.execute(
+        'SELECT shiny,radiant FROM pokemon WHERE instance_id=? AND user_id=?',
+        (instance_id, old_uid)
+    ).fetchone()
+    if not pokemon_row:
+        return None
+    is_rare = bool(pokemon_row[0] or pokemon_row[1])
+    for table in ('team', 'boss_party', 'raid_party'):
+        conn.execute(f'DELETE FROM {table} WHERE instance_id=?', (instance_id,))
+
+    # Player-to-player or market-to-player transfers of rare variants use one of
+    # the recipient's ten Unclaimed slots. If all ten are occupied, the Pokémon
+    # is deleted as requested rather than bypassing the cap.
+    if new_uid and int(new_uid) != 0 and is_rare:
+        unclaimed_count = int(conn.execute(
+            'SELECT COUNT(*) FROM pokemon WHERE user_id=? AND unclaimed=1', (new_uid,)
+        ).fetchone()[0] or 0)
+        if unclaimed_count >= 10:
+            conn.execute('DELETE FROM pokemon WHERE instance_id=? AND user_id=?', (instance_id,old_uid))
+            if old_uid and int(old_uid) != 0:
+                compact_box_ids(conn, int(old_uid))
+            return None
+        cur = conn.execute(
+            'UPDATE pokemon SET user_id=?,unclaimed=1,box_id=NULL WHERE instance_id=? AND user_id=?',
+            (new_uid,instance_id,old_uid)
+        )
+        if cur.rowcount and old_uid and int(old_uid) != 0:
+            compact_box_ids(conn, int(old_uid))
+        return f'U{instance_id}' if cur.rowcount else None
+
     if new_uid and int(new_uid) != 0:
         row = conn.execute(
-            'SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=?',
+            'SELECT COALESCE(MAX(box_id),0)+1 FROM pokemon WHERE user_id=? AND COALESCE(unclaimed,0)=0',
             (new_uid,)
         ).fetchone()
         new_box_id = int(row[0] or 1)
     else:
         new_box_id = None
-    for table in ('team', 'boss_party', 'raid_party'):
-        conn.execute(f'DELETE FROM {table} WHERE instance_id=?', (instance_id,))
     cur = conn.execute(
-        'UPDATE pokemon SET user_id=?,box_id=? WHERE instance_id=? AND user_id=?',
+        'UPDATE pokemon SET user_id=?,box_id=?,unclaimed=0 WHERE instance_id=? AND user_id=?',
         (new_uid, new_box_id, instance_id, old_uid)
     )
     if cur.rowcount:
@@ -470,7 +576,7 @@ def compact_box_ids(conn, uid):
     references therefore remain stable while !box / !info / !ta show 1, 2, 3, ... .
     """
     rows=conn.execute(
-        'SELECT instance_id FROM pokemon WHERE user_id=? ORDER BY box_id IS NULL, box_id, instance_id',
+        'SELECT instance_id FROM pokemon WHERE user_id=? AND COALESCE(unclaimed,0)=0 ORDER BY box_id IS NULL, box_id, instance_id',
         (uid,)
     ).fetchall()
     if not rows:
@@ -1316,18 +1422,30 @@ class NPCBattleView(TimedView):
             if self.raid:
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid; assign_box_id(c,self.uid,iid)
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
+                    rare_saved=bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(iid,self.uid)).fetchone())
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
                 if inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}` (raid boss was Lv.{boss_level})!\n🍬 **+50 Rare Candies** added to your inventory.\nUse `!candy {get_box_id(c,self.uid,iid)} <amount>` to level it or another Pokémon (max Lv. 300).',view=None)
+                rare_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.' if rare_saved else '⚠️ Unclaimed Storage was full (10/10), so the shiny boss vanished.'
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
             if self.boss:
+                with db() as storage_conn:
+                    owned_count, storage_capacity = pokemon_storage_status(storage_conn, self.uid)
+                    if not self.boss_shiny and owned_count >= storage_capacity:
+                        storage_conn.execute('DELETE FROM boss_encounters WHERE user_id=?', (self.uid,))
+                        storage_conn.execute('DELETE FROM boss_party WHERE user_id=?', (self.uid,))
+                        if self.active_boss_battles is not None: self.active_boss_battles.discard(self.uid)
+                        return await self.update_battle(inter, content='🏆 **LEGENDARY VICTORY!**\nYour Pokémon Storage is full, so the boss Pokémon could not be added to your box. Your battle is complete.\n' + pokemon_storage_full_message(owned_count, storage_capacity), view=None)
                 mh=self.enemy_max_hp
                 with db() as c:
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],self.enemy['_level'],int(self.boss_shiny),mh,mh)); iid=cur.lastrowid; assign_box_id(c,self.uid,iid)
-                    if not c.execute('SELECT 1 FROM team WHERE user_id=?',(self.uid,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(self.uid,1,iid))
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],self.enemy['_level'],int(self.boss_shiny),mh,mh)); iid=cur.lastrowid
+                    boss_row=c.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(iid,self.uid)).fetchone()
+                    boss_unclaimed=bool(boss_row and boss_row[0])
+                    box_id=assign_box_id(c,self.uid,iid) if boss_row else None
+                    if boss_row and not boss_unclaimed and not c.execute('SELECT 1 FROM team WHERE user_id=?',(self.uid,)).fetchone(): c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(self.uid,1,iid))
                     c.execute('DELETE FROM boss_encounters WHERE user_id=?',(self.uid,))
                     c.execute('DELETE FROM boss_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
@@ -1339,7 +1457,13 @@ class NPCBattleView(TimedView):
                     if inter.guild:
                         await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}** and received **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**.\n**Result:** Jackpot credited after victory.', guild=inter.guild, user=inter.user)
                 jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes** have been added to your inventory! 💰' if jackpot else ''
-                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]} — ID `{get_box_id(c,self.uid,iid)}`!\n🎒 Loot: **{loot}** • ⭐ +{x} XP{jackpot_text}',view=None)
+                if boss_unclaimed:
+                    boss_storage_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.'
+                elif not boss_row:
+                    boss_storage_note='⚠️ Unclaimed Storage was full (10/10), so the Shiny/Radiant reward vanished.'
+                else:
+                    boss_storage_note=f'Box ID `{box_id}`.'
+                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]}!\n{boss_storage_note}\n🎒 Loot: **{loot}** • ⭐ +{x} XP{jackpot_text}',view=None)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
         self.enemy_hp, tickmsg=status_tick(self.enemy_status,self.enemy_hp,self.enemy_max_hp)
         if tickmsg: msg+='\n'+tickmsg
@@ -1355,13 +1479,15 @@ class NPCBattleView(TimedView):
             if self.raid:
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
-                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid; assign_box_id(c,self.uid,iid)
+                    cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
+                    rare_saved=bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(iid,self.uid)).fetchone())
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
                 if inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Caught shiny **{display_name(self.enemy)}** Lv.{caught_level} — ID `{get_box_id(c,self.uid,iid)}`!\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
+                rare_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.' if rare_saved else '⚠️ Unclaimed Storage was full (10/10), so the shiny boss vanished.'
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
             return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
         em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'],defender_ivs=pokemon_ivs(self.row),defender_level=self.row[4],defender_radiant=bool(len(self.row)>12 and self.row[12]));dmg=int(dmg*held_damage_multiplier(enemyheld,em,eff))
@@ -1596,8 +1722,10 @@ class ShopView(TimedView):
     def matches_category(self, key):
         if self.category == 'potions':
             return key in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}
+        if self.category == 'storage':
+            return key == 'pokemon-storage'
         if self.category == 'held':
-            return key not in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore'}
+            return key not in {'potion', 'super-potion', 'hyper-potion', 'max-potion', 'full-restore', 'pokemon-storage'}
         return True
 
     def update_buttons(self):
@@ -1608,7 +1736,7 @@ class ShopView(TimedView):
         """Render one Discord embed containing up to ten shop items."""
         start = self.page * self.ITEMS_PER_PAGE
         current = self.entries[start:start + self.ITEMS_PER_PAGE]
-        labels = {'all': 'All Items', 'potions': 'Potions', 'held': 'Held Items'}
+        labels = {'all': 'All Items', 'potions': 'Potions', 'held': 'Held Items', 'storage': 'Storage Upgrades'}
         embed = discord.Embed(
             title=f'🛒 Poké Mart — {labels.get(self.category, "All Items")}',
             color=discord.Color.orange()
@@ -1845,6 +1973,28 @@ class DexView(TimedView):
 
 class Game(commands.Cog):
     def __init__(self,bot):self.bot=bot;self.challenges={};self.coin_bets={};self.active_boss_battles=set()
+
+    @commands.hybrid_command(name='boosterperks', aliases=['boostperks', 'serverboostperks'], description='View the rewards for boosting this server.')
+    async def booster_perks(self, ctx):
+        """Explain server booster perks and show whether the caller currently qualifies."""
+        if not ctx.guild:
+            return await ctx.send('This command is available inside a PokéVanta server.')
+        active = is_server_booster(ctx.author)
+        embed = discord.Embed(
+            title='💜 PokéVanta Server Booster Perks',
+            description=(
+                ('💜 **Your server boost is active!** Your booster perks are enabled.\n\n' if active else '**Support PokéVanta by boosting this server** to unlock these perks.\n\n')
+                + '**Booster-exclusive perk**\n'
+                + '• **+10,000 VantaCoins** every time you claim `!daily`\n\n'
+                + '**Daily reward for all trainers**\n'
+                + '• **2 Raid Passes** and **3 Rare Candies** per daily claim, plus a Pokémon\n\n'
+                + 'Perks are checked automatically and remain active only while you are boosting this server. '
+                + 'These benefits are separate from donation packages and do not unlock donor-tier Radiant privileges.'
+            ),
+            color=discord.Color.purple() if active else discord.Color.blurple()
+        )
+        embed.set_footer(text='Thank you for supporting the PokéVanta community!')
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(name='donate', aliases=['donation', 'support', 'supporting'], description='View PokéVanta donation packages and VantaCoin support options.')
     async def donation_page(self, ctx):
@@ -2248,6 +2398,9 @@ class Game(commands.Cog):
                 return await ctx.send('⚠️ Pokémon data did not include a valid Pokédex ID. Your fish is still in your Fish Basket; please try again shortly.')
         try:
             with db() as c:
+                owned_count, storage_capacity = pokemon_storage_status(c, uid)
+                if owned_count >= storage_capacity:
+                    return await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity) + '\nYour fish remains in your Fish Basket.')
                 row = c.execute('SELECT amount FROM pv_fish_inventory WHERE user_id=? AND fish_key=?', (uid, fish_key)).fetchone()
                 if not row or row[0] < 1:
                     return await ctx.send(f'🧺 You do not have **{fish_name}** in your Fish Basket.')
@@ -2542,13 +2695,22 @@ class Game(commands.Cog):
             # Leave the encounter untouched so the player can retry once the API responds.
             print(f'Catch data lookup failed for user {uid}, dex_id={enc[0]!r}: {type(exc).__name__}: {exc}')
             return await ctx.send('⚠️ I could not load this Pokémon from PokéAPI right now. Your encounter is still saved—please try `!catch <name>` again in a moment.')
+        radiant=bool(enc[5]) if len(enc)>5 else False
+        rare_variant=bool(enc[2]) or radiant
         with db() as c:
-            radiant=bool(enc[5]) if len(enc)>5 else False
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh,int(radiant))); iid=cur.lastrowid; box_id=assign_box_id(c,uid,iid)
-            # Register only the first catch of this species + variant; repeats do not change the Dex.
-            c.execute('INSERT OR IGNORE INTO pokedex_entries(user_id,dex_id,name,shiny) VALUES(?,?,?,?)',(uid,int(enc[0]),d['name'],int(bool(enc[2]))))
-            radiant_dex_id = assign_radiant_dex_id(c,uid,int(enc[0]),d['name']) if radiant else None
-            if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
+            owned_count, storage_capacity = pokemon_storage_status(c, uid)
+            if not rare_variant and owned_count >= storage_capacity:
+                return await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity) + '\nYour wild encounter has been kept. Catch it after making room.')
+            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh,int(radiant))); iid=cur.lastrowid
+            stored_row=c.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(iid,uid)).fetchone()
+            stored=bool(stored_row)
+            is_unclaimed=bool(stored_row and stored_row[0])
+            box_id=assign_box_id(c,uid,iid) if stored else None
+            # Register only Pokémon actually retained by the player.
+            if stored:
+                c.execute('INSERT OR IGNORE INTO pokedex_entries(user_id,dex_id,name,shiny) VALUES(?,?,?,?)',(uid,int(enc[0]),d['name'],int(bool(enc[2]))))
+            radiant_dex_id = assign_radiant_dex_id(c,uid,int(enc[0]),d['name']) if radiant and stored else None
+            if stored and not is_unclaimed and not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
                 c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(uid,1,iid))
             if not is_global:
                 c.execute('DELETE FROM encounters WHERE user_id=?',(uid,))
@@ -2560,8 +2722,11 @@ class Game(commands.Cog):
         if str(d.get('name','')).strip().lower().replace(' ','-') in fossil_species:
             pv_record_activity(uid,'fossil_catch',1,getattr(ctx.guild,'id',None))
         # Catching a Pokémon gives a clear, predictable reward: 50 coins + 25 XP.
+        # Server booster coin perks are granted through !daily; catch rewards remain balanced for everyone.
         # Do not roll random inventory loot for ordinary or server-wide catches.
-        add_progress(uid,coins=50,xp=25)
+        booster_active = is_server_booster(ctx.author) if ctx.guild else False
+        catch_coin_reward = 50
+        add_progress(uid,coins=catch_coin_reward,xp=25)
         if bool(enc[2]) and ctx.guild:
             await log_rare_shiny_event(ctx.guild, ctx.author, display_name(d), action='caught', level=enc[3], image_url=sprite(d, shiny=True))
         boss_unlocked=False
@@ -2580,7 +2745,13 @@ class Game(commands.Cog):
                 c.execute('UPDATE hunt_counts SET count=? WHERE user_id=?',(catch_progress,uid))
         note=' **You were the first to guess it!**' if is_global else ''
         variant=(RADIANT_EMOJI + ' RADIANT ') if radiant else ('✨ SHINY ' if enc[2] else '')
-        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + '\n💰 Reward: **+50 coins** • ⭐ **+25 XP**.'
+        if is_unclaimed:
+            storage_note=f'\n📥 Saved in `!unclaimed` · Unclaimed ID: `{iid}`.'
+        elif rare_variant and not stored:
+            storage_note='\n⚠️ Your Unclaimed Storage is full (10/10), so this rare Pokémon vanished.'
+        else:
+            storage_note=f' ID: `{box_id}`'
+        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note}{storage_note}' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + '\n💰 Reward: **+'+str(catch_coin_reward)+' coins**' + ' • ⭐ **+25 XP**.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -2700,7 +2871,7 @@ class Game(commands.Cog):
         }
         categories = {
             'start': 'Adventure', 'profile': 'Adventure', 'regions': 'Exploration & Quests', 'region': 'Exploration & Quests', 'travel': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'hidden': 'Exploration & Quests', 'cave': 'Exploration & Quests', 'typemaster': 'Exploration & Quests', 'typequiz': 'Exploration & Quests', 'explorem': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
-            'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
+            'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'unclaimed': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
             'select': 'Teams & Battles', 'setteam': 'Teams & Battles', 'team': 'Teams & Battles', 'legendarybattle': 'Teams & Battles', 'battle': 'Teams & Battles', 'challenge': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies',
             'add': 'Developer Controls', 'remove': 'Developer Controls',
@@ -2978,7 +3149,7 @@ class Game(commands.Cog):
                 await load_pokemon_list()
             radiant_species=[]
             for item in POKEMON_LIST:
-                match=re.search(r'/pokemon-species/(\\d+)/?$',item.get('url',''))
+                match=re.search(r'/pokemon-species/(\d+)/?$',item.get('url',''))
                 if match:
                     species_id=int(match.group(1))
                     if 1 <= species_id <= 1025:
@@ -3073,8 +3244,9 @@ class Game(commands.Cog):
         if category not in allowed:
             return await ctx.send('❌ Unknown box category. Try: `!box all`, `!box hp`, `!box status`, `!box legendary`, `!box shiny`, `!box mythical`, `!box ultrabeast`, `!box radiant`, or `!box damaged`, or `!box items`, `!box highlevel` / `!box hl` (level above 50), or `!box name <pokemon>`.')
         with db() as c:
-            rows=c.execute('SELECT box_id,dex_id,name,level,shiny,held_item,hp,max_hp,status_condition,radiant FROM pokemon WHERE user_id=? ORDER BY box_id',(ctx.author.id,)).fetchall()
-        if not rows:return await ctx.send('📦 Your box is empty. Use `!hunt` to find Pokémon!')
+            rows=c.execute('SELECT box_id,dex_id,name,level,shiny,held_item,hp,max_hp,status_condition,radiant FROM pokemon WHERE user_id=? AND COALESCE(unclaimed,0)=0 ORDER BY box_id',(ctx.author.id,)).fetchall()
+            owned_count, storage_capacity = pokemon_storage_status(c, ctx.author.id)
+        if not rows:return await ctx.send(f'📦 Your box is empty. Storage: **{owned_count}/{storage_capacity}**. Use `!hunt` to find Pokémon!')
         if category == 'name':
             wanted=pokemon_name.strip().lower().replace('-', ' ')
             rows=[r for r in rows if r[2].strip().lower().replace('-', ' ') == wanted]
@@ -3103,7 +3275,45 @@ class Game(commands.Cog):
         await ensure_box_pokemon_emojis(ctx.guild, entries[:BoxView.ITEMS_PER_PAGE])
         view=BoxView(ctx.author.id,entries,category,ctx.guild)
         box_embed, box_artwork = await view.render_page()
+        box_embed.set_footer(text=(box_embed.footer.text + f' • Storage: {owned_count}/{storage_capacity} (max 200)') if box_embed.footer.text else f'Storage: {owned_count}/{storage_capacity} (max 200)')
         view.message=await ctx.send(embed=box_embed,view=view,file=box_artwork) if box_artwork else await ctx.send(embed=box_embed,view=view)
+
+    @commands.command(name='unclaimed', aliases=['uc'], description='View and claim your Shiny/Radiant Pokémon.')
+    async def unclaimed(self, ctx, action: str = None, pokemon_id: int = None):
+        uid = ctx.author.id
+        if action and action.lower() == 'claim':
+            if pokemon_id is None:
+                return await ctx.send('Usage: `!unclaimed claim <unclaimed_id>`')
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                row = c.execute('SELECT instance_id,name,level,shiny,radiant FROM pokemon WHERE user_id=? AND instance_id=? AND unclaimed=1', (uid,pokemon_id)).fetchone()
+                if not row:
+                    c.rollback()
+                    return await ctx.send('❌ That Unclaimed ID does not exist in your collection.')
+                owned, capacity = pokemon_storage_status(c, uid)
+                if owned >= capacity:
+                    c.rollback()
+                    return await ctx.send(pokemon_storage_full_message(owned, capacity) + '\nYour Pokémon is still safe in `!unclaimed`.')
+                c.execute('UPDATE pokemon SET unclaimed=0 WHERE instance_id=? AND user_id=? AND unclaimed=1', (pokemon_id,uid))
+                box_id = assign_box_id(c, uid, pokemon_id)
+                if not c.execute('SELECT 1 FROM team WHERE user_id=?', (uid,)).fetchone():
+                    c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)', (uid,1,pokemon_id))
+                c.commit()
+            variant = 'Radiant' if row[4] else 'Shiny'
+            return await ctx.send(f'✅ **{variant} {row[1].title()}** Lv. {row[2]} moved into your Pokémon Box!\nBox ID: `{box_id}` · Storage: **{owned+1}/{capacity}**')
+        with db() as c:
+            rows = c.execute('SELECT instance_id,dex_id,name,level,shiny,radiant FROM pokemon WHERE user_id=? AND unclaimed=1 ORDER BY instance_id', (uid,)).fetchall()
+            owned, capacity = pokemon_storage_status(c, uid)
+        if not rows:
+            return await ctx.send('✨ Your Unclaimed Storage is empty. New Shiny and Radiant Pokémon will appear here automatically.')
+        lines=[]
+        for iid,dex,name,level,shiny,radiant in rows:
+            variant = '🌌 **RADIANT**' if radiant else '✨ **SHINY**'
+            lines.append(f'`{iid}` · {variant} **{name.title()}** Lv. {level} · Dex #{dex}')
+        embed=discord.Embed(title=f'✨ Unclaimed Pokémon ({len(rows)}/10)', description='\n'.join(lines), color=discord.Color.from_rgb(125,85,220))
+        embed.add_field(name='Claim a Pokémon', value='`!unclaimed claim <ID>` — move it into your regular Box.\nRegular Box storage: **{}/{}**'.format(owned,capacity), inline=False)
+        embed.set_footer(text='Only Shiny and Radiant Pokémon are kept here. Extra rare rewards vanish when all 10 slots are occupied.')
+        await ctx.send(embed=embed)
 
     @commands.command(name='info',aliases=['pinfo','stats'],description="Show a Pokémon's current HP, stats and status conditions.")
     async def info(self,ctx,pokemon_id:Optional[int]=None):
@@ -3220,6 +3430,10 @@ class Game(commands.Cog):
         except Exception:
             return await ctx.send('❌ Pokémon not found. Examples: `!pokemonadd @user shiny eternatus` or `!pokemonadd @user radiant pikachu`')
         mh=max_hp(d,50); label=((RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else ''))+display_name(d)
+        with db() as c:
+            owned_count, storage_capacity = pokemon_storage_status(c, member.id)
+        if not (shiny or radiant) and owned_count >= storage_capacity:
+            return await ctx.send(f'❌ {member.mention} cannot receive another Pokémon. ' + pokemon_storage_full_message(owned_count, storage_capacity))
         # Admin Pokémon-add confirmations stay available until confirmed or cancelled.
         view=TimedView(timeout=None, timeout_text='')
         yes=discord.ui.Button(label='Confirm add',style=discord.ButtonStyle.success)
@@ -3232,16 +3446,28 @@ class Game(commands.Cog):
                 button.disabled = True
             try:
                 with db() as c:
+                    owned_count, storage_capacity = pokemon_storage_status(c, member.id)
+                    if not (shiny or radiant) and owned_count >= storage_capacity:
+                        raise ValueError('POKEMON_STORAGE_FULL')
                     cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(member.id,d['id'],d['name'],50,int(shiny),mh,mh,int(radiant)))
                     iid=cur.lastrowid
-                    assign_box_id(c,member.id,iid)
-                    radiant_id=assign_radiant_dex_id(c,member.id,int(d['id']),d['name']) if radiant else None
-                    public_id=get_box_id(c,member.id,iid) or iid
-                    if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
+                    stored_row=c.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(iid,member.id)).fetchone()
+                    assign_box_id(c,member.id,iid) if stored_row else None
+                    radiant_id=assign_radiant_dex_id(c,member.id,int(d['id']),d['name']) if radiant and stored_row else None
+                    public_id=get_box_id(c,member.id,iid) if stored_row else None
+                    if stored_row and not stored_row[0] and not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
                         c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-                result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:04d}`.' if radiant_id else '.')
+                if not stored_row:
+                    result=f'⚠️ {label} could not be kept because {member.mention} has reached the 10/10 Unclaimed Storage limit.'
+                elif stored_row[0]:
+                    result=f'✅ Added **{label}** to {member.mention}\'s `!unclaimed` collection (Unclaimed ID `{iid}`).'
+                else:
+                    result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:04d}`.' if radiant_id else '.')
             except Exception as exc:
-                result=f'❌ Add failed: `{type(exc).__name__}: {exc}`'
+                if 'POKEMON_STORAGE_FULL' in str(exc):
+                    result=f'❌ {member.mention} Pokémon Storage became full before confirmation. Upgrade storage or make room first.'
+                else:
+                    result=f'❌ Add failed: `{type(exc).__name__}: {exc}`'
             await interaction.message.edit(content=result,embed=None,view=view)
         async def no_cb(interaction):
             if interaction.user.id != ctx.author.id:
@@ -3502,7 +3728,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e = discord.Embed(title=f'{item_emoji(slug)} {label}', description=description, color=discord.Color.blurple())
         e.add_field(name='Shop Price', value=f'**{cost:,}** {get_vantacoin_emoji()} VantaCoins', inline=True)
         e.add_field(name='Item ID', value=f'`{key}` · `{short_id}`', inline=True)
-        category = 'Held Item' if slug in TYPE_HELD_ITEMS or slug in {'leftovers','choice-band','choice-specs','choice-scarf','life-orb','expert-belt','focus-sash','assault-vest','rocky-helmet','muscle-band','wise-glasses','shell-bell','safety-goggles','heavy-duty-boots'} else ('TM' if 'tm' in slug else 'Consumable')
+        category = 'Storage Upgrade' if slug == 'pokemon-storage' else ('Held Item' if slug in TYPE_HELD_ITEMS or slug in {'leftovers','choice-band','choice-specs','choice-scarf','life-orb','expert-belt','focus-sash','assault-vest','rocky-helmet','muscle-band','wise-glasses','shell-bell','safety-goggles','heavy-duty-boots'} else ('TM' if 'tm' in slug else 'Consumable'))
         e.add_field(name='Category', value=category, inline=True)
         e.set_footer(text='PokéVanta Item Guide')
         await ctx.send(embed=e)
@@ -3519,7 +3745,32 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             product_id=resolve_shop_product(product)
             if product_id is None:
                 return await ctx.send(f'❌ I could not find **{product}**. Use `!shop` to see item names, unique shortforms, and IDs.')
-            key,label,cost,desc,shortform=SHOP_ITEMS[product_id]; total=cost*quantity
+            key,label,cost,desc,shortform=SHOP_ITEMS[product_id]
+            if key == 'pokemon-storage':
+                try:
+                    with db() as c:
+                        c.execute('BEGIN IMMEDIATE')
+                        owned, capacity = pokemon_storage_status(c, ctx.author.id)
+                        new_capacity = min(POKEMON_STORAGE_MAX, capacity + (POKEMON_STORAGE_STEP * quantity))
+                        upgrades = (new_capacity - capacity) // POKEMON_STORAGE_STEP
+                        if upgrades <= 0:
+                            c.rollback()
+                            return await ctx.send(f'📦 Your Pokémon Storage is already at the maximum capacity of **{POKEMON_STORAGE_MAX}**.')
+                        total = cost * upgrades
+                        row=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
+                        balance_before=row[0] if row else 0
+                        if balance_before < total:
+                            c.rollback()
+                            return await ctx.send(f'❌ {label} ×{upgrades} costs **{total:,} VantaCoins**, but you have **{balance_before:,}**.')
+                        c.execute('INSERT INTO pv_pokemon_storage(user_id,capacity) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET capacity=excluded.capacity', (ctx.author.id,new_capacity))
+                        c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(total,ctx.author.id))
+                        balance=balance_before-total
+                        c.commit()
+                except Exception as exc:
+                    print(f'Pokémon storage purchase failed for user {ctx.author.id}: {exc!r}')
+                    return await ctx.send('❌ Storage upgrade failed. No VantaCoins were charged; please try again.')
+                return await ctx.send(f'📦 **Pokémon Storage upgraded!**\nCapacity: **{capacity} → {new_capacity}** Pokémon (+{new_capacity-capacity}).\nUpgrade cost: **{total:,} VantaCoins** · Remaining balance: **{balance:,}**.\nYou can upgrade up to **{POKEMON_STORAGE_MAX} Pokémon** total.')
+            total=cost*quantity
             try:
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE')
@@ -3550,6 +3801,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if product_id is None:
                 return await ctx.send(f'❌ I could not find **{product}**. Use `!market` to browse the market.')
             key,label,cost,desc,shortform=SHOP_ITEMS[product_id]
+            if key == 'pokemon-storage':
+                return await ctx.send('❌ Pokémon Storage upgrades are permanent and cannot be sold.')
             payout=max(1, cost//2)*quantity
             try:
                 with db() as c:
@@ -3576,11 +3829,12 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             aliases = {
                 'all':'all', 'any':'all', 'ally':'all', 'everything':'all',
                 'potion':'potions', 'potions':'potions',
-                'held':'held', 'held item':'held', 'held items':'held', 'items':'held', 'equipment':'held'
+                'held':'held', 'held item':'held', 'held items':'held', 'items':'held', 'equipment':'held',
+                'storage':'storage', 'pokemon storage':'storage', 'pokémon storage':'storage', 'box upgrades':'storage'
             }
             category = aliases.get(requested)
             if category is None:
-                return await ctx.send('❌ Category not found. Use `!shop view potions`, `!shop view held`, or `!shop view all`.')
+                return await ctx.send('❌ Category not found. Use `!shop view potions`, `!shop view held`, `!shop view storage`, or `!shop view all`.')
         view=ShopView(ctx.author.id, category, guild=ctx.guild)
         view.message=await ctx.send(embed=view.make_embed(),view=view)
 
@@ -3660,12 +3914,18 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 row=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone(); balance=int(row[0]) if row else 0
                 if balance<price: c.rollback(); return await ctx.send(f'❌ Not enough balance. Price: **{price:,}** coins; your balance: **{balance:,}**.')
                 if not c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=0',(pokemon_id,)).fetchone(): c.rollback(); return await ctx.send('❌ Listing could not be verified. Please contact an administrator.')
+                pokemon_variant=c.execute('SELECT shiny,radiant FROM pokemon WHERE instance_id=? AND user_id=0',(pokemon_id,)).fetchone()
+                is_rare_transfer=bool(pokemon_variant and (pokemon_variant[0] or pokemon_variant[1]))
+                owned_count, storage_capacity = pokemon_storage_status(c, ctx.author.id)
+                if not is_rare_transfer and owned_count >= storage_capacity: c.rollback(); return await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity))
                 c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(price,ctx.author.id))
-                new_box_id=transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
+                transfer_result=transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
                 new_box_id=get_box_id(c,ctx.author.id,pokemon_id)
+                kept_rare=bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(pokemon_id,ctx.author.id)).fetchone())
                 c.execute("UPDATE market_listings SET status='sold',buyer_id=?,proceeds=? WHERE listing_id=? AND status='active'",(ctx.author.id,price,lid)); c.commit()
-            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** from <@{seller}>!',color=discord.Color.green())
-            e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True); e.add_field(name='Pokémon ID',value=f'`{new_box_id}`',inline=True)
+            market_location=(f'Saved in `!unclaimed` · Unclaimed ID `{pokemon_id}`' if kept_rare else (f'Box ID `{new_box_id}`' if new_box_id is not None else 'The rare Pokémon could not be kept because Unclaimed Storage was full (10/10).'))
+            e=discord.Embed(title='🎉 Market purchase successful!',description=f'{ctx.author.mention} bought {"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** from <@{seller}>!\n{market_location}',color=discord.Color.green())
+            e.add_field(name='Paid',value=f'**{price:,}** {get_vantacoin_emoji()} VantaCoins',inline=True)
             e.set_footer(text=f'Listing #{lid} · Seller can claim proceeds with !market claim {lid}')
             await ctx.send(embed=e,allowed_mentions=discord.AllowedMentions(users=True))
             if ctx.guild:
@@ -3677,8 +3937,16 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             with db() as c:
                 c.execute('BEGIN IMMEDIATE'); row=c.execute("SELECT pokemon_id,pokemon_name,shiny FROM market_listings WHERE listing_id=? AND seller_id=? AND status='active'",(lid,ctx.author.id)).fetchone()
                 if not row: c.rollback(); return await ctx.send('❌ No active listing with that ID belongs to you.')
-                pokemon_id,pname,listing_shiny=row; transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id); c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
-            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'{"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** has been returned to your collection.',color=discord.Color.orange()))
+                pokemon_id,pname,listing_shiny=row
+                variant=c.execute('SELECT shiny,radiant FROM pokemon WHERE instance_id=? AND user_id=0',(pokemon_id,)).fetchone()
+                is_rare_return=bool(variant and (variant[0] or variant[1]))
+                owned_count, storage_capacity = pokemon_storage_status(c, ctx.author.id)
+                if not is_rare_return and owned_count >= storage_capacity: c.rollback(); return await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity))
+                transfer_pokemon_owner(c,pokemon_id,0,ctx.author.id)
+                kept_rare=bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(pokemon_id,ctx.author.id)).fetchone())
+                c.execute("UPDATE market_listings SET status='removed' WHERE listing_id=?",(lid,)); c.commit()
+            return_note=(f'Saved in `!unclaimed` · Unclaimed ID `{pokemon_id}`.' if kept_rare else ('Unclaimed Storage was full (10/10), so the rare Pokémon vanished.' if is_rare_return else 'Returned to your regular Box.'))
+            return await ctx.send(embed=discord.Embed(title='↩️ Listing removed',description=f'{"✨ " if listing_shiny else ""}**{pname.replace(chr(45), chr(32)).title()}** — {return_note}',color=discord.Color.orange()))
         if action=='claim':
             if details.lower()=='all':
                 with db() as c:
@@ -3903,11 +4171,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 detail=f'Quantity: **{amount}** • Shop ID: `{pid}` • Shortform: `{shortform}`\n{desc}'
             else:
                 label=item.replace('-',' ').title();detail=f'Quantity: **{amount}**'
-            entries.append((label,detail))
+            entries.append((f'{item_emoji(item)} {label}',detail))
         for item,name,iid in equipped:
             info=ITEM_BY_KEY.get(item)
             label=info[2] if info else item.replace('-',' ').title()
-            entries.append((f'{label} — Equipped',f'Equipped to **{name.title()}** (Pokémon ID `{iid}`). This copy is equipped; any additional copies in inventory can be equipped to other Pokémon.'))
+            entries.append((f'{item_emoji(item)} {label} — Equipped',f'Equipped to **{name.title()}** (Pokémon ID `{iid}`). This copy is equipped; any additional copies in inventory can be equipped to other Pokémon.'))
         entries.sort(key=lambda x:x[0].casefold())
         view=InventoryView(ctx.author.id,entries)
         view.message=await ctx.send(embed=view.make_embed(),view=view)
@@ -3986,7 +4254,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 active=c.execute('SELECT name,level FROM raid_encounters WHERE user_id=?',(uid,)).fetchone()
                 passes=c.execute("SELECT amount FROM inventory WHERE user_id=? AND item='raid-pass'",(uid,)).fetchone()
                 if active:return await ctx.send(f'⚠️ You already have an active raid: ✨ **{active[0].title()}** Lv.{active[1]}. Use `!add` to select six Pokémon, then `!raid battle`.')
-                if not passes or passes[0]<1:return await ctx.send('❌ You need a Raid Pass. Claim `!daily` for 5 passes.')
+                if not passes or passes[0]<1:return await ctx.send('❌ You need a Raid Pass. Claim `!daily` for up to 2 daily Raid Passes.')
                 c.execute("UPDATE inventory SET amount=amount-1 WHERE user_id=? AND item='raid-pass'",(uid,))
                 c.execute("DELETE FROM inventory WHERE user_id=? AND item='raid-pass' AND amount<=0",(uid,))
             special_names={'nihilego','buzzwole','pheromosa','xurkitree','celesteela','kartana','guzzlord','poipole','naganadel','stakataka','blacephalon','meltan','melmetal'}
@@ -4015,7 +4283,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.add_field(name='👥 2. Choose Your Six Pokémon', value='`!add <ID1> <ID2> <ID3> <ID4> <ID5> <ID6>`\nSelect **exactly six Pokémon IDs** you own. Your boss level is **100 levels above your highest-level selected Pokémon**.', inline=False)
         e.add_field(name='⚔️ 3. Start the Battle', value='`!raid battle`\nUse **Choose Move** and switch between your squad during the battle. Finish any other active battle first, and make sure your team can fight.', inline=False)
         e.add_field(name='🏆 Victory Rewards', value='Win to receive **50 Rare Candies** and add the shiny raid boss to your box at **75 levels below its raid level** (maximum Pokémon level: **300**). A failed raid gives no victory rewards, and the pass is not refunded.', inline=False)
-        e.add_field(name='🍬 Level Up', value='`!candy <pokemon_id> <amount>` — spend Rare Candies to level up one of your Pokémon, up to **Lv. 300**.\n`!daily` — claim your daily reward, including **5 Raid Passes** when available.', inline=False)
+        e.add_field(name='🍬 Level Up', value='`!candy <pokemon_id> <amount>` — spend Rare Candies to level up one of your Pokémon, up to **Lv. 300**.\n`!daily` — claim your daily reward, including **2 Raid Passes** (daily limit).', inline=False)
         if active:
             raid_level=str(active[1]) if active[1] else 'set when battle starts'
             e.add_field(name='🚨 Your Active Raid',value=f'✨ **{active[0].title()}** • Boss level: **{raid_level}**\nSelected squad: **{len(party)}/6 Pokémon**\n' + ('Run `!add` to complete your squad, then `!raid battle`.' if len(party)<6 else 'Your squad is ready. Run `!raid battle` to begin.'),inline=False)
@@ -4086,6 +4354,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     @commands.command(name='daily',aliases=['d','claim'],description='Claim your daily Pokémon, Raid Passes and Rare Candies.')
     async def daily(self,ctx):
         uid=ctx.author.id
+        booster_active = is_server_booster(ctx.author) if ctx.guild else False
+        daily_raid_passes = 2
+        daily_rare_candies = 3
+        daily_booster_coins = 10000 if booster_active else 0
         coins,xp,l,last,streak=get_player(uid)
         now=int(time.time())
         if last and now-last<86400:
@@ -4113,21 +4385,29 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             return await ctx.send('⚠️ Could not load your daily Pokémon right now. No reward or streak was consumed; please try again shortly.')
         lvl=random.randint(10,30); mh=max_hp(pick,lvl)
         with db() as c:
-            c.execute('UPDATE players SET daily=?,daily_streak=? WHERE user_id=?',(now,streak,uid))
-            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 5) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+5",(uid,))
-            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 3) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+3",(uid,))
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh))
-            iid=cur.lastrowid
-            assign_box_id(c,uid,iid)
-            box_id=get_box_id(c,uid,iid)
-            if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
-                c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
-        if legendary:
-            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +5 Raid Passes • 🎒 +3 Rare Candies')
+            owned, capacity = pokemon_storage_status(c, uid)
+            storage_full = owned >= capacity
+            c.execute('UPDATE players SET daily=?,daily_streak=?,coins=coins+? WHERE user_id=?',(now,streak,daily_booster_coins,uid))
+            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', ?) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+excluded.amount",(uid,daily_raid_passes))
+            c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', ?) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+excluded.amount",(uid,daily_rare_candies))
+            box_id = None
+            if not storage_full:
+                cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh))
+                iid=cur.lastrowid
+                assign_box_id(c,uid,iid)
+                box_id=get_box_id(c,uid,iid)
+                if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
+                    c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
+        booster_text = f'\n💜 Server Booster bonus: +{daily_booster_coins:,} VantaCoins!' if booster_active else ''
+        if storage_full:
+            await ctx.send(f'🎁 **Daily reward claimed!**\n🎟️ +{daily_raid_passes} Raid Passes • 🍬 +{daily_rare_candies} Rare Candies{booster_text}\n⚠️ No daily Pokémon was added because your storage is full ({owned}/{capacity}).\n' + pokemon_storage_full_message(owned, capacity))
+        elif legendary:
+            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +{daily_raid_passes} Raid Passes • 🎒 +{daily_rare_candies} Rare Candies{booster_text}')
         else:
-            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +5 Raid Passes • 🍬 +3 Rare Candies\n🔥 Current streak: **{streak}** days')
+            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +{daily_raid_passes} Raid Passes • 🍬 +{daily_rare_candies} Rare Candies\n🔥 Current streak: **{streak}** days{booster_text}')
         if ctx.guild:
-            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **3 Rare Candies** and **5 Raid Passes**, and **{display_name(pick)} Lv. {lvl}**.\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
+            pokemon_log = f'**{display_name(pick)} Lv. {lvl}**' if not storage_full else '**No Pokémon added (storage full)**'
+            await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **{daily_booster_coins:,} VantaCoins**, **{daily_rare_candies} Rare Candies**, and **{daily_raid_passes} Raid Passes**.\n**Pokémon:** {pokemon_log}\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
     @commands.command(name='balance',aliases=['bal','money'],description='View your VantaCoins, level and XP.')
     async def balance(self,ctx):
         coins,xp,level,_,_=get_player(ctx.author.id)
@@ -5029,7 +5309,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     async def setupitememojis(self, ctx):
         """Install the current shop-item sprite emojis, resuming safely after partial runs."""
         items = list(SHOP_ITEMS.values())
-        status = await ctx.send(f'🖼️ Preparing item sprites: {len(items)} shop items found. Checking existing emojis and available slots…')
+        # Inventory-only items also get uploaded sprites so !inv matches !shop.
+        sprite_only_items = [
+            ('rare-candy', 'Rare Candy', 0, 'Inventory item sprite', 'rcandy'),
+            ('raid-pass', 'Raid Pass', 0, 'Inventory item sprite', 'raidpass'),
+        ]
+        items.extend(sprite_only_items)
+        status = await ctx.send(f'🖼️ Preparing item sprites: {len(items)} shop and inventory items found. Checking existing emojis and available slots…')
 
         saved = {}
         try:
@@ -5060,7 +5346,14 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             for source_emoji in source_guild.emojis:
                 for item_key, *_rest in items:
                     expected_name = 'item_' + re.sub(r'[^a-z0-9_]', '_', item_key.lower())
-                    if source_emoji.name == expected_name and item_key not in globally_found:
+                    accepted_names = {expected_name}
+                    if item_key == 'pokemon-storage':
+                        accepted_names.update({'pokemon_storage','pokemonstorage','pokemon_storage_upgrade','pokemonstorageupgrade','storage_upgrade','pokemon_storage_item'})
+                    elif item_key == 'raid-pass':
+                        accepted_names.update({'raid_pass','raidpass','item_raidpass','item_raid_pass'})
+                    elif item_key == 'rare-candy':
+                        accepted_names.update({'rare_candy','rarecandy','item_rarecandy'})
+                    if source_emoji.name in accepted_names and item_key not in globally_found:
                         globally_found[item_key] = str(source_emoji)
         for item_key, emoji_markup in globally_found.items():
             saved[item_key] = emoji_markup
@@ -5089,6 +5382,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
         async def download_png(key):
             candidates = [key]
+            if key == 'pokemon-storage':
+                raise RuntimeError('Original Pokémon Storage sprite is not available in the bot assets. Add the original sprite as a server emoji named item_pokemon_storage (or pokemon_storage) and rerun !setupitememojis.')
+            if key == 'raid-pass':
+                raise RuntimeError('Original Raid Pass sprite is not available in the bot assets. Add the Raid Pass sprite as a server emoji named item_raid_pass (or raid_pass) and rerun !setupitememojis.')
             if key in fallback_by_item:
                 candidates.append(fallback_by_item[key])
             if key in {'max-potion', 'full-restore'}:
@@ -5213,10 +5510,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
 
         summary = (
             '**PokéVanta Item Sprite Setup**\n'
-            f'**Shop items checked:** {total}/54\n'
+            f'**Item sprites checked:** {total}/{total}\n'
             f'**Created now:** {created}\n'
             f'**Already present/reused:** {reused}\n'
-            f'**Mapped items:** {sum(1 for key, *_ in items if key in saved)}/54\n'
+            f'**Mapped items:** {sum(1 for key, *_ in items if key in saved)}/{total}\n'
             f'**Failed this run:** {failed}\n'
             f'**Emoji slots:** {len(ctx.guild.emojis)}/{getattr(ctx.guild, "emoji_limit", "unknown")} used'
         )
@@ -5228,8 +5525,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             )
             if len(failures) > 15:
                 summary += f'\n…and {len(failures) - 15} more. Run `!setupitememojis` again after fixing the listed issue.'
-        elif sum(1 for key, *_ in items if key in saved) == 54:
-            summary += '\n\n✅ All 54 item keys now have saved emoji mappings. Run `!setupitememojis` again to reuse them without duplicate uploads.'
+        elif sum(1 for key, *_ in items if key in saved) == total:
+            summary += f'\n\n✅ All {total} item keys now have saved emoji mappings. Run `!setupitememojis` again to reuse them without duplicate uploads.'
         await status.edit(content=summary[:2000])
 
     @commands.command(name='setupvantacoin')
@@ -5434,6 +5731,16 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                         if not c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=?',(pid,uid)).fetchone():
                             raise ValueError(f'Pokémon ID {pid} is no longer owned by <@{uid}>.')
                 a,b=trade['starter'],trade['target']; oa,ob=trade['offers'][a],trade['offers'][b]
+                for receiving_uid, outgoing_offer, incoming_offer in ((a,oa,ob),(b,ob,oa)):
+                    owned_count, storage_capacity = pokemon_storage_status(c, receiving_uid)
+                    incoming_normal = 0
+                    for incoming_pid in incoming_offer['pokemon']:
+                        variant=c.execute('SELECT shiny,radiant FROM pokemon WHERE instance_id=?',(incoming_pid,)).fetchone()
+                        if variant and not (variant[0] or variant[1]):
+                            incoming_normal += 1
+                    resulting_count = owned_count - len(outgoing_offer['pokemon']) + incoming_normal
+                    if resulting_count > storage_capacity:
+                        raise ValueError(f'<@{receiving_uid}> would exceed Pokémon Storage ({resulting_count}/{storage_capacity}). Upgrade storage or change the trade offer.')
                 c.execute('UPDATE players SET coins=coins-?+? WHERE user_id=?',(oa['coins'],ob['coins'],a))
                 c.execute('UPDATE players SET coins=coins-?+? WHERE user_id=?',(ob['coins'],oa['coins'],b))
                 for pid in oa['pokemon']: transfer_pokemon_owner(c,pid,a,b)
@@ -7885,12 +8192,14 @@ class EventsMissions(commands.Cog):
             quantity = int(row[0]) if row else 0
             if quantity < 10:
                 return await ctx.send(f'🔮 You need **10 Event Relics** for this exchange. You currently have **{quantity}/10**. Buy more with `!event buy event_relic`.')
-            # Spend relics and award the Pokémon together, so a failed/insufficient exchange cannot charge the player.
+            # This reward is guaranteed Shiny, so it is routed into Unclaimed Storage.
+            # Spend relics only after the eligibility and balance checks above succeed.
             c.execute("UPDATE pv_event_shop_inventory SET quantity=quantity-10 WHERE user_id=? AND item_key='event_relic' AND quantity>=10", (uid,))
             cur = c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)', (uid, data['id'], data['name'], level, 1, hp, hp))
             instance_id = cur.lastrowid
-            box_id = assign_box_id(c, uid, instance_id)
-        e = discord.Embed(title='✨🔮 Relic Exchange Successful!', description=f'{ctx.author.mention} exchanged **10 Event Relics** for a random **Shiny Legendary Pokémon**!\n\n**Reward:** ✨ **{display_name(data)}** · Level **{level}**\n**Pokémon ID:** `{box_id}`\n**Relics remaining:** **{quantity - 10}**', color=discord.Color.gold())
+            rare_saved = bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(instance_id,uid)).fetchone())
+        reward_line = f'**Unclaimed ID:** `{instance_id}` · use `!unclaimed` to view it' if rare_saved else '**Result:** Unclaimed Storage was full (10/10), so the Shiny Legendary vanished.'
+        e = discord.Embed(title='✨🔮 Relic Exchange Successful!', description=f'{ctx.author.mention} exchanged **10 Event Relics** for a random **Shiny Legendary Pokémon**!\n\n**Reward:** ✨ **{display_name(data)}** · Level **{level}**\n{reward_line}\n**Relics remaining:** **{quantity - 10}**', color=discord.Color.gold())
         e.set_footer(text='The Legendary is selected randomly from the Event Relic exchange pool.')
         await ctx.send(embed=e)
 
@@ -8388,10 +8697,19 @@ class MMORPG(commands.Cog):
         level = max(1, min(300, int(level)))
         hp = max_hp(data, level)
         with db() as c:
+            owned, capacity = pokemon_storage_status(c, uid)
+            if not shiny and owned >= capacity:
+                raise ValueError('POKEMON_STORAGE_FULL')
             cur = c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',
                             (uid, data['id'], data['name'], level, int(shiny), hp, hp))
             iid = cur.lastrowid
-            bid = assign_box_id(c, uid, iid)
+            stored = c.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(iid,uid)).fetchone()
+            if not stored:
+                bid = None
+            elif stored[0]:
+                bid = f'U{iid}'
+            else:
+                bid = assign_box_id(c, uid, iid)
         return data, bid
 
     def _travel(self, uid):
@@ -8563,7 +8881,13 @@ class MMORPG(commands.Cog):
             species=random.choice(pool)['name']
             level=random.randint(5,25)
             shiny=random.randint(1,1000)==1
-            data,bid=await self._award_pokemon(uid,species,shiny,level)
+            try:
+                data,bid=await self._award_pokemon(uid,species,shiny,level)
+            except ValueError as exc:
+                if 'POKEMON_STORAGE_FULL' in str(exc):
+                    owned, capacity = pokemon_storage_status_for_user(uid)
+                    return await ctx.send(pokemon_storage_full_message(owned, capacity))
+                raise
             loot=grant_game_reward(uid,xp=20,rolls=1)
             flavor = random.choice([
                 'Rustling leaves reveal a surprise!',
@@ -8571,7 +8895,13 @@ class MMORPG(commands.Cog):
                 'You hear a cry nearby and spot a new Pokémon!',
                 'Your careful exploration leads to a rare encounter!',
             ])
-            return await ctx.send(f'🌿 **{flavor}**\n**Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}` · +20 XP · 🎒 {loot}')
+            if isinstance(bid,str) and bid.startswith('U'):
+                reward_id=f'📥 Saved in `!unclaimed` · Unclaimed ID `{bid[1:]}`.'
+            elif bid is None:
+                reward_id='⚠️ Unclaimed Storage was full (10/10), so the Shiny Pokémon vanished.'
+            else:
+                reward_id=f'Pokémon ID: `{bid}`'
+            return await ctx.send(f'🌿 **{flavor}**\n**Wild encounter in {location}!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\n{reward_id} · +20 XP · 🎒 {loot}')
         if roll < .78:
             loot=grant_game_reward(uid,xp=10,rolls=2)
             return await ctx.send(f'💎 You discovered a hidden supply cache in **{location}**!\nYou found **{loot}** and gained **10 XP**.')
@@ -8719,10 +9049,19 @@ class MMORPG(commands.Cog):
         shiny=random.randint(1,250 if egg_type in {'rare','legendary'} else 1000)==1
         level=random.randint(10,30)
         try:data,bid=await self._award_pokemon(uid,species,shiny,level)
-        except Exception:
+        except Exception as exc:
             with db() as c:c.execute('UPDATE pv_eggs SET hatched=0 WHERE egg_id=? AND user_id=?',(egg_id,uid))
+            if 'POKEMON_STORAGE_FULL' in str(exc):
+                owned, capacity = pokemon_storage_status_for_user(uid)
+                return await ctx.send(pokemon_storage_full_message(owned, capacity) + '\nYour egg is safe and can be hatched after making room.')
             return await ctx.send('⚠️ Pokémon data could not be loaded. Your egg is safe; try again shortly.')
-        await ctx.send(f'🎉 **Your {egg_type.title()} Egg hatched!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\nPokémon ID: `{bid}`')
+        if isinstance(bid,str) and bid.startswith('U'):
+            reward_id=f'📥 Saved in `!unclaimed` · Unclaimed ID `{bid[1:]}`.'
+        elif bid is None:
+            reward_id='⚠️ Unclaimed Storage was full (10/10), so the Shiny Pokémon vanished.'
+        else:
+            reward_id=f'Pokémon ID: `{bid}`'
+        await ctx.send(f'🎉 **Your {egg_type.title()} Egg hatched!**\n{("✨ " if shiny else "")}**{display_name(data)}** Lv.{level} joined your collection!\n{reward_id}')
 
     @commands.group(name='dungeon', invoke_without_command=True)
     async def dungeon(self,ctx):
@@ -9141,6 +9480,14 @@ class Bot(commands.Bot):
             return
 
         original = getattr(error, 'original', error)
+        if isinstance(original, sqlite3.IntegrityError) and 'POKEMON_STORAGE_FULL' in str(original):
+            try:
+                with db() as c:
+                    owned_count, storage_capacity = pokemon_storage_status(c, ctx.author.id)
+                await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity), allowed_mentions=discord.AllowedMentions.none())
+            except Exception:
+                await ctx.send('📦 Your Pokémon Storage is full. Upgrade it or make room before receiving another Pokémon.')
+            return
         name = ctx.command.qualified_name if ctx.command else 'unknown'
         if isinstance(original, commands.MissingRequiredArgument):
             # Use the command's registered signature rather than guessing a usage string.
