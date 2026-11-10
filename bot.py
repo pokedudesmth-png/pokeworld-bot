@@ -5422,7 +5422,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             an image), then query the source wiki API as a fallback.
             """
             if key == 'pokemon-storage':
+                # Serebii's direct PNG is an established image URL linked from its
+                # Pokémon GO item list; use it before wiki file APIs that may 403.
                 direct_urls = [
+                    'https://www.serebii.net/pokemongo/items/storageupgrade.png',
                     'https://pokemongo.fandom.com/wiki/Special:FilePath/Pok%C3%A9mon_Storage_Upgrade.png',
                     'https://pokemongo.fandom.com/wiki/Special:FilePath/Pokemon_Storage_Upgrade.png',
                     'https://archives.bulbagarden.net/wiki/Special:FilePath/GO_Storage_Upgrade.png',
@@ -5436,7 +5439,9 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 search_terms = ['Pokémon Storage Upgrade', 'Pokemon Storage Upgrade', 'GO Storage Upgrade']
                 api_sources = ['https://pokemongo.fandom.com/api.php', 'https://archives.bulbagarden.net/w/api.php']
             else:
+                # Serebii's direct PNG is linked from its Pokémon GO item list.
                 direct_urls = [
+                    'https://www.serebii.net/pokemongo/items/raidpass.png',
                     'https://archives.bulbagarden.net/wiki/Special:FilePath/GO_Raid_Pass.png',
                     'https://pokemongo.fandom.com/wiki/Special:FilePath/Raid_Pass.png',
                     'https://pokemongo.fandom.com/wiki/Special:FilePath/GO_Raid_Pass.png',
@@ -5446,7 +5451,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 api_sources = ['https://archives.bulbagarden.net/w/api.php', 'https://pokemongo.fandom.com/api.php']
 
             timeout = aiohttp.ClientTimeout(total=25)
-            headers = {'User-Agent': 'PokeVantaBot/1.0 (Discord item sprite setup)'}
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (compatible; PokeVantaBot/1.0; Discord item sprite setup)',
+                'Accept': 'image/png,image/*;q=0.9,*/*;q=0.8',
+                'Referer': 'https://www.serebii.net/pokemongo/items.shtml',
+            }
             last_error = 'original Pokémon GO sprite not found in the image archives'
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 # Direct file redirects return the raw image, unlike file-page HTML.
