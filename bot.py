@@ -627,6 +627,30 @@ def grant_game_reward(uid, xp=0, guaranteed_items=None, rolls=1):
         change_item(uid,item,qty); granted.append(f'{qty} × {item.replace("-", " ").title()}')
     return ' + '.join(granted) if granted else 'XP'
 
+def grant_battle_reward(uid, xp=0):
+    """Award at most five battle prizes per user per Asia/Kolkata day.
+
+    Prize items are potions or regular TMs only. A TM drop is 90% Fast TM and
+    10% Charged TM; other drops are potion variants. Battles still resolve when
+    the daily prize limit has been reached, but give no prize or battle XP.
+    """
+    day_key = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+    with db() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS pv_battle_daily_prizes(user_id INTEGER NOT NULL, day_key TEXT NOT NULL, prizes INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,day_key))')
+        c.execute('BEGIN IMMEDIATE')
+        row = c.execute('SELECT prizes FROM pv_battle_daily_prizes WHERE user_id=? AND day_key=?', (uid, day_key)).fetchone()
+        used = int(row[0]) if row else 0
+        if used >= 5:
+            return None
+        c.execute('INSERT INTO pv_battle_daily_prizes(user_id,day_key,prizes) VALUES(?,?,1) ON CONFLICT(user_id,day_key) DO UPDATE SET prizes=prizes+1', (uid, day_key))
+    add_progress(uid, xp=int(xp))
+    if random.random() < 0.20:
+        item = 'fast-tm' if random.random() < 0.90 else 'charged-tm'
+    else:
+        item = random.choices(['potion','super-potion','hyper-potion','max-potion','full-restore'], weights=[35,30,20,10,5], k=1)[0]
+    change_item(uid, item, 1)
+    return item.replace('-', ' ').title()
+
 def inventory_amount(uid,item):
     ensure_player(uid)
     with db() as c:
@@ -1337,7 +1361,7 @@ class NPCBattleView(TimedView):
                 own=await pokemon_data(self.row[2])
                 battle_art_files=[]
                 try:
-                    own_art=await radiant_sprite_file(own, require_archive=bool(self.row[-1]))
+                    own_art=await radiant_sprite_file(own)
                     e.set_thumbnail(url=f'attachment://{own_art.filename}')
                     battle_art_files.append(own_art)
                 except Exception as exc:
@@ -1411,7 +1435,7 @@ class NPCBattleView(TimedView):
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=? AND user_id=?',
                           (max(0, min(self.row[9], self.player_hp)), self.player_status or '', self.row[0], self.uid))
-            x=random.randint(40,90);loot=grant_game_reward(self.uid,xp=x,rolls=2)
+            x=random.randint(40,90);loot=grant_battle_reward(self.uid,xp=x)
             if self.raid:
                 pv_record_activity(self.uid,'raid_win',1,getattr(inter.guild,'id',None))
             elif self.boss:
@@ -1424,13 +1448,14 @@ class NPCBattleView(TimedView):
                 with db() as c:
                     cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
                     rare_saved=bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(iid,self.uid)).fetchone())
-                    c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
+                    
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
                 if inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 rare_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.' if rare_saved else '⚠️ Unclaimed Storage was full (10/10), so the shiny boss vanished.'
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
+                prize_text=(f'🎁 Battle prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); no item prize this time.')
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n{prize_text}',view=None)
             if self.boss:
                 with db() as storage_conn:
                     owned_count, storage_capacity = pokemon_storage_status(storage_conn, self.uid)
@@ -1453,22 +1478,24 @@ class NPCBattleView(TimedView):
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=self.enemy.get('_level'), image_url=sprite(self.enemy, shiny=True))
                 jackpot=1_000_000 if self.boss_shiny else 0
                 if jackpot:
-                    grant_game_reward(self.uid,xp=500,guaranteed_items={'rare-candy':50,'elite-charged-tm':5,'raid-pass':10},rolls=0)
+                    add_progress(self.uid, xp=500)
                     if inter.guild:
-                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}** and received **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**.\n**Result:** Jackpot credited after victory.', guild=inter.guild, user=inter.user)
-                jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won a shiny legendary boss! **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes** have been added to your inventory! 💰' if jackpot else ''
+                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}**.\n**Result:** Shiny boss jackpot recorded after victory; battle item rewards remain limited to potions and regular TMs.', guild=inter.guild, user=inter.user)
+                jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won the shiny legendary boss!' if jackpot else ''
                 if boss_unclaimed:
                     boss_storage_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.'
                 elif not boss_row:
                     boss_storage_note='⚠️ Unclaimed Storage was full (10/10), so the Shiny/Radiant reward vanished.'
                 else:
                     boss_storage_note=f'Box ID `{box_id}`.'
-                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]}!\n{boss_storage_note}\n🎒 Loot: **{loot}** • ⭐ +{x} XP{jackpot_text}',view=None)
-            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
+                prize_text=(f'🎁 Battle prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); no item prize this time.')
+                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]}!\n{boss_storage_note}\n{prize_text}{jackpot_text}',view=None)
+            prize_text=(f'🎁 Prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); battle completed with no prize.')
+            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n{prize_text}',view=None)
         self.enemy_hp, tickmsg=status_tick(self.enemy_status,self.enemy_hp,self.enemy_max_hp)
         if tickmsg: msg+='\n'+tickmsg
         if self.enemy_hp<=0:
-            x=random.randint(40,90);loot=grant_game_reward(self.uid,xp=x,rolls=2)
+            x=random.randint(40,90);loot=grant_battle_reward(self.uid,xp=x)
             if self.raid:
                 pv_record_activity(self.uid,'raid_win',1,getattr(inter.guild,'id',None))
             elif self.boss:
@@ -1481,15 +1508,17 @@ class NPCBattleView(TimedView):
                 with db() as c:
                     cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
                     rare_saved=bool(c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=? AND unclaimed=1',(iid,self.uid)).fetchone())
-                    c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 50) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+50",(self.uid,))
+                    
                     c.execute('DELETE FROM raid_encounters WHERE user_id=?',(self.uid,)); c.execute('DELETE FROM raid_party WHERE user_id=?',(self.uid,))
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
                 if inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 rare_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.' if rare_saved else '⚠️ Unclaimed Storage was full (10/10), so the shiny boss vanished.'
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n🍬 **+50 Rare Candies** added to your inventory.',view=None)
+                prize_text=(f'🎁 Battle prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); no item prize this time.')
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n{prize_text}',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
-            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n🎒 Loot: **{loot}** • ⭐ +{x} XP',view=None)
+            prize_text=(f'🎁 Prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); battle completed with no prize.')
+            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n{prize_text}',view=None)
         em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'],defender_ivs=pokemon_ivs(self.row),defender_level=self.row[4],defender_radiant=bool(len(self.row)>12 and self.row[12]));dmg=int(dmg*held_damage_multiplier(enemyheld,em,eff))
         if self.raid: dmg=max(1,int(dmg*1.35))  # Raid boss strikes are substantially stronger.
         dmg=max(1,int(dmg*held_incoming_multiplier(held,em)))
@@ -1586,13 +1615,13 @@ class PvPBattle:
         da=await pokemon_data(self.ra[2]); dbb=await pokemon_data(self.rb[2])
         self.radiant_art_files=[]
         try:
-            left_art=await radiant_sprite_file(da, require_archive=bool(self.ra[-1]))
+            left_art=await radiant_sprite_file(da)
             e.set_thumbnail(url=f'attachment://{left_art.filename}')
             self.radiant_art_files.append(left_art)
         except Exception as exc:
             print(f'RADIANTDEX PvP challenger artwork failed: {exc!r}')
         try:
-            right_art=await radiant_sprite_file(dbb, require_archive=bool(self.rb[-1]))
+            right_art=await radiant_sprite_file(dbb)
             e.set_image(url=f'attachment://{right_art.filename}')
             self.radiant_art_files.append(right_art)
         except Exception as exc:
@@ -1696,7 +1725,7 @@ class PvPBattle:
         elif self.hp[self.b]<=0:winner=self.a
         self.last_text='\n'.join(log)
         if winner:
-            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_game_reward(winner,xp=100,rolls=2);self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight! 🎒 **{loot}** +100 XP'
+            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_battle_reward(winner,xp=100); prize_text=(f'🎁 Prize: **{loot}** • ⭐ +100 XP' if loot else '🎁 Daily battle prize limit reached (5/5); no prize this time.');self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight!\n{prize_text}'
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.a],self.status[self.a],self.ra[0]));c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.b],self.status[self.b],self.rb[0]))
             await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=None)
@@ -3635,6 +3664,7 @@ class Game(commands.Cog):
         remaining = pv_battle_cooldown_remaining(ctx.author.id, 'npc')
         if remaining: return await ctx.send(f'⏳ NPC battle cooldown: wait **{remaining}s** before starting another NPC battle.')
         pv_start_battle_cooldown(ctx.author.id, 'npc')
+        status_message = await ctx.send('⚔️ Preparing your battle… loading Pokémon and moves.')
         enemy=await random_pokemon(); low=max(3,min(50,row[4]-2)); high=max(low,min(50,row[4]+3)); enemy['_level']=random.randint(low,high);v=NPCBattleView(ctx.author.id,row,enemy);await v.build();own_data=await pokemon_data(row[2])
         e=discord.Embed(title=f'⚔️ Pokémon Battle Arena — {row[3].title()} vs {display_name(enemy)}',description=f'''🔴 **Your Pokémon:** {row[3].title()} Lv. {row[4]}
 HP {hp_bar(row[8],row[9])}
@@ -3647,7 +3677,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.color=discord.Color.red()
         battle_art_files=[]
         try:
-            own_art=await radiant_sprite_file(own_data, require_archive=bool(row[-1]))
+            own_art=await radiant_sprite_file(own_data)
             e.set_thumbnail(url=f'attachment://{own_art.filename}')
             battle_art_files.append(own_art)
         except Exception as exc:
@@ -3658,7 +3688,9 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             battle_art_files.append(enemy_art)
         except Exception as exc:
             print(f'RADIANTDEX NPC opponent artwork failed: {exc!r}')
-        v.message=await ctx.send(embed=e,view=v,files=battle_art_files); ACTIVE_VIEWS[ctx.author.id]=v
+        v.message=status_message
+        await status_message.edit(content=None, embed=e, view=v, attachments=battle_art_files)
+        ACTIVE_VIEWS[ctx.author.id]=v
     @commands.command(name='challenge',aliases=['pvp','duel','chall'],description='Challenge another trainer to a PvP battle; PvP battles have their own 60-second cooldown.')
     async def challenge(self,ctx,opponent:discord.Member):
         if opponent.bot or opponent.id==ctx.author.id:return await ctx.send('❌ Choose another human trainer.')
@@ -5308,6 +5340,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     @commands.has_guild_permissions(manage_emojis_and_stickers=True)
     async def setupitememojis(self, ctx):
         """Install the current shop-item sprite emojis, resuming safely after partial runs."""
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ This setup command is restricted to configured bot developers.')
         items = list(SHOP_ITEMS.values())
         # Inventory-only items also get uploaded sprites so !inv matches !shop.
         sprite_only_items = [
@@ -5381,55 +5415,68 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         }
 
         async def download_special_pogo_sprite(key):
-            # Look up the real Pokémon GO item artwork through the wiki image API,
-            # then upload those original files as Discord custom emojis.
-            file_titles = {
-                'pokemon-storage': [
-                    'File:Pokémon Storage Upgrade.png',
-                    'File:Pokemon Storage Upgrade.png',
-                    'File:Pokémon Storage.png',
-                    'File:Pokemon Storage.png',
-                ],
-                'raid-pass': [
-                    'File:Raid Pass.png',
-                    'File:GO Raid Pass.png',
-                ],
+            # Pull original Pokémon GO artwork from Bulbagarden Archives first,
+            # then fall back to the Fandom image API. These are source image files,
+            # not generated or substituted artwork.
+            titles = {
+                'pokemon-storage': ['File:GO Storage Upgrade.png', 'File:Pokémon Storage Upgrade.png', 'File:Pokemon Storage Upgrade.png'],
+                'raid-pass': ['File:GO Raid Pass.png', 'File:GO Premium Battle Pass.png', 'File:Raid Pass.png', 'File:Remote Raid Pass.png'],
             }.get(key, [])
-            last_error = 'original Pokémon GO sprite not found on the item-art source'
-            for title in file_titles:
+            sources = [
+                ('https://archives.bulbagarden.net/w/api.php', titles),
+                ('https://pokemongo.fandom.com/api.php', [t.replace('GO Storage Upgrade', 'Pokémon Storage Upgrade').replace('GO Raid Pass', 'Raid Pass') for t in titles]),
+            ]
+            last_error = 'original Pokémon GO sprite not found in the source image archives'
+            timeout = aiohttp.ClientTimeout(total=20)
+            for api_url, source_titles in sources:
+                # Search archive file titles first; exact titles have changed between game/wiki versions.
+                search_term = 'GO Storage Upgrade' if key == 'pokemon-storage' else 'GO Raid Pass'
                 try:
-                    timeout = aiohttp.ClientTimeout(total=20)
                     async with aiohttp.ClientSession(timeout=timeout) as session:
-                        api_url = 'https://pokemongo.fandom.com/api.php'
-                        params = {
-                            'action': 'query', 'titles': title, 'prop': 'imageinfo',
-                            'iiprop': 'url', 'format': 'json', 'origin': '*'
-                        }
-                        async with session.get(api_url, params=params, headers={'User-Agent': 'PokeVantaBot/1.0 (item sprite setup)'}) as response:
-                            if response.status != 200:
-                                last_error = f'{title}: image API HTTP {response.status}'
-                                continue
-                            payload = await response.json(content_type=None)
-                        pages = payload.get('query', {}).get('pages', {})
-                        image_url = next((info.get('url') for page in pages.values() for info in page.get('imageinfo', []) if info.get('url')), None)
-                        if not image_url:
-                            last_error = f'{title}: no image listed'
-                            continue
+                        params = {'action':'query','generator':'search','gsrsearch':search_term,'gsrnamespace':6,'gsrlimit':10,'prop':'imageinfo','iiprop':'url','format':'json'}
+                        async with session.get(api_url, params=params, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as response:
+                            if response.status == 200:
+                                payload = await response.json(content_type=None)
+                                pages = payload.get('query', {}).get('pages', {})
+                                candidates = []
+                                for page in pages.values():
+                                    title_found = str(page.get('title',''))
+                                    infos = page.get('imageinfo', [])
+                                    if infos and infos[0].get('url'):
+                                        candidates.append((title_found, infos[0]['url']))
+                                preferred = [x for x in candidates if ('storage' in x[0].lower() if key == 'pokemon-storage' else ('raid' in x[0].lower() and 'pass' in x[0].lower()))]
+                                for title_found, image_url in (preferred or candidates):
+                                    async with session.get(image_url, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as image_response:
+                                        if image_response.status != 200: continue
+                                        data = await image_response.read()
+                                    if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) <= 256 * 1024:
+                                        return data, title_found
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                    last_error = f'{search_term}: {type(exc).__name__}'
+                for title in source_titles:
+                    try:
                         async with aiohttp.ClientSession(timeout=timeout) as session:
-                            async with session.get(image_url, headers={'User-Agent': 'PokeVantaBot/1.0 (item sprite setup)'}) as response:
+                            params = {'action':'query','titles':title,'prop':'imageinfo','iiprop':'url','format':'json'}
+                            async with session.get(api_url, params=params, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as response:
+                                if response.status != 200:
+                                    last_error = f'{title}: image API HTTP {response.status}'
+                                    continue
+                                payload = await response.json(content_type=None)
+                            pages = payload.get('query', {}).get('pages', {})
+                            image_url = next((info.get('url') for page in pages.values() for info in page.get('imageinfo', []) if info.get('url')), None)
+                            if not image_url:
+                                last_error = f'{title}: no image listed'
+                                continue
+                            async with session.get(image_url, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as response:
                                 if response.status != 200:
                                     last_error = f'{title}: image HTTP {response.status}'
                                     continue
                                 data = await response.read()
-                        if not data.startswith(b'\x89PNG\r\n\x1a\n'):
-                            last_error = f'{title}: image is not PNG'
-                            continue
-                        if len(data) > 256 * 1024:
-                            last_error = f'{title}: sprite exceeds Discord 256 KB limit'
-                            continue
-                        return data, title
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                    last_error = f'{title}: {type(exc).__name__}'
+                            if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) <= 256 * 1024:
+                                return data, title
+                            last_error = f'{title}: image is not a PNG under 256 KB'
+                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                        last_error = f'{title}: {type(exc).__name__}'
             raise RuntimeError(last_error)
 
         async def download_png(key):
@@ -5584,6 +5631,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
     @commands.has_guild_permissions(manage_emojis_and_stickers=True)
     async def setupvantacoin(self, ctx):
         """Install or reuse the VantaCoin currency emoji without touching item sprites."""
+        if not self.is_dev(ctx):
+            return await ctx.send('❌ This setup command is restricted to configured bot developers.')
         status = await ctx.send('🪙 Installing the VantaCoin sprite…')
         emoji_name = 'vantacoin'
         existing = discord.utils.get(ctx.guild.emojis, name=emoji_name)
