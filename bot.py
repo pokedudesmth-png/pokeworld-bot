@@ -5415,68 +5415,105 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         }
 
         async def download_special_pogo_sprite(key):
-            # Pull original Pokémon GO artwork from Bulbagarden Archives first,
-            # then fall back to the Fandom image API. These are source image files,
-            # not generated or substituted artwork.
-            titles = {
-                'pokemon-storage': ['File:GO Storage Upgrade.png', 'File:Pokémon Storage Upgrade.png', 'File:Pokemon Storage Upgrade.png'],
-                'raid-pass': ['File:GO Raid Pass.png', 'File:GO Premium Battle Pass.png', 'File:Raid Pass.png', 'File:Remote Raid Pass.png'],
-            }.get(key, [])
-            sources = [
-                ('https://archives.bulbagarden.net/w/api.php', titles),
-                ('https://pokemongo.fandom.com/api.php', [t.replace('GO Storage Upgrade', 'Pokémon Storage Upgrade').replace('GO Raid Pass', 'Raid Pass') for t in titles]),
-            ]
-            last_error = 'original Pokémon GO sprite not found in the source image archives'
-            timeout = aiohttp.ClientTimeout(total=20)
-            for api_url, source_titles in sources:
-                # Search archive file titles first; exact titles have changed between game/wiki versions.
-                search_term = 'GO Storage Upgrade' if key == 'pokemon-storage' else 'GO Raid Pass'
-                try:
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        params = {'action':'query','generator':'search','gsrsearch':search_term,'gsrnamespace':6,'gsrlimit':10,'prop':'imageinfo','iiprop':'url','format':'json'}
-                        async with session.get(api_url, params=params, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as response:
-                            if response.status == 200:
-                                payload = await response.json(content_type=None)
-                                pages = payload.get('query', {}).get('pages', {})
-                                candidates = []
-                                for page in pages.values():
-                                    title_found = str(page.get('title',''))
-                                    infos = page.get('imageinfo', [])
-                                    if infos and infos[0].get('url'):
-                                        candidates.append((title_found, infos[0]['url']))
-                                preferred = [x for x in candidates if ('storage' in x[0].lower() if key == 'pokemon-storage' else ('raid' in x[0].lower() and 'pass' in x[0].lower()))]
-                                for title_found, image_url in (preferred or candidates):
-                                    async with session.get(image_url, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as image_response:
-                                        if image_response.status != 200: continue
-                                        data = await image_response.read()
-                                    if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) <= 256 * 1024:
-                                        return data, title_found
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                    last_error = f'{search_term}: {type(exc).__name__}'
-                for title in source_titles:
+            """Fetch the real Pokémon GO storage-upgrade or raid-pass sprite.
+
+            Use MediaWiki's Special:FilePath redirect first (the old code used
+            guessed file titles and often received an HTML file page instead of
+            an image), then query the source wiki API as a fallback.
+            """
+            if key == 'pokemon-storage':
+                direct_urls = [
+                    'https://pokemongo.fandom.com/wiki/Special:FilePath/Pok%C3%A9mon_Storage_Upgrade.png',
+                    'https://pokemongo.fandom.com/wiki/Special:FilePath/Pokemon_Storage_Upgrade.png',
+                    'https://archives.bulbagarden.net/wiki/Special:FilePath/GO_Storage_Upgrade.png',
+                ]
+                titles = [
+                    'File:Pokémon Storage Upgrade.png',
+                    'File:Pokemon Storage Upgrade.png',
+                    'File:GO Storage Upgrade.png',
+                    'File:Storage Upgrade.png',
+                ]
+                search_terms = ['Pokémon Storage Upgrade', 'Pokemon Storage Upgrade', 'GO Storage Upgrade']
+                api_sources = ['https://pokemongo.fandom.com/api.php', 'https://archives.bulbagarden.net/w/api.php']
+            else:
+                direct_urls = [
+                    'https://archives.bulbagarden.net/wiki/Special:FilePath/GO_Raid_Pass.png',
+                    'https://pokemongo.fandom.com/wiki/Special:FilePath/Raid_Pass.png',
+                    'https://pokemongo.fandom.com/wiki/Special:FilePath/GO_Raid_Pass.png',
+                ]
+                titles = ['File:GO Raid Pass.png', 'File:Raid Pass.png', 'File:Purple Raid Pass.png']
+                search_terms = ['GO Raid Pass', 'Raid Pass']
+                api_sources = ['https://archives.bulbagarden.net/w/api.php', 'https://pokemongo.fandom.com/api.php']
+
+            timeout = aiohttp.ClientTimeout(total=25)
+            headers = {'User-Agent': 'PokeVantaBot/1.0 (Discord item sprite setup)'}
+            last_error = 'original Pokémon GO sprite not found in the image archives'
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                # Direct file redirects return the raw image, unlike file-page HTML.
+                for url in direct_urls:
                     try:
-                        async with aiohttp.ClientSession(timeout=timeout) as session:
-                            params = {'action':'query','titles':title,'prop':'imageinfo','iiprop':'url','format':'json'}
-                            async with session.get(api_url, params=params, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as response:
+                        async with session.get(url, allow_redirects=True) as response:
+                            if response.status != 200:
+                                last_error = f'file URL HTTP {response.status}'
+                                continue
+                            data = await response.read()
+                            if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) <= 256 * 1024:
+                                return data, str(response.url).rsplit('/', 1)[-1]
+                            last_error = 'downloaded file was not a PNG under Discord’s 256 KB emoji limit'
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        last_error = f'{type(exc).__name__} while fetching direct file URL'
+
+                # Ask MediaWiki for the actual file URL instead of assuming a page title exists.
+                for api_url in api_sources:
+                    for title in titles:
+                        try:
+                            params = {'action':'query', 'titles':title, 'prop':'imageinfo', 'iiprop':'url', 'format':'json'}
+                            async with session.get(api_url, params=params) as response:
                                 if response.status != 200:
-                                    last_error = f'{title}: image API HTTP {response.status}'
+                                    last_error = f'file API HTTP {response.status}'
                                     continue
                                 payload = await response.json(content_type=None)
                             pages = payload.get('query', {}).get('pages', {})
                             image_url = next((info.get('url') for page in pages.values() for info in page.get('imageinfo', []) if info.get('url')), None)
                             if not image_url:
-                                last_error = f'{title}: no image listed'
                                 continue
-                            async with session.get(image_url, headers={'User-Agent':'PokeVantaBot/1.0 item sprite setup'}) as response:
+                            async with session.get(image_url, allow_redirects=True) as response:
                                 if response.status != 200:
-                                    last_error = f'{title}: image HTTP {response.status}'
+                                    last_error = f'image download HTTP {response.status}'
                                     continue
                                 data = await response.read()
                             if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) <= 256 * 1024:
                                 return data, title
-                            last_error = f'{title}: image is not a PNG under 256 KB'
-                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                        last_error = f'{title}: {type(exc).__name__}'
+                            last_error = 'source image is not a PNG under Discord’s 256 KB emoji limit'
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                            last_error = f'{type(exc).__name__} while querying file API'
+                    # Use search only as a final fallback; constrain matches to relevant names.
+                    for search_term in search_terms:
+                        try:
+                            params = {'action':'query','generator':'search','gsrsearch':search_term,'gsrnamespace':6,'gsrlimit':20,'prop':'imageinfo','iiprop':'url','format':'json'}
+                            async with session.get(api_url, params=params) as response:
+                                if response.status != 200:
+                                    continue
+                                payload = await response.json(content_type=None)
+                            pages = payload.get('query', {}).get('pages', {})
+                            for page in pages.values():
+                                title_found = str(page.get('title',''))
+                                lowered = title_found.lower()
+                                if key == 'pokemon-storage' and not ('storage' in lowered and ('upgrade' in lowered or 'pokemon' in lowered)):
+                                    continue
+                                if key == 'raid-pass' and not ('raid' in lowered and 'pass' in lowered):
+                                    continue
+                                image_url = next((info.get('url') for info in page.get('imageinfo', []) if info.get('url')), None)
+                                if not image_url:
+                                    continue
+                                async with session.get(image_url, allow_redirects=True) as response:
+                                    if response.status != 200:
+                                        continue
+                                    data = await response.read()
+                                if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) <= 256 * 1024:
+                                    return data, title_found
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                            last_error = f'{type(exc).__name__} while searching archive'
             raise RuntimeError(last_error)
 
         async def download_png(key):
