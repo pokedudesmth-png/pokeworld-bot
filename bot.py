@@ -323,6 +323,10 @@ def setup():
         if 'held_item' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN held_item TEXT DEFAULT ""')
         if 'status_condition' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN status_condition TEXT DEFAULT ""')
         if 'radiant' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN radiant INTEGER NOT NULL DEFAULT 0')
+        # Radiant Dex IDs are permanent species IDs: R0001 is Bulbasaur, R0025 is Pikachu, etc.
+        # Move legacy sequential IDs out of the way first to avoid UNIQUE/PRIMARY KEY collisions.
+        c.execute('UPDATE radiant_pokedex_entries SET radiant_dex_id=radiant_dex_id+1000000')
+        c.execute('UPDATE radiant_pokedex_entries SET radiant_dex_id=dex_id')
         # Backfill the separate Radiant Dex for Radiant Pokémon caught before this update.
         legacy_radiants=c.execute('SELECT DISTINCT user_id,dex_id,name FROM pokemon WHERE radiant=1 AND user_id IS NOT NULL ORDER BY user_id,instance_id').fetchall()
         for radiant_uid,radiant_species_id,radiant_name in legacy_radiants:
@@ -405,15 +409,17 @@ def get_box_id(conn, uid, instance_id):
     return int(row[0]) if row and row[0] is not None else None
 
 def assign_radiant_dex_id(conn, uid, dex_id, name):
-    """Register one species in this trainer's separate, sequential Radiant Dex."""
+    """Register a species with its permanent Radiant Dex ID (R + National Dex number)."""
     if not uid or not dex_id:
         return None
-    row = conn.execute('SELECT radiant_dex_id FROM radiant_pokedex_entries WHERE user_id=? AND dex_id=?', (uid, int(dex_id))).fetchone()
+    stable_id = int(dex_id)
+    row = conn.execute('SELECT radiant_dex_id FROM radiant_pokedex_entries WHERE user_id=? AND dex_id=?', (uid, stable_id)).fetchone()
     if row:
-        return int(row[0])
-    next_id = int(conn.execute('SELECT COALESCE(MAX(radiant_dex_id),0)+1 FROM radiant_pokedex_entries WHERE user_id=?', (uid,)).fetchone()[0])
-    conn.execute('INSERT INTO radiant_pokedex_entries(user_id,radiant_dex_id,dex_id,name,registered_at) VALUES(?,?,?,?,?)', (uid,next_id,int(dex_id),str(name),int(time.time())))
-    return next_id
+        if int(row[0]) != stable_id:
+            conn.execute('UPDATE radiant_pokedex_entries SET radiant_dex_id=? WHERE user_id=? AND dex_id=?', (stable_id, uid, stable_id))
+        return stable_id
+    conn.execute('INSERT INTO radiant_pokedex_entries(user_id,radiant_dex_id,dex_id,name,registered_at) VALUES(?,?,?,?,?)', (uid,stable_id,stable_id,str(name),int(time.time())))
+    return stable_id
 
 def get_radiant_dex_id(conn, uid, dex_id):
     row = conn.execute('SELECT radiant_dex_id FROM radiant_pokedex_entries WHERE user_id=? AND dex_id=?', (uid,int(dex_id))).fetchone()
@@ -520,12 +526,19 @@ def inventory_amount(uid,item):
     with db() as c:
         r=c.execute('SELECT amount FROM inventory WHERE user_id=? AND item=?',(uid,item)).fetchone(); return r[0] if r else 0
 def change_item(uid,item,delta):
+    """Change an inventory stack atomically and reject spending below zero."""
+    delta = int(delta)
     with db() as c:
-        c.execute('INSERT OR IGNORE INTO inventory VALUES(?,?,0)',(uid,item,0))
-        current=c.execute('SELECT amount FROM inventory WHERE user_id=? AND item=?',(uid,item)).fetchone()[0]
+        # Acquire the SQLite write lock before reading the current stack. This
+        # prevents two simultaneous rewards/purchases from racing each other.
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT OR IGNORE INTO inventory(user_id,item,amount) VALUES(?,?,0)', (uid, item))
+        row = c.execute('SELECT amount FROM inventory WHERE user_id=? AND item=?', (uid, item)).fetchone()
+        current = int(row[0]) if row else 0
         if current + delta < 0:
             raise ValueError(f'Insufficient inventory quantity for {item}: have {current}, need {-delta}')
-        c.execute('UPDATE inventory SET amount=amount+? WHERE user_id=? AND item=?',(delta,uid,item))
+        c.execute('UPDATE inventory SET amount=amount+? WHERE user_id=? AND item=?', (delta, uid, item))
+        return current + delta
 
 async def api_get(path):
     global SESSION
@@ -1774,7 +1787,7 @@ class DexView(TimedView):
             color=discord.Color.from_rgb(145, 65, 230) if self.id_prefix else (discord.Color.gold() if self.shiny else discord.Color.blurple()))
         embed.description=(f'**Registered:** {self.registered_count}/{self.total_count}  •  **Missing:** {self.total_count-self.registered_count}\n'
             f'**Entries — page {self.page+1}/{self.pages}**\n' +
-            ('\n'.join(f"{'✅' if caught else '⬜'} `{self.id_prefix + format(dex_id, '03d') if self.id_prefix else '#' + format(dex_id, '04d')}` {name.replace('-', ' ').title()}" for dex_id,name,caught in current) if current else 'No species found for this category.'))
+            ('\n'.join(f"{'✅' if caught else '⬜'} `{self.id_prefix + format(dex_id, '04d') if self.id_prefix else '#' + format(dex_id, '04d')}` {name.replace('-', ' ').title()}" for dex_id,name,caught in current) if current else 'No species found for this category.'))
         embed.set_footer(text='Radiant Dex IDs are separate from National Dex IDs' if self.id_prefix else '✅ Registered • ⬜ Not registered • Normal and shiny entries are separate')
         return embed
     async def render_page(self):
@@ -2208,7 +2221,7 @@ class Game(commands.Cog):
                 c.execute('INSERT OR IGNORE INTO hunt_counts(user_id,count) VALUES(?,0)',(uid,))
                 count=c.execute('SELECT count FROM hunt_counts WHERE user_id=?',(uid,)).fetchone()[0]
             # Starting a hunt does not advance catch progress. Only a successful catch does.
-            d=await random_pokemon(); radiant=(random.randint(1,4096)==1); shiny=(not radiant and random.random()<1/128); lvl=random.randint(3,20)
+            d=await random_pokemon(); radiant=(random.randint(1,4096)==1); shiny=(not radiant and random.random()<1/2048); lvl=random.randint(3,20)
             with db() as c:c.execute('INSERT OR REPLACE INTO encounters(user_id,dex_id,name,shiny,level,hints_used,radiant) VALUES(?,?,?,?,?,0,?)',(uid,d['id'],d['name'],int(shiny),lvl,int(radiant)))
             pv_record_activity(uid,'hunt',1,getattr(ctx.guild,'id',None))
             e=discord.Embed(title='🌿 A wild Pokémon appeared!',description=f'**Catch progress:** {count}/50 • **Level:** {lvl}\n**Type:** ???\n\n👀 Look at the picture and guess the Pokémon!\nUse `!hint` for up to 2 missing-letter hints and `!catch <name>` to catch it. Every 25 successful catches unlocks a legendary boss; boss shiny odds are **1/1000**, improved to **1/250** on every 50th successful catch!\n\n{RADIANT_EMOJI} **Radiant odds:** 1/4096 per hunt.')
@@ -2220,22 +2233,30 @@ class Game(commands.Cog):
                 e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
                 e.color=discord.Color.gold()
             if radiant:e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
-            # RADIANTDEX: all wild Pokémon artwork is recoloured purple, not only rare Radiant spawns.
-            try:
-                radiant_file = await radiant_sprite_file(d, require_archive=radiant)
-            except Exception as exc:
-                print(f'RADIANTDEX hunt artwork failed for {d.get("name", "unknown")}: {exc!r}')
-                radiant_file = None
-            if radiant_file:
-                e.set_image(url=f'attachment://{radiant_file.filename}')
-                await ctx.reply(embed=e, file=radiant_file, mention_author=False)
-            else:
-                if not radiant:
-                    art=sprite(d,shiny=shiny)
-                    if art:e.set_image(url=art)
-                    e.set_footer(text='RADIANTDEX artwork unavailable for this entry; showing source artwork.')
+            # Only an actual 1-in-4096 Radiant encounter may use the purple
+            # RadiantDex artwork. Normal and Shiny encounters use their own
+            # standard PokéAPI artwork and must never look Radiant.
+            if radiant:
+                try:
+                    radiant_file = await radiant_sprite_file(d, require_archive=True)
+                except Exception as exc:
+                    print(f'RADIANTDEX hunt artwork failed for {d.get("name", "unknown")}: {exc!r}')
+                    radiant_file = None
+                if radiant_file:
+                    e.set_image(url=f'attachment://{radiant_file.filename}')
+                    await ctx.reply(embed=e, file=radiant_file, mention_author=False)
                 else:
-                    e.set_footer(text='RadiantDex artwork file missing. Keep RadiantDex_Artwork_HQ.zip beside bot.py.')
+                    # Keep the rare encounter valid even if its special artwork
+                    # archive is missing; the embed title still identifies it.
+                    art = sprite(d)
+                    if art:
+                        e.set_image(url=art)
+                    e.set_footer(text='RadiantDex artwork unavailable; this is still a genuine Radiant encounter.')
+                    await ctx.reply(embed=e, mention_author=False)
+            else:
+                art = sprite(d, shiny=shiny)
+                if art:
+                    e.set_image(url=art)
                 await ctx.reply(embed=e, mention_author=False)
         except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
 
@@ -2498,7 +2519,7 @@ class Game(commands.Cog):
                 c.execute('UPDATE hunt_counts SET count=? WHERE user_id=?',(catch_progress,uid))
         note=' **You were the first to guess it!**' if is_global else ''
         variant=(RADIANT_EMOJI + ' RADIANT ') if radiant else ('✨ SHINY ' if enc[2] else '')
-        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`' + (f' • Radiant Dex ID: `R{radiant_dex_id:03d}`' if radiant_dex_id else '') + f'\n🎒 Reward: **{loot}** • +25 XP. Check `!inventory`.'
+        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note} ID: `{box_id}`' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + f'\n🎒 Reward: **{loot}** • +25 XP. Check `!inventory`.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -2868,7 +2889,7 @@ class Game(commands.Cog):
                 '`!dex legendary` — Legendary Pokémon\n'
                 '`!dex mythical` — Mythical Pokémon\n'
                 '`!dex ultrabeast` — Ultra Beasts\n'
-                '`!dex radiant` — Your separate Radiant Pokédex (IDs R001, R002, …)\n\n'
+                '`!dex radiant` — Full Radiant Pokédex (IDs R0001–R1025)\n\n'
                 '`!dex <pokemon name>` — Pokémon stats and info\n'
                 'Each Pokédex page shows 25 entries. ✅ = registered; ⬜ = not registered.\n'
                 'Use `!dex shiny` to see shiny Pokédex commands.'
@@ -2900,11 +2921,26 @@ class Game(commands.Cog):
             shiny=True; tokens=tokens[:-1]
         key=' '.join(tokens).strip()
         if key in ('radiant','radiants'):
+            # Every National Dex species has a permanent Radiant entry; only owned Radiants are checked.
+            if not POKEMON_LIST:
+                await load_pokemon_list()
+            radiant_species=[]
+            for item in POKEMON_LIST:
+                match=re.search(r'/pokemon-species/(\\d+)/?$',item.get('url',''))
+                if match:
+                    species_id=int(match.group(1))
+                    if 1 <= species_id <= 1025:
+                        radiant_species.append((species_id,item['name']))
+            radiant_species=sorted({dex_id:name for dex_id,name in radiant_species}.items())
+            if not radiant_species:
+                return await ctx.send('⚠️ I could not load the Radiant Pokédex species list. Please try again shortly.')
             with db() as c:
-                radiant_rows=c.execute('SELECT radiant_dex_id,name FROM radiant_pokedex_entries WHERE user_id=? ORDER BY radiant_dex_id',(ctx.author.id,)).fetchall()
-            entries=[(int(r[0]),str(r[1]),True) for r in radiant_rows]
-            view=DexView(ctx.author.id,entries,False,'Radiant Pokédex',len(entries),len(entries),id_prefix='R')
-            dex_embed, dex_artwork = await view.render_page()
+                radiant_rows=c.execute('SELECT dex_id,name FROM radiant_pokedex_entries WHERE user_id=?',(ctx.author.id,)).fetchall()
+            registered={int(row[0]):str(row[1]) for row in radiant_rows}
+            entries=[(dex_id,name,dex_id in registered) for dex_id,name in radiant_species]
+            registered_count=sum(1 for _,_,caught in entries if caught)
+            view=DexView(ctx.author.id,entries,False,'Radiant Pokédex',registered_count,len(entries),id_prefix='R')
+            dex_embed,dex_artwork=await view.render_page()
             msg=await ctx.send(embed=dex_embed,view=view,file=dex_artwork) if dex_artwork else await ctx.send(embed=dex_embed,view=view)
             view.message=msg
             return
@@ -3039,7 +3075,7 @@ class Game(commands.Cog):
         filled=max(0,min(10,round(ratio*10))); bar='▰'*filled+'▱'*(10-filled)
         variant=(RADIANT_EMOJI + ' Radiant ') if radiant else ('✨ Shiny ' if shiny else '')
         with db() as c: radiant_id=get_radiant_dex_id(c,ctx.author.id,dex_id) if radiant else None
-        radiant_line=f'\n**Radiant Dex ID:** `R{radiant_id:03d}`' if radiant_id else ''
+        radiant_line=f'\n**Radiant Dex ID:** `R{radiant_id:04d}`' if radiant_id else ''
         e=discord.Embed(title=f'{variant}{name.replace("-"," ").title()} · Lv. {level}',description=f'**Pokémon ID:** `{display_iid}`{radiant_line}\n**Production ID (internal):** `{iid}`\n**Type:** {types}\n**HP** `{hp}/{maxhp}`\n`{bar}` **{round(ratio*100)}%**',color=discord.Color.from_rgb(80,235,220) if radiant else (discord.Color.gold() if shiny else (discord.Color.green() if ratio>.5 else discord.Color.orange() if hp>0 else discord.Color.dark_red())))
         e.add_field(name='Battle Stats',value='\n'.join(f'**{label}:** {base.get(key,"?")}' for key,label in [('hp','HP Base'),('attack','Attack'),('defense','Defense'),('special-attack','Sp. Attack'),('special-defense','Sp. Defense'),('speed','Speed')]),inline=True)
         iv_total=sum(max(0,min(31,int(v or 0))) for v in iv_values)
@@ -3151,7 +3187,7 @@ class Game(commands.Cog):
                     public_id=get_box_id(c,member.id,iid) or iid
                     if not c.execute('SELECT 1 FROM team WHERE user_id=?',(member.id,)).fetchone():
                         c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(member.id,1,iid))
-                result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:03d}`.' if radiant_id else '.')
+                result=f'✅ Added **{label}** to {member.mention} (ID `{public_id}`)' + (f' • Radiant Dex ID: `R{radiant_id:04d}`.' if radiant_id else '.')
             except Exception as exc:
                 result=f'❌ Add failed: `{type(exc).__name__}: {exc}`'
             await interaction.message.edit(content=result,embed=None,view=view)
@@ -3645,7 +3681,8 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if product_id == 54:
                 pool=await move_pool(row[2],fast=False)
                 view=EliteChargedMoveView(ctx.author.id,pokemon_id,key,row[3],pool)
-                return await ctx.send(f'✨ Choose the new Charged Move for **{row[3].title()}** (ID `{public_box_id}`). Your current move stays until you select one.',view=view)
+                view.message=await ctx.send(f'✨ Choose the new Charged Move for **{row[3].title()}** (ID `{public_box_id}`). Your current move stays until you select one.',view=view)
+                return
             fast=(product_id==52); pool=await move_pool(row[2],fast=fast); selected=random.choice(pool)
             column='fast_move' if fast else 'charged_move'
             with db() as c:
@@ -6385,68 +6422,80 @@ class CarlStyleExtensions(commands.Cog):
         if not isinstance(target_channel, discord.TextChannel):
             return await ctx.send('❌ Please use a text channel.')
 
-        cog = self
+        selection_done = asyncio.Event()
+
         class MatchRoleSelect(discord.ui.RoleSelect):
             def __init__(self, step):
                 super().__init__(placeholder='Choose a role…', min_values=1, max_values=1)
                 self.step = step
+
             async def callback(self, interaction: discord.Interaction):
                 if interaction.user.id != ctx.author.id:
                     return await interaction.response.send_message('Only the person who started this setup can choose roles.', ephemeral=True)
                 role = self.values[0]
                 if role.is_default() or role.managed:
                     return await interaction.response.send_message('Please choose a regular server role.', ephemeral=True)
+
+                current_view = self.view
                 if self.step == 1:
-                    view.first_role = role
-                    view.clear_items()
-                    view.add_item(discord.ui.Button(label=f'First role: {role.name}', style=discord.ButtonStyle.secondary, disabled=True))
-                    view.add_item(ChooseSecondRoleButton())
-                    await interaction.response.edit_message(content=f'First role selected: **{discord.utils.escape_markdown(role.name)}**\nNow press **Choose second role**. The first role cannot be selected again.', view=view)
-                else:
-                    if role.id == view.first_role.id:
-                        return await interaction.response.send_message('That role is already selected. Choose a different role.', ephemeral=True)
-                    view.second_role = role
-                    selection_done.set()
-                    view.stop()
-                    await interaction.response.edit_message(content=f'✅ Roles selected: **{discord.utils.escape_markdown(view.first_role.name)}** vs **{discord.utils.escape_markdown(view.second_role.name)}**\nI will now ask for the match time in chat.', view=None)
+                    current_view.first_role = role
+                    current_view.clear_items()
+                    current_view.add_item(discord.ui.Button(label=f'First role: {role.name}'[:80], style=discord.ButtonStyle.secondary, disabled=True))
+                    current_view.add_item(ChooseSecondRoleButton())
+                    await interaction.response.edit_message(
+                        content=f'First role selected: **{discord.utils.escape_markdown(role.name)}**\\nNow press **Choose second role**. The first role cannot be selected again.',
+                        view=current_view
+                    )
+                    return
 
-        class FirstRoleView(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=180)
-                self.add_item(MatchRoleSelect(1))
-
-        class SecondRoleView(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=180)
-                self.add_item(MatchRoleSelect(2))
+                if current_view.first_role and role.id == current_view.first_role.id:
+                    return await interaction.response.send_message('That role is already selected. Choose a different role.', ephemeral=True)
+                current_view.second_role = role
+                selection_done.set()
+                current_view.stop()
+                await interaction.response.edit_message(
+                    content=f'✅ Roles selected: **{discord.utils.escape_markdown(current_view.first_role.name)}** vs **{discord.utils.escape_markdown(role.name)}**\\nI will now ask for the match time in chat.',
+                    view=None
+                )
 
         class ChooseSecondRoleButton(discord.ui.Button):
             def __init__(self):
                 super().__init__(label='Choose second role', style=discord.ButtonStyle.primary)
+
             async def callback(self, interaction: discord.Interaction):
                 if interaction.user.id != ctx.author.id:
                     return await interaction.response.send_message('Only the person who started this setup can choose roles.', ephemeral=True)
-                second_view = SecondRoleView()
-                await interaction.response.edit_message(content=f'First role: {view.first_role.mention}\nChoose a different role for the second team.', view=second_view)
+                current_view = self.view
+                current_view.clear_items()
+                current_view.add_item(MatchRoleSelect(2))
+                await interaction.response.edit_message(
+                    content=f'First role: {current_view.first_role.mention}\\nChoose a different role for the second team.',
+                    view=current_view
+                )
 
-        class StartRoleView(discord.ui.View):
+        class MatchRoleView(discord.ui.View):
             def __init__(self):
                 super().__init__(timeout=180)
-            @discord.ui.button(label='Choose first role', style=discord.ButtonStyle.primary, emoji='⚔️')
-            async def choose_first(self, interaction: discord.Interaction, button: discord.ui.Button):
+                self.first_role = None
+                self.second_role = None
+                self.add_item(StartChooseFirstRoleButton())
+
+        class StartChooseFirstRoleButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label='Choose first role', style=discord.ButtonStyle.primary, emoji='⚔️')
+
+            async def callback(self, interaction: discord.Interaction):
                 if interaction.user.id != ctx.author.id:
                     return await interaction.response.send_message('Only the person who started this setup can choose roles.', ephemeral=True)
-                await interaction.response.edit_message(content='Choose the first team role:', view=FirstRoleView())
+                current_view = self.view
+                current_view.clear_items()
+                current_view.add_item(MatchRoleSelect(1))
+                await interaction.response.edit_message(content='Choose the first team role:', view=current_view)
 
-        view = type('MatchRoleState', (discord.ui.View,), {}) (timeout=180)
-        view.first_role = None
-        view.second_role = None
-        selection_done = asyncio.Event()
-        # The view's state is retained across the button/select interactions above.
-        msg = await ctx.send('⚔️ **Match announcement setup**\nPress the button to choose the first team role.', view=StartRoleView())
-        # State is attached to the top-level view used by the callbacks.
-        # Use a small message-scoped state object so nested views share the same selections.
-        # (The callbacks close over this variable.)
+        view = MatchRoleView()
+        msg = await ctx.send('⚔️ **Match announcement setup**\\nPress the button to choose the first team role.', view=view)
+        view.message = msg
+
         try:
             await asyncio.wait_for(selection_done.wait(), timeout=180)
             def check(message):
