@@ -6039,8 +6039,8 @@ class CarlStyleExtensions(commands.Cog):
     @commands.hybrid_command(name='suggest', description='Submit a suggestion to the configured suggestion channel.')
     @commands.guild_only()
     async def suggest(self, ctx, *, text: str):
-        if not self.is_dev(ctx):
-            return await ctx.send('❌ The `!suggest` command is restricted to configured PokéVanta bot developers.')
+        # Public command: any server member can submit an idea. Only
+        # !setsuggestions (channel configuration) is restricted to developers.
         if not ctx.guild:
             return
         text = text.strip()
