@@ -8234,17 +8234,37 @@ class CarlStyleExtensions(commands.Cog):
         if channel:
             template=settings.get('welcome_message','Welcome {user} to {server}!')
             text=template.replace('{user}',member.mention).replace('{server}',member.guild.name).replace('{member_count}',str(member.guild.member_count))
-            # Never print a raw GIF hosting URL in the welcome embed; artwork belongs in the image slot.
+            # Keep URLs out of the visible welcome copy; configured artwork is shown as a thumbnail.
             text=re.sub(r'https?://\S+', '', text).strip()
-            welcome = discord.Embed(title=f'🎉 Welcome to {member.guild.name}!', description=f'{text[:3500]}\n\nYou are our **{member.guild.member_count:,}th** member. Make yourself at home!', color=discord.Color.from_rgb(88, 101, 242), timestamp=discord.utils.utcnow())
-            welcome.set_thumbnail(url=member.display_avatar.url)
-            welcome.set_footer(text='We’re glad you’re here!')
+            if not text:
+                text='Make yourself at home and check out the server channels!'
+            # Carl-bot-inspired layout: greeting line, server identity, decorated body and closing line.
+            welcome = discord.Embed(
+                description=(
+                    '**WELCOME TO OUR SERVER ✨🌸**\n'
+                    '━━━━━━━━━━━━━━━━━━━━\n\n'
+                    f'{text[:3000]}\n\n'
+                    '━━━━━━━━━━━━━━━━━━━━\n\n'
+                    'Have a good time in the server!'
+                ),
+                color=discord.Color.from_rgb(88, 101, 242)
+            )
+            if member.guild.icon:
+                welcome.set_author(name=member.guild.name, icon_url=member.guild.icon.url)
+            else:
+                welcome.set_author(name=member.guild.name)
             art=(settings.get('welcome_gif') or '').strip()
             if art and art.startswith(('https://','http://')):
-                try: welcome.set_image(url=art)
+                try: welcome.set_thumbnail(url=art)
                 except (TypeError, ValueError): pass
-            try: await channel.send(content=member.mention, embed=welcome, allowed_mentions=discord.AllowedMentions(users=True,roles=False,everyone=False))
-            except discord.HTTPException as exc: print(f'Welcome media/message send failed in guild {member.guild.id}: {type(exc).__name__}: {exc}')
+            try:
+                await channel.send(
+                    content=f'Hello, {member.mention}. Welcome to {member.guild.name}.',
+                    embed=welcome,
+                    allowed_mentions=discord.AllowedMentions(users=True,roles=False,everyone=False)
+                )
+            except discord.HTTPException as exc:
+                print(f'Welcome media/message send failed in guild {member.guild.id}: {type(exc).__name__}: {exc}')
         log_id=settings.get('log_channel'); log=member.guild.get_channel(int(log_id)) if log_id else None
         if log:
             try: await log.send(embed=discord.Embed(description=f'📥 {member.mention} joined the server.',color=discord.Color.green()))
