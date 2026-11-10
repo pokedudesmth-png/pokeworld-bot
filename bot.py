@@ -608,19 +608,24 @@ async def radiant_sprite_file(d, require_archive=False):
             if directory not in checked_dirs:
                 checked_dirs.append(directory)
         for directory in checked_dirs:
-            for filename in archive_names:
-                path = os.path.join(directory, filename)
-                if os.path.isfile(path) and path not in found:
-                    found.append(path)
-            # Wispbyte and other hosts sometimes place uploaded assets one folder down.
+            # Match case-insensitively and tolerate duplicate upload suffixes such as (1).
             try:
-                for child in os.listdir(directory):
-                    child_path = os.path.join(directory, child)
-                    if os.path.isdir(child_path):
-                        for filename in archive_names:
-                            path = os.path.join(child_path, filename)
-                            if os.path.isfile(path) and path not in found:
-                                found.append(path)
+                for entry in os.listdir(directory):
+                    path = os.path.join(directory, entry)
+                    if os.path.isfile(path) and entry.lower().endswith('.zip') and 'radiant' in entry.lower() and 'artwork' in entry.lower():
+                        if path not in found:
+                            found.append(path)
+                    # Wispbyte and other hosts sometimes place uploaded assets one folder down.
+                    elif os.path.isdir(path):
+                        try:
+                            for nested in os.listdir(path):
+                                nested_path = os.path.join(path, nested)
+                                if (os.path.isfile(nested_path) and nested.lower().endswith('.zip')
+                                        and 'radiant' in nested.lower() and 'artwork' in nested.lower()
+                                        and nested_path not in found):
+                                    found.append(nested_path)
+                        except OSError:
+                            pass
             except OSError:
                 pass
         return found
@@ -642,7 +647,7 @@ async def radiant_sprite_file(d, require_archive=False):
                     with zipfile.ZipFile(archive_path, 'r') as archive:
                         for member in archive.namelist():
                             basename = member.rsplit('/', 1)[-1]
-                            match = re.match(r'^(\\d+)_([a-z0-9._-]+)\\.(webp|png)$', basename, re.I)
+                            match = re.match(r'^(\d+)_([a-z0-9._-]+)\.(webp|png)$', basename, re.I)
                             if match:
                                 index.append((int(match.group(1)), norm_name(match.group(2)), archive_path, member, match.group(3).lower()))
                 except (OSError, zipfile.BadZipFile):
@@ -1800,7 +1805,7 @@ class BoxView(TimedView):
             radiant_row = next((row for row in current if len(row) > 9 and bool(row[9])), None)
             if radiant_row:
                 try:
-                    pokemon = await pokemon_data(str(radiant_row[8]))
+                    pokemon = await pokemon_data(str(radiant_row[2]))
                     artwork = await radiant_sprite_file(pokemon, require_archive=True)
                     embed.set_image(url=f'attachment://{artwork.filename}')
                 except Exception as exc:
