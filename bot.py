@@ -4048,12 +4048,16 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             c.execute('UPDATE players SET daily=?,daily_streak=? WHERE user_id=?',(now,streak,uid))
             c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 5) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+5",(uid,))
             c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'rare-candy', 3) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+3",(uid,))
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh));iid=cur.lastrowid; assign_box_id(c,uid,iid)
-            if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
+            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(uid,pick['id'],pick['name'],lvl,0,mh,mh))
+            iid=cur.lastrowid
+            assign_box_id(c,uid,iid)
+            box_id=get_box_id(c,uid,iid)
+            if not c.execute('SELECT 1 FROM team WHERE user_id=?',(uid,)).fetchone():
+                c.execute('INSERT INTO team VALUES(?,?,?)',(uid,1,iid))
         if legendary:
-            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes • 🎒 +3 Rare Candies')
+            await ctx.send(f'🔥 **{streak}-day streak!** Guaranteed legendary reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +5 Raid Passes • 🎒 +3 Rare Candies')
         else:
-            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{get_box_id(c,uid,iid)}`\n🎟️ +5 Raid Passes • 🍬 +3 Rare Candies\n🔥 Current streak: **{streak}** days')
+            await ctx.send(f'🎁 Daily reward: **{display_name(pick)}** Lv.{lvl} — ID `{box_id}`\n🎟️ +5 Raid Passes • 🍬 +3 Rare Candies\n🔥 Current streak: **{streak}** days')
         if ctx.guild:
             await send_developer_log(ctx.bot, 'coins', '🎁 Daily Reward Claimed', f'<@{uid}> received **3 Rare Candies** and **5 Raid Passes**, and **{display_name(pick)} Lv. {lvl}**.\n**Result:** Reward granted successfully.', guild=ctx.guild, user=ctx.author)
     @commands.command(name='balance',aliases=['bal','money'],description='View your VantaCoins, level and XP.')
@@ -6164,20 +6168,26 @@ class CarlStyleExtensions(commands.Cog):
         self.setting(ctx.guild.id,'starboard_channel',channel.id)
         await ctx.send(f'⭐ Starboard destination set to {channel.mention}. React with ⭐ to nominate messages.')
 
-    @commands.hybrid_command(name='rradd')
+    @commands.hybrid_command(name='rradd', aliases=['reactionrole', 'rr'])
     async def rradd(self, ctx, message_id: int, emoji: str, role: discord.Role):
         if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'): return
         if not ctx.guild: return
         if role.is_default() or role.managed: return await ctx.send('Choose a normal, assignable role.')
+        emoji=emoji.strip()
         try:
             msg=await ctx.channel.fetch_message(message_id)
             await msg.add_reaction(emoji)
-        except (discord.HTTPException, discord.NotFound, discord.InvalidArgument):
-            return await ctx.send('❌ Could not find that message here or add the emoji. Run this command in the message channel.')
-        with db() as c: c.execute('INSERT OR REPLACE INTO cv_reaction_roles VALUES(?,?,?,?,?)',(ctx.guild.id,ctx.channel.id,message_id,emoji,role.id))
+        except discord.NotFound:
+            return await ctx.send('❌ I could not find that message in this channel. Run `!reactionrole` in the same channel as the target message.')
+        except discord.Forbidden:
+            return await ctx.send('❌ I lack **View Channel**, **Read Message History**, or **Add Reactions** permission in this channel.')
+        except (discord.HTTPException, discord.InvalidArgument) as exc:
+            return await ctx.send(f'❌ I could not add that reaction (`{type(exc).__name__}`). Check the emoji is valid and the bot can use it.')
+        with db() as c:
+            c.execute('INSERT OR REPLACE INTO cv_reaction_roles VALUES(?,?,?,?,?)',(ctx.guild.id,msg.channel.id,msg.id,emoji,role.id))
         await ctx.send(f'✅ Reaction role configured: react with {emoji} on [this message]({msg.jump_url}) to receive {role.mention}.')
 
-    @commands.hybrid_command(name='rrremove')
+    @commands.hybrid_command(name='rrremove', aliases=['reactionroleremove'])
     async def rrremove(self, ctx, message_id: int, *, emoji: str):
         if not await self.require_permission(ctx, 'manage_roles', 'Manage Roles'): return
         if not ctx.guild: return
@@ -6616,10 +6626,18 @@ class CarlStyleExtensions(commands.Cog):
         guild=self.bot.get_guild(payload.guild_id)
         if not guild: return
         if rr:
-            member=guild.get_member(payload.user_id); role=guild.get_role(rr[0])
+            member=guild.get_member(payload.user_id)
+            if member is None:
+                try:
+                    member=await guild.fetch_member(payload.user_id)
+                except (discord.NotFound,discord.Forbidden,discord.HTTPException):
+                    member=None
+            role=guild.get_role(rr[0])
             if member and role and not member.bot:
-                try: await member.add_roles(role,reason='Configured reaction role')
-                except (discord.Forbidden,discord.HTTPException): pass
+                try:
+                    await member.add_roles(role,reason='Configured reaction role')
+                except (discord.Forbidden,discord.HTTPException) as exc:
+                    print(f'[REACTION ROLE ADD ERROR] guild={payload.guild_id} role={rr[0]} user={payload.user_id}: {type(exc).__name__}: {exc}')
         if emoji=='⭐' and starboard:
             try:
                 channel=guild.get_channel(int(starboard[0])); source=guild.get_channel(payload.channel_id)
@@ -6642,10 +6660,19 @@ class CarlStyleExtensions(commands.Cog):
         if payload.guild_id is None: return
         with db() as c: rr=c.execute('SELECT role_id FROM cv_reaction_roles WHERE guild_id=? AND message_id=? AND emoji=?',(payload.guild_id,payload.message_id,str(payload.emoji))).fetchone()
         if not rr: return
-        guild=self.bot.get_guild(payload.guild_id); member=guild.get_member(payload.user_id) if guild else None; role=guild.get_role(rr[0]) if guild else None
+        guild=self.bot.get_guild(payload.guild_id)
+        member=guild.get_member(payload.user_id) if guild else None
+        if guild and member is None:
+            try:
+                member=await guild.fetch_member(payload.user_id)
+            except (discord.NotFound,discord.Forbidden,discord.HTTPException):
+                member=None
+        role=guild.get_role(rr[0]) if guild else None
         if member and role:
-            try: await member.remove_roles(role,reason='Configured reaction role removed')
-            except (discord.Forbidden,discord.HTTPException): pass
+            try:
+                await member.remove_roles(role,reason='Configured reaction role removed')
+            except (discord.Forbidden,discord.HTTPException) as exc:
+                print(f'[REACTION ROLE REMOVE ERROR] guild={payload.guild_id} role={rr[0]} user={payload.user_id}: {type(exc).__name__}: {exc}')
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
