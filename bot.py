@@ -596,6 +596,39 @@ async def radiant_sprite_file(d, require_archive=False):
     pokemon_name = str(d.get('name', 'pokemon')).strip().lower()
     safe_asset_name = re.sub(r'[^a-zA-Z0-9-]+', '-', pokemon_name).strip('-') or 'pokemon'
 
+    # IMPORTANT: the Radiant artwork archive contains alternate purple artwork
+    # for many species. Never search that archive for ordinary Pokémon. Only
+    # callers that explicitly identify a Radiant-owned Pokémon may set
+    # require_archive=True; all other calls use the normal PokéAPI artwork.
+    if not require_archive:
+        sprites = d.get('sprites') or {}
+        other = sprites.get('other') or {}
+        official = other.get('official-artwork') or {}
+        home = other.get('home') or {}
+        candidates = list(dict.fromkeys(
+            url for url in (
+                official.get('front_default'),
+                home.get('front_default'),
+                sprites.get('front_default')
+            ) if url
+        ))
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for url in candidates:
+                try:
+                    async with session.get(url) as response:
+                        if response.status != 200:
+                            continue
+                        image_bytes = await response.read()
+                        if not image_bytes:
+                            continue
+                        extension = '.webp' if '.webp' in url.lower() else '.png'
+                        filename = f'{safe_asset_name}{extension}'
+                        return discord.File(io.BytesIO(image_bytes), filename=filename)
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    continue
+        return None
+
     def norm(value):
         return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
 
@@ -1198,7 +1231,7 @@ class NPCBattleView(TimedView):
                 own=await pokemon_data(self.row[2])
                 battle_art_files=[]
                 try:
-                    own_art=await radiant_sprite_file(own)
+                    own_art=await radiant_sprite_file(own, require_archive=bool(self.row[-1]))
                     e.set_thumbnail(url=f'attachment://{own_art.filename}')
                     battle_art_files.append(own_art)
                 except Exception as exc:
@@ -1427,13 +1460,13 @@ class PvPBattle:
         da=await pokemon_data(self.ra[2]); dbb=await pokemon_data(self.rb[2])
         self.radiant_art_files=[]
         try:
-            left_art=await radiant_sprite_file(da)
+            left_art=await radiant_sprite_file(da, require_archive=bool(self.ra[-1]))
             e.set_thumbnail(url=f'attachment://{left_art.filename}')
             self.radiant_art_files.append(left_art)
         except Exception as exc:
             print(f'RADIANTDEX PvP challenger artwork failed: {exc!r}')
         try:
-            right_art=await radiant_sprite_file(dbb)
+            right_art=await radiant_sprite_file(dbb, require_archive=bool(self.rb[-1]))
             e.set_image(url=f'attachment://{right_art.filename}')
             self.radiant_art_files.append(right_art)
         except Exception as exc:
@@ -1826,17 +1859,17 @@ class Game(commands.Cog):
             color=discord.Color.blurple()
         )
         embed.add_field(
-            name='🪙 Supporter Package — ₹100',
+            name='🪙 Supporter Package — $1.11',
             value=f'**1,000,000 {coin} VantaCoins**',
             inline=False
         )
         embed.add_field(
-            name='💎 Supporter Plus — ₹900',
+            name='💎 Supporter Plus — $8.88',
             value=f'**10,000,000 {coin} VantaCoins**',
             inline=False
         )
         embed.add_field(
-            name='👑 Mega Supporter — ₹1,800',
+            name='👑 Mega Supporter — $17.99',
             value=f'**20,000,000 {coin} VantaCoins**',
             inline=False
         )
@@ -3388,7 +3421,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
         e.color=discord.Color.red()
         battle_art_files=[]
         try:
-            own_art=await radiant_sprite_file(own_data)
+            own_art=await radiant_sprite_file(own_data, require_archive=bool(row[-1]))
             e.set_thumbnail(url=f'attachment://{own_art.filename}')
             battle_art_files.append(own_art)
         except Exception as exc:
