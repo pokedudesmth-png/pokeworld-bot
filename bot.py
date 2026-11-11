@@ -2441,7 +2441,7 @@ class NPCBattleView(TimedView):
         em=discord.Embed(title=f'{switch_title} — Pokémon switched!',description=f'**Active:** {target[3].title()} Lv.{target[4]}\nHP {hp_bar(self.player_hp,target[9])}\nStatus: **{status_label(self.player_status)}**\n**Opponent:** {display_name(self.enemy)} Lv.{self.enemy["_level"]}\nHP {hp_bar(self.enemy_hp,self.enemy_max_hp)}\nStatus: **{status_label(self.enemy_status)}**\n🎙️ **Commentator:** {target[3].title()} enters the arena. Use the move buttons below, or Switch Pokémon to select a healthy teammate.')
         boss_art = None
         try:
-            boss_art = await radiant_sprite_file(self.enemy, require_archive=False)
+            boss_art = await battle_sprite_file(self.enemy, shiny=bool(getattr(self, 'boss_shiny', False) or self.enemy.get('_shiny') or self.enemy.get('shiny')), radiant=bool(self.enemy.get('_radiant') or self.enemy.get('radiant')))
             em.set_image(url=f'attachment://{boss_art.filename}')
         except Exception as exc:
             print(f'RADIANTDEX battle-switch artwork failed: {exc!r}')
@@ -2463,33 +2463,59 @@ class NPCBattleView(TimedView):
         if kwargs.get('view', 'keep') is self and self.message is not None:
             await self.build()
         if self.message is not None:
-            content=kwargs.get('content')
-            view=kwargs.get('view', self)
-            if content is not None and view is self:
-                battle_title = '🌟 Shiny Raid Battle' if self.raid else ('🔥 Legendary Boss Battle' if self.boss else (getattr(self,'trainer_label','Trainer Battle') if getattr(self,'trainer_mode',False) else '⚔️ Pokémon Battle Arena'))
-                e=discord.Embed(title=battle_title, description=content, color=discord.Color.dark_red() if self.boss else discord.Color.red())
-                own=await pokemon_data(self.row[2])
-                battle_art_files=[]
+            content = kwargs.get('content')
+            view = kwargs.get('view', self)
+            if content is not None:
+                lower_content = str(content).lower()
+                is_defeat = any(marker in lower_content for marker in ('**defeat!**', 'raid failed', 'boss challenge lost'))
+                is_victory = any(marker in lower_content for marker in ('victory', 'won the', 'you obtained', 'raid victory'))
+                if view is None and (is_defeat or is_victory):
+                    title = '💥 Battle Defeat' if is_defeat else '🏆 Battle Victory'
+                    color = discord.Color.red() if is_defeat else discord.Color.gold()
+                    if is_defeat:
+                        if 'raid failed' in lower_content:
+                            content = '💥 **Defeat!** The raid battle is over. Your Raid Pass was spent, and no rewards were granted.'
+                        elif 'boss challenge lost' in lower_content:
+                            content = '💥 **Defeat!** The legendary escaped. No rewards were granted. You are back to normal `!hunt` encounters; complete 10 more hunts to trigger another boss challenge.'
+                        else:
+                            content = '💥 **Defeat!** Your team was defeated. No rewards were granted. Heal your Pokémon and try again.'
+                else:
+                    title = '🌟 Shiny Raid Battle' if self.raid else ('🔥 Legendary Boss Battle' if self.boss else (getattr(self, 'trainer_label', 'Trainer Battle') if getattr(self, 'trainer_mode', False) else '⚔️ Pokémon Battle Arena'))
+                    color = discord.Color.dark_red() if self.boss else discord.Color.red()
+                e = discord.Embed(title=title, description=str(content)[:4096], color=color)
+                own = await pokemon_data(self.row[2])
+                own_art_files = []
                 try:
-                    own_art=await radiant_sprite_file(own, require_archive=False)
-                    e.set_thumbnail(url=f'attachment://{own_art.filename}')
-                    battle_art_files.append(own_art)
+                    own_art = await battle_sprite_file(
+                        own,
+                        shiny=bool(len(self.row) > 6 and self.row[6]),
+                        radiant=bool(len(self.row) > 12 and self.row[12])
+                    )
+                    if own_art:
+                        e.set_thumbnail(url=f'attachment://{own_art.filename}')
+                        own_art_files.append(own_art)
                 except Exception as exc:
-                    print(f'RADIANTDEX player battle artwork failed: {exc!r}')
+                    print(f'Battle player artwork failed: {exc!r}')
                 try:
-                    enemy_art=await radiant_sprite_file(self.enemy, require_archive=False)
-                    e.set_image(url=f'attachment://{enemy_art.filename}')
-                    battle_art_files.append(enemy_art)
+                    enemy_art = await battle_sprite_file(
+                        self.enemy,
+                        shiny=bool(getattr(self, 'boss_shiny', False) or self.enemy.get('_shiny') or self.enemy.get('shiny')),
+                        radiant=bool(self.enemy.get('_radiant') or self.enemy.get('radiant'))
+                    )
+                    if enemy_art:
+                        e.set_image(url=f'attachment://{enemy_art.filename}')
+                        own_art_files.append(enemy_art)
                 except Exception as exc:
-                    print(f'RADIANTDEX opponent battle artwork failed: {exc!r}')
-                await self.message.edit(content=None, embed=e, attachments=battle_art_files, view=self)
-            elif content is not None:
-                await self.message.edit(content=content, embed=None, view=None)
+                    print(f'Battle opponent artwork failed: {exc!r}')
+                await self.message.edit(content=None, embed=e, attachments=own_art_files, view=view)
+            elif view is None:
+                await self.message.edit(content=None, view=None)
             else:
                 await self.message.edit(**kwargs)
         if kwargs.get('view', 'keep') is None:
             ACTIVE_VIEWS.pop(self.uid, None)
-            if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
+            if self.boss and self.active_boss_battles is not None:
+                self.active_boss_battles.discard(self.uid)
 
     async def _advance_rpg_opponent(self, inter, msg):
         if not getattr(self, 'trainer_mode', False):
@@ -2765,13 +2791,13 @@ class PvPBattle:
         da=await pokemon_data(self.ra[2]); dbb=await pokemon_data(self.rb[2])
         self.radiant_art_files=[]
         try:
-            left_art=await radiant_sprite_file(da, require_archive=False)
+            left_art=await battle_sprite_file(da, shiny=bool(len(self.ra)>6 and self.ra[6]), radiant=bool(len(self.ra)>12 and self.ra[12]))
             e.set_thumbnail(url=f'attachment://{left_art.filename}')
             self.radiant_art_files.append(left_art)
         except Exception as exc:
             print(f'RADIANTDEX PvP challenger artwork failed: {exc!r}')
         try:
-            right_art=await radiant_sprite_file(dbb, require_archive=False)
+            right_art=await battle_sprite_file(dbb, shiny=bool(len(self.rb)>6 and self.rb[6]), radiant=bool(len(self.rb)>12 and self.rb[12]))
             e.set_image(url=f'attachment://{right_art.filename}')
             self.radiant_art_files.append(right_art)
         except Exception as exc:
@@ -2875,12 +2901,42 @@ class PvPBattle:
         elif self.hp[self.b]<=0:winner=self.a
         self.last_text='\n'.join(log)
         if winner:
-            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_battle_reward(winner,xp=100); prize_text=(f'🎁 Random battle drop: **{loot}**' if loot else '🎁 Daily random battle-drop limit reached (5/5).');self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight!\n{prize_text} • ⭐ +100 XP'
+            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_battle_reward(winner,xp=100); prize_text=(f'🎁 Random battle drop: **{loot}**' if loot else '🎁 Daily random battle-drop limit reached (5/5).');self.last_text+='\n\n'+f'🏆 **Victory!** <@{winner}> won the fight!\n💥 **Defeat!** <@{loser}> lost the battle.\n{prize_text} • ⭐ +100 XP'
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.a],self.status[self.a],self.ra[0]));c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.b],self.status[self.b],self.rb[0]))
             await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=None)
         else:
             await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=self.view())
+
+
+async def battle_sprite_file(d, shiny=False, radiant=False):
+    """Return the correct battle artwork for normal, Shiny, or Radiant Pokémon."""
+    if radiant:
+        try:
+            return await radiant_sprite_file(d, require_archive=True)
+        except (FileNotFoundError, OSError, zipfile.BadZipFile) as exc:
+            print(f'RADIANTDEX battle artwork unavailable for {d.get("name")}: {exc!r}')
+    url = sprite(d, shiny=bool(shiny))
+    if not url and not shiny:
+        url = sprite(d, shiny=False)
+    if not url:
+        return None
+    safe_name = re.sub(r'[^a-zA-Z0-9-]+', '-', str(d.get('name', 'pokemon'))).strip('-') or 'pokemon'
+    timeout = aiohttp.ClientTimeout(total=20)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    return None
+                data = await response.read()
+                if not data:
+                    return None
+                extension = '.webp' if '.webp' in url.lower() else '.png'
+                prefix = 'shiny-' if shiny else ''
+                return discord.File(io.BytesIO(data), filename=f'{prefix}{safe_name}{extension}')
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        print(f'Battle sprite download failed for {d.get("name")}: {exc!r}')
+        return None
 
 stats_cache={}
 
@@ -3945,7 +4001,8 @@ class Game(commands.Cog):
         boss_level=min(300, max(r[4] for r in party)+random.randint(18,25))
         with db() as c:c.execute('UPDATE boss_encounters SET level=? WHERE user_id=?',(boss_level,uid))
         try:
-            d=await pokemon_data(boss[0]);d['_level']=boss_level
+            d=await pokemon_data(boss[0])
+            d['_shiny']=bool(boss[3]);d['_level']=boss_level
         except Exception as exc:
             print(f'[LEGENDARY START] Boss data lookup failed for user={uid}: {exc!r}')
             return await ctx.send('⚠️ I could not load the Legendary boss right now. Your encounter and selected team are safe; try `!lbattle` again shortly.')
@@ -5159,13 +5216,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             e.color=discord.Color.red()
             battle_art_files=[]
             try:
-                own_art=await radiant_sprite_file(own_data, require_archive=False)
+                own_art=await battle_sprite_file(own_data, shiny=bool(len(row)>6 and row[6]), radiant=bool(len(row)>12 and row[12]))
                 e.set_thumbnail(url=f'attachment://{own_art.filename}')
                 battle_art_files.append(own_art)
             except Exception as exc:
                 print(f'RADIANTDEX NPC player artwork failed: {exc!r}')
             try:
-                enemy_art=await radiant_sprite_file(enemy, require_archive=False)
+                enemy_art=await battle_sprite_file(enemy, shiny=bool(enemy.get('_shiny') or enemy.get('shiny')), radiant=bool(enemy.get('_radiant') or enemy.get('radiant')))
                 e.set_image(url=f'attachment://{enemy_art.filename}')
                 battle_art_files.append(enemy_art)
             except Exception as exc:
@@ -5782,7 +5839,7 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 return await ctx.send('⚠️ I could not prepare your raid battle. Your Raid Pass and selected team are still saved—try again shortly.')
             em=discord.Embed(title='🌟 SHINY RAID BOSS — 6 vs 1',description=f'**Boss:** ✨ {display_name(d)} Lv. **{level}**\nHP {hp_bar(max_hp(d,level)*4,max_hp(d,level)*4)}\n\n**Your raid squad:**\n'+'\n'.join(f'• `{r[0]}` **{r[3].title()}** Lv.{r[4]} — {hp_bar(r[8],r[9])}' for r in party)+'\n\nUse the move buttons below; if your active Pokémon faints, use Switch Pokémon to choose a healthy teammate. Raid battles have their own 60-second start cooldown. Win to receive 50 Rare Candies and the shiny boss at 75 levels below its raid level.')
             em.color=discord.Color.gold()
-            try: raid_art=await radiant_sprite_file(d)
+            try: raid_art=await battle_sprite_file(d, shiny=True)
             except Exception as exc:
                 print(f'RADIANTDEX raid boss artwork failed: {exc!r}')
                 raid_art=None
@@ -10608,10 +10665,10 @@ class MMORPG(commands.Cog):
                 'Choose a move using the buttons. Switch Pokémon when your active Pokémon needs help.'),color=discord.Color.red())
             art=[]
             try:
-                own_art=await radiant_sprite_file(own_data,require_archive=False);e.set_thumbnail(url=f'attachment://{own_art.filename}');art.append(own_art)
+                own_art=await battle_sprite_file(own_data,shiny=bool(len(party[0])>6 and party[0][6]),radiant=bool(len(party[0])>12 and party[0][12]));e.set_thumbnail(url=f'attachment://{own_art.filename}');art.append(own_art)
             except Exception as exc: print(f'[RPG PLAYER ART] {exc!r}')
             try:
-                enemy_art=await radiant_sprite_file(enemies[0],require_archive=False);e.set_image(url=f'attachment://{enemy_art.filename}');art.append(enemy_art)
+                enemy_art=await battle_sprite_file(enemies[0],shiny=bool(enemies[0].get('_shiny') or enemies[0].get('shiny')),radiant=bool(enemies[0].get('_radiant') or enemies[0].get('radiant')));e.set_image(url=f'attachment://{enemy_art.filename}');art.append(enemy_art)
             except Exception as exc: print(f'[RPG ENEMY ART] {exc!r}')
             view.message=status
             await status.edit(content=None,embed=e,view=view,attachments=art)
