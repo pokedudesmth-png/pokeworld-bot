@@ -10746,9 +10746,9 @@ class MMORPG(commands.Cog):
                 c.execute('INSERT OR IGNORE INTO pv_rpg_rival_wins(user_id,region,won_at) VALUES(?,?,?)',(ctx.author.id,region,int(time.time())))
                 order=list(self.REGIONS)
                 if region in order and order.index(region)+1<len(order):c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(ctx.author.id,order[order.index(region)+1],int(time.time())))
-            add_progress(ctx.author.id,coins=10000,xp=0)
+            add_progress(ctx.author.id,coins=200000,xp=0)
             lvl,_=self._grant_trainer_xp(ctx.author.id,250)
-            await inter.followup.send(f'🌟 Rival defeated! +10,000 VantaCoins · +250 Trainer XP. Trainer Level {lvl}.',ephemeral=False)
+            await inter.followup.send(f'🌟 Rival defeated! +200,000 VantaCoins · +250 Trainer XP. Trainer Level {lvl}.',ephemeral=False)
         return await self._start_rpg_battle(ctx,self.RIVAL_TEAMS[region],level,f'{region.title()} Rival',won)
 
     def _species_id(self, species):
