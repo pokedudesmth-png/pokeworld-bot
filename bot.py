@@ -392,9 +392,9 @@ def setup():
             END''')
         iv_columns=('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed')
         iv_schema_missing=any(col not in pcols for col in iv_columns)
-        for iv_col in iv_columns:
-            if iv_col not in pcols:
-                c.execute(f'ALTER TABLE pokemon ADD COLUMN {iv_col} INTEGER NOT NULL DEFAULT -1')
+        # The IV columns are added earlier in the migration; re-read the table info
+        # so this guard can never try to add a column that already exists.
+        pcols=[r[1] for r in c.execute('PRAGMA table_info(pokemon)').fetchall()]
         # Existing Pokémon receive one permanent IV roll; apply their HP IV to current max HP once.
         c.execute('''UPDATE pokemon SET
             iv_hp=CASE WHEN iv_hp<0 THEN abs(random())%32 ELSE iv_hp END,
@@ -637,12 +637,9 @@ def grant_game_reward(uid, xp=0, guaranteed_items=None, rolls=1):
     return ' + '.join(granted) if granted else 'XP'
 
 def grant_battle_reward(uid, xp=0):
-    """Award at most five battle prizes per user per Asia/Kolkata day.
-
-    Prize items are potions or regular TMs only. A TM drop is 90% Fast TM and
-    10% Charged TM; other drops are potion variants. Battles still resolve when
-    the daily prize limit has been reached, but give no prize or battle XP.
-    """
+    """Grant battle XP on every victory and one random item on the first five wins per IST day."""
+    # XP is never silently withheld: only the random item drop has a daily cap.
+    add_progress(uid, xp=int(xp))
     day_key = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
     with db() as c:
         c.execute('CREATE TABLE IF NOT EXISTS pv_battle_daily_prizes(user_id INTEGER NOT NULL, day_key TEXT NOT NULL, prizes INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,day_key))')
@@ -652,7 +649,6 @@ def grant_battle_reward(uid, xp=0):
         if used >= 5:
             return None
         c.execute('INSERT INTO pv_battle_daily_prizes(user_id,day_key,prizes) VALUES(?,?,1) ON CONFLICT(user_id,day_key) DO UPDATE SET prizes=prizes+1', (uid, day_key))
-    add_progress(uid, xp=int(xp))
     if random.random() < 0.20:
         item = 'fast-tm' if random.random() < 0.90 else 'charged-tm'
     else:
@@ -999,12 +995,27 @@ async def saved_battle_moves(row):
     return [fast,charged]
 
 def pokemon_ivs(row):
-    if row is None or len(row) < 21:
+    """Read IVs by column name, never by fragile SELECT * offsets."""
+    if row is None:
         return {}
     names=('hp','attack','defense','special-attack','special-defense','speed')
-    cols=('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed')
-    # The IV columns are appended to the pokemon table after its original 12 columns.
-    return {name:max(0,min(31,int(row[15+i] or 0))) for i,name in enumerate(names)}
+    try:
+        with db() as c:
+            values=c.execute(
+                'SELECT iv_hp,iv_attack,iv_defense,iv_sp_attack,iv_sp_defense,iv_speed FROM pokemon WHERE instance_id=?',
+                (int(row[0]),)
+            ).fetchone()
+    except (IndexError, TypeError, ValueError, sqlite3.Error):
+        values=None
+    if not values:
+        return {}
+    result={}
+    for name,value in zip(names,values):
+        try:
+            result[name]=max(0,min(31,int(value if value is not None else 0)))
+        except (TypeError,ValueError):
+            result[name]=0
+    return result
 
 def radiant_stat_profile(species):
     """Return the fixed six-stat Radiant profile for every National Dex species.
@@ -2515,6 +2526,8 @@ class NPCBattleView(TimedView):
                 pv_record_activity(self.uid,'win',1,getattr(inter.guild,'id',None))
                 pv_candy_quest_progress(self.uid, 'win')
             if self.raid:
+                # Raid instructions promise 50 Rare Candies; grant them on every raid win.
+                change_item(self.uid, 'rare-candy', 50)
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
                     cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
@@ -2525,8 +2538,8 @@ class NPCBattleView(TimedView):
                 if inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 rare_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.' if rare_saved else '⚠️ Unclaimed Storage was full (10/10), so the shiny boss vanished.'
-                prize_text=(f'🎁 Battle prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); no item prize this time.')
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n{prize_text}',view=None)
+                prize_text=(f'🎁 Random battle drop: **{loot}**' if loot else '🎁 Daily random battle-drop limit reached (5/5).')
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n🍬 **+50 Rare Candies**\n{prize_text} • ⭐ +{x} XP',view=None)
             if self.boss:
                 with db() as storage_conn:
                     owned_count, storage_capacity = pokemon_storage_status(storage_conn, self.uid)
@@ -2559,10 +2572,10 @@ class NPCBattleView(TimedView):
                     boss_storage_note='⚠️ Unclaimed Storage was full (10/10), so the Shiny/Radiant reward vanished.'
                 else:
                     boss_storage_note=f'Box ID `{box_id}`.'
-                prize_text=(f'🎁 Battle prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); no item prize this time.')
-                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]}!\n{boss_storage_note}\n{prize_text}{jackpot_text}',view=None)
+                prize_text=(f'🎁 Random battle drop: **{loot}**' if loot else '🎁 Daily random battle-drop limit reached (5/5).')
+                return await self.update_battle(inter, content=f'🏆 <@{self.uid}> won the legendary fight!\n{msg}\n\n🎉 You obtained {"✨ SHINY " if self.boss_shiny else ""}**{display_name(self.enemy)}** Lv. {self.enemy["_level"]}!\n{boss_storage_note}\n{prize_text} • ⭐ +{x} XP{jackpot_text}',view=None)
             prize_text=(f'🎁 Prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); battle completed with no prize.')
-            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n{prize_text}',view=None)
+            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n{prize_text} • ⭐ +{x} XP',view=None)
         self.enemy_hp, tickmsg=status_tick(self.enemy_status,self.enemy_hp,self.enemy_max_hp)
         if tickmsg: msg+='\n'+tickmsg
         if self.enemy_hp<=0:
@@ -2575,6 +2588,8 @@ class NPCBattleView(TimedView):
                 pv_record_activity(self.uid,'win',1,getattr(inter.guild,'id',None))
                 pv_candy_quest_progress(self.uid, 'win')
             if self.raid:
+                # Raid instructions promise 50 Rare Candies; grant them on every raid win.
+                change_item(self.uid, 'rare-candy', 50)
                 boss_level=int(self.enemy['_level']); caught_level=max(1,min(300,boss_level-75)); mh=max_hp(self.enemy,caught_level)
                 with db() as c:
                     cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp) VALUES(?,?,?,?,?,?,?)',(self.uid,self.enemy['id'],self.enemy['name'],caught_level,1,mh,mh)); iid=cur.lastrowid
@@ -2585,11 +2600,11 @@ class NPCBattleView(TimedView):
                 if inter.guild:
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=caught_level, image_url=sprite(self.enemy, shiny=True))
                 rare_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.' if rare_saved else '⚠️ Unclaimed Storage was full (10/10), so the shiny boss vanished.'
-                prize_text=(f'🎁 Battle prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); no item prize this time.')
-                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n{prize_text}',view=None)
+                prize_text=(f'🎁 Random battle drop: **{loot}**' if loot else '🎁 Daily random battle-drop limit reached (5/5).')
+                return await self.update_battle(inter,content=f'🏆 **RAID VICTORY!**\n{msg}\n\n✨ Shiny **{display_name(self.enemy)}** Lv.{caught_level} defeated!\n{rare_note}\n🍬 **+50 Rare Candies**\n{prize_text} • ⭐ +{x} XP',view=None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
             prize_text=(f'🎁 Prize: **{loot}** • ⭐ +{x} XP' if loot else '🎁 Daily battle prize limit reached (5/5); battle completed with no prize.')
-            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n{prize_text}',view=None)
+            return await self.update_battle(inter, content=f'🏆 **Victory!**\n{msg}\n\nYour Pokémon: {hp_bar(self.player_hp,self.row[9])}\nOpponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}\n\n{prize_text} • ⭐ +{x} XP',view=None)
         em=random.choice(await move_pool(self.enemy['name'],True)); em['power']=max(10,int((em.get('power') or 40)*(0.95 if self.raid else 0.55))); dmg,eff,crit=calc_damage(self.enemy,p,em,self.enemy['_level'],defender_ivs=pokemon_ivs(self.row),defender_level=self.row[4],defender_radiant=bool(len(self.row)>12 and self.row[12]));dmg=int(dmg*held_damage_multiplier(enemyheld,em,eff))
         if self.raid: dmg=max(1,int(dmg*1.35))  # Raid boss strikes are substantially stronger.
         dmg=max(1,int(dmg*held_incoming_multiplier(held,em)))
@@ -2796,7 +2811,7 @@ class PvPBattle:
         elif self.hp[self.b]<=0:winner=self.a
         self.last_text='\n'.join(log)
         if winner:
-            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_battle_reward(winner,xp=100); prize_text=(f'🎁 Prize: **{loot}** • ⭐ +100 XP' if loot else '🎁 Daily battle prize limit reached (5/5); no prize this time.');self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight!\n{prize_text}'
+            self.over=True;ACTIVE_VIEWS.pop(self.a,None);ACTIVE_VIEWS.pop(self.b,None);loser=self.b if winner==self.a else self.a;loot=grant_battle_reward(winner,xp=100); prize_text=(f'🎁 Random battle drop: **{loot}**' if loot else '🎁 Daily random battle-drop limit reached (5/5).');self.last_text+='\n\n'+f'🏆 <@{winner}> won the fight!\n{prize_text} • ⭐ +100 XP'
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.a],self.status[self.a],self.ra[0]));c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.hp[self.b],self.status[self.b],self.rb[0]))
             await self.message.edit(embed=await self.make_embed(),attachments=getattr(self,'radiant_art_files',[]),view=None)
@@ -3302,16 +3317,17 @@ class Game(commands.Cog):
         is_raid_battle = (name == 'raid' and action in {'battle', 'fight'}) or message_content in {'!raid battle', '!raid fight', '/raid battle', '/raid fight'}
 
         with db() as c:
-            raid_active = bool(c.execute('SELECT 1 FROM raid_encounters WHERE user_id=?', (uid,)).fetchone())
+            raid_encounter_exists = bool(c.execute('SELECT 1 FROM raid_encounters WHERE user_id=?', (uid,)).fetchone())
             legendary_active = bool(c.execute('SELECT 1 FROM boss_encounters WHERE user_id=?', (uid,)).fetchone())
             hunt_active = bool(c.execute('SELECT 1 FROM encounters WHERE user_id=?', (uid,)).fetchone())
 
-        # Live views also count as active even if an encounter row was cleared early.
+        # A spawned raid encounter is waiting to be battled; only its live battle
+        # view means the raid battle itself has already started.
         view = ACTIVE_VIEWS.get(uid)
         raid_battle_active = isinstance(view, NPCBattleView) and bool(getattr(view, 'raid', False))
         legendary_battle_active = (uid in self.active_boss_battles and isinstance(view, NPCBattleView) and bool(getattr(view, 'boss', False)) and not bool(getattr(view, 'raid', False)))
         hunt_active = hunt_active or (isinstance(view, NPCBattleView) and not getattr(view, 'boss', False) and not getattr(view, 'raid', False))
-        raid_active = raid_active or raid_battle_active
+        raid_active = raid_encounter_exists or raid_battle_active
         legendary_active = legendary_active or legendary_battle_active
 
         if is_hunt and (legendary_active or raid_active):
@@ -3334,7 +3350,7 @@ class Game(commands.Cog):
         if is_legendary and legendary_active:
             await ctx.send('⚠️ You already have an active legendary battle. Finish it or use `!cancel` first.')
             return False
-        if is_raid_battle and raid_active:
+        if is_raid_battle and raid_battle_active:
             await ctx.send('⚠️ You already have an active raid battle. Finish it or use `!cancel` first.')
             return False
         return True
@@ -3962,11 +3978,8 @@ class Game(commands.Cog):
         fossil_species = {'omanyte','omastar','kabuto','kabutops','aerodactyl','lileep','cradily','anorith','armaldo','cranidos','rampardos','shieldon','bastiodon','tirtouga','carracosta','archen','archeops','tyrunt','tyrantrum','amaura','aurorus'}
         if str(d.get('name','')).strip().lower().replace(' ','-') in fossil_species:
             pv_record_activity(uid,'fossil_catch',1,getattr(ctx.guild,'id',None))
-        # Catching a Pokémon gives a clear, predictable reward: 50 coins + 25 XP.
-        # Server booster coin perks are granted through !daily; catch rewards remain balanced for everyone.
-        # Do not roll random inventory loot for ordinary or server-wide catches.
-        booster_active = is_server_booster(ctx.author) if ctx.guild else False
-        catch_coin_reward = 50
+        # Every successful catch pays 100 VantaCoins and 25 XP. No random item drops.
+        catch_coin_reward = 100
         add_progress(uid,coins=catch_coin_reward,xp=25)
         if is_global:
             change_item(uid,'rare-candy',5)
@@ -3995,7 +4008,7 @@ class Game(commands.Cog):
             storage_note='\n⚠️ Your Unclaimed Storage is full (10/10), so this rare Pokémon vanished.'
         else:
             storage_note=f' ID: `{box_id}`'
-        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note}{storage_note}' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + '\n💰 Reward: **+'+str(catch_coin_reward)+' coins**' + ' • ⭐ **+25 XP**.'
+        response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note}{storage_note}' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + '\n💰 Reward: **+'+str(catch_coin_reward)+' coins**' + ' • ⭐ **+25 XP**'
         if is_global:
             response += '\n🎁 Server-wide reward: **5 Rare Candies + 1 Elite Charged TM**.'
         if not is_global:
@@ -5550,17 +5563,26 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if all(r[8]<=0 for r in party):return await ctx.send('💤 All six Pokémon have fainted. Heal them before raiding.')
             remaining = pv_battle_cooldown_remaining(uid, 'raid')
             if remaining: return await ctx.send(f'⏳ Raid cooldown: wait **{remaining}s** before starting another raid battle.')
-            pv_start_battle_cooldown(uid, 'raid')
+            existing_view=ACTIVE_VIEWS.get(uid)
+            if isinstance(existing_view,NPCBattleView) and getattr(existing_view,'raid',False):
+                return await ctx.send('⚠️ Your raid battle is already running. Use its move buttons to continue.')
             level=max(r[4] for r in party)+100
+            try:
+                d=await pokemon_data(boss[0])
+                d['_level']=level
+            except Exception as exc:
+                print(f'[RAID START] Pokémon data lookup failed for user={uid}: {exc!r}')
+                return await ctx.send('⚠️ I could not load the raid boss right now. Your Raid Pass and team are safe—try `!raid battle` again shortly.')
             with db() as c:c.execute('UPDATE raid_encounters SET level=? WHERE user_id=?',(level,uid))
-            d=await pokemon_data(boss[0]); d['_level']=level
             lead=next((r for r in party if r[8]>0),party[0])
             view=NPCBattleView(uid,lead,d,boss=False,boss_shiny=True,active_boss_battles=self.active_boss_battles,raid=True)
             if self.active_boss_battles is not None:self.active_boss_battles.add(uid)
-            try: await view.build()
-            except Exception:
+            try:
+                await view.build()
+            except Exception as exc:
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(uid)
-                raise
+                print(f'[RAID START] Battle controls failed for user={uid}: {exc!r}')
+                return await ctx.send('⚠️ I could not prepare your raid battle. Your Raid Pass and selected team are still saved—try again shortly.')
             em=discord.Embed(title='🌟 SHINY RAID BOSS — 6 vs 1',description=f'**Boss:** ✨ {display_name(d)} Lv. **{level}**\nHP {hp_bar(max_hp(d,level)*4,max_hp(d,level)*4)}\n\n**Your raid squad:**\n'+'\n'.join(f'• `{r[0]}` **{r[3].title()}** Lv.{r[4]} — {hp_bar(r[8],r[9])}' for r in party)+'\n\nUse the move buttons below; if your active Pokémon faints, use Switch Pokémon to choose a healthy teammate. Raid battles have their own 60-second start cooldown. Win to receive 50 Rare Candies and the shiny boss at 75 levels below its raid level.')
             em.color=discord.Color.gold()
             try: raid_art=await radiant_sprite_file(d)
@@ -5571,11 +5593,20 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             else:
                 art=sprite(d,shiny=True)
                 if art:em.set_image(url=art)
-            view.message=await ctx.send(embed=em,view=view,file=raid_art) if raid_art else await ctx.send(embed=em,view=view)
+            try:
+                view.message=await ctx.send(embed=em,view=view,file=raid_art) if raid_art else await ctx.send(embed=em,view=view)
+            except Exception as exc:
+                if self.active_boss_battles is not None:self.active_boss_battles.discard(uid)
+                print(f'[RAID START] Could not send battle message for user={uid}: {exc!r}')
+                return await ctx.send('⚠️ Discord could not post the raid battle controls. Your raid is still active; run `!raid battle` again.')
             ACTIVE_VIEWS[uid]=view
+            pv_start_battle_cooldown(uid, 'raid')
             return
         if action=='spawn':
             with db() as c:
+                # Serialize simultaneous spawn attempts so a single Raid Pass
+                # cannot create multiple overlapping raids.
+                c.execute('BEGIN IMMEDIATE')
                 wild=c.execute('SELECT 1 FROM encounters WHERE user_id=?',(uid,)).fetchone()
                 legendary=c.execute('SELECT 1 FROM boss_encounters WHERE user_id=?',(uid,)).fetchone()
                 if wild:return await ctx.send('⚠️ Resolve your active hunt with `!catch` or `!cancel` before spawning a raid.')
@@ -5592,8 +5623,17 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             if not pool:
                 with db() as c:c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 1) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+1",(uid,))
                 return await ctx.send('❌ Special Pokémon data is not loaded yet; your Raid Pass was refunded.')
-            chosen=random.choice(pool); data=await pokemon_data(chosen['name'])
-            with db() as c:c.execute('INSERT OR REPLACE INTO raid_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,1)',(uid,data['id'],data['name'],0))
+            chosen=random.choice(pool)
+            try:
+                data=await pokemon_data(chosen['name'])
+                with db() as c:
+                    c.execute('INSERT OR REPLACE INTO raid_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,1)',(uid,data['id'],data['name'],0))
+                    c.execute('DELETE FROM raid_party WHERE user_id=?',(uid,))
+            except Exception as exc:
+                print(f'[RAID SPAWN] Failed for user={uid}: {exc!r}')
+                with db() as c:
+                    c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 1) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+1",(uid,))
+                return await ctx.send('⚠️ The raid could not spawn because Pokémon data failed to load. Your Raid Pass has been refunded; try again.')
             return await ctx.send(f'🌟 **Raid spawned!** A shiny special Pokémon — **{display_name(data)}** — is waiting!\n{item_display("raid-pass", "1 Raid Pass")} used. Use `!add <ID1> <ID2> <ID3> <ID4> <ID5> <ID6>`, then `!raid battle`.')
         with db() as c:
             passes=c.execute("SELECT amount FROM inventory WHERE user_id=? AND item='raid-pass'",(uid,)).fetchone()
@@ -9920,7 +9960,7 @@ class ExploreMiniGameView(discord.ui.View):
                 correct = self.game['options'][self.game['answer']]
                 result = (
                     f'Not quite! The answer was **{correct}**.\n'
-                    'The wandering researcher gives you **{loot}** and **5 XP** for trying.'
+                    f'The wandering researcher gives you **{loot}** and **5 XP** for trying.'
                 )
                 title = '📚 The Researcher Reveals the Answer'
                 color = discord.Color.blurple()
@@ -9937,7 +9977,7 @@ class ExploreMiniGameView(discord.ui.View):
                 color = discord.Color.gold()
             else:
                 loot = grant_game_reward(uid, xp=5, rolls=1)
-                result = 'The chest is empty, but you recover **{loot}** and gain **5 XP** tucked beneath it.'
+                result = f'The chest is empty, but you recover **{loot}** and gain **5 XP** tucked beneath it.'
                 title = '📦 An Empty Chest'
                 color = discord.Color.blurple()
 
