@@ -617,9 +617,10 @@ def add_progress(uid,coins=0,xp=0):
     return level
 
 GAMEPLAY_REWARD_ITEMS = (
+    # Regular gameplay drops only. Elite Charged TMs are reserved for explicit
+    # guaranteed/event/shop rewards and are never selected by random reward rolls.
     ('rare-candy', 4), ('potion', 4), ('super-potion', 3),
     ('raid-pass', 2), ('fast-tm', 2), ('charged-tm', 2),
-    ('elite-charged-tm', 1),
 )
 
 def grant_game_reward(uid, xp=0, guaranteed_items=None, rolls=1):
@@ -2346,7 +2347,7 @@ async def log_rare_shiny_event(guild, user, pokemon_name, action="caught", level
 
 class NPCBattleView(TimedView):
     def __init__(self,uid,row,enemy,boss=False,boss_shiny=False,active_boss_battles=None,raid=False):
-        super().__init__(timeout=None, timeout_text=''); self.raid=raid; self.uid=uid; self.row=row; self.enemy=enemy; self.player_hp=row[8]; self.enemy_base_hp=max_hp(enemy,enemy['_level']); self.enemy_max_hp=self.enemy_base_hp*(4 if raid else 1); self.enemy_hp=self.enemy_max_hp; self.player_status=(row[11] or '') if len(row)>11 else ''; self.enemy_status=''; self.moves=[]; self.choice_lock=''; self.busy=False; self.boss=boss; self.boss_shiny=boss_shiny; self.party=[]; self.energy_by_pokemon={row[0]:0}; self.focus_sash_used=set(); self.active_boss_battles=active_boss_battles
+        super().__init__(timeout=None, timeout_text=''); self.raid=raid; self.uid=uid; self.row=row; self.enemy=enemy; self.player_hp=row[8]; self.enemy_base_hp=max_hp(enemy,enemy['_level']); self.enemy_max_hp=self.enemy_base_hp*(4 if raid else 1); self.enemy_hp=self.enemy_max_hp; self.player_status=(row[11] or '') if len(row)>11 else ''; self.enemy_status=''; self.moves=[]; self.choice_lock=''; self.busy=False; self.boss=boss; self.boss_shiny=boss_shiny; self.party=[]; self.energy_by_pokemon={row[0]:0}; self.focus_sash_used=set(); self.active_boss_battles=active_boss_battles; self.trainer_mode=False; self.trainer_team=[]; self.trainer_index=0
     async def on_timeout(self):
         if self.boss and self.active_boss_battles is not None:
             self.active_boss_battles.discard(self.uid)
@@ -2356,7 +2357,12 @@ class NPCBattleView(TimedView):
         self.clear_items()
         self.moves=await saved_battle_moves(self.row)
         self.energy=getattr(self,'energy',0)
-        if self.boss or self.raid:
+        if getattr(self,'trainer_mode',False):
+            with db() as c:
+                rows=c.execute('SELECT DISTINCT p.* FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? AND p.hp>0 ORDER BY t.slot',(self.uid,)).fetchall()
+            self.party=list(rows)
+            for party_row in self.party: self.energy_by_pokemon.setdefault(party_row[0],0)
+        elif self.boss or self.raid:
             party_table='raid_party' if self.raid else 'boss_party'
             with db() as c: rows=c.execute(f'SELECT p.* FROM {party_table} bp JOIN pokemon p ON p.instance_id=bp.instance_id WHERE bp.user_id=? ORDER BY bp.slot',(self.uid,)).fetchall()
             self.party=list(rows)
@@ -2385,7 +2391,7 @@ class NPCBattleView(TimedView):
                         else: print(f'Battle turn failed: {e!r}')
                     finally:self.busy=False
                 button.callback=pick; self.add_item(button)
-        if self.boss or self.raid:
+        if self.boss or self.raid or getattr(self,'trainer_mode',False):
             healthy=[r for r in self.party if r[0]!=self.row[0] and r[8]>0]
             if healthy:
                 switch=discord.ui.Button(label='Switch Pokémon',style=discord.ButtonStyle.secondary,row=2 if self.player_hp>0 else 0,emoji='🔄')
@@ -2411,7 +2417,8 @@ class NPCBattleView(TimedView):
         self.energy=self.energy_by_pokemon.get(target[0],0); self.moves=await saved_battle_moves(target)
         for item in list(self.children): self.remove_item(item)
         await self.build()
-        em=discord.Embed(title=('🌟 Raid Battle — Pokémon switched!' if self.raid else '🔥 Legendary 3v1 — Pokémon switched!'),description=f'**Active:** {target[3].title()} Lv.{target[4]}\nHP {hp_bar(self.player_hp,target[9])}\nStatus: **{status_label(self.player_status)}**\n**Boss:** {display_name(self.enemy)} Lv.{self.enemy["_level"]}\nHP {hp_bar(self.enemy_hp,self.enemy_max_hp)}\nStatus: **{status_label(self.enemy_status)}**\n🎙️ **Commentator:** {target[3].title()} enters the arena. Use the move buttons below, or Switch Pokémon to select a healthy teammate.')
+        switch_title = '🌟 Raid Battle' if self.raid else ('🔥 Legendary Battle' if self.boss else (getattr(self,'trainer_label','Trainer Battle') if getattr(self,'trainer_mode',False) else 'Battle'))
+        em=discord.Embed(title=f'{switch_title} — Pokémon switched!',description=f'**Active:** {target[3].title()} Lv.{target[4]}\nHP {hp_bar(self.player_hp,target[9])}\nStatus: **{status_label(self.player_status)}**\n**Opponent:** {display_name(self.enemy)} Lv.{self.enemy["_level"]}\nHP {hp_bar(self.enemy_hp,self.enemy_max_hp)}\nStatus: **{status_label(self.enemy_status)}**\n🎙️ **Commentator:** {target[3].title()} enters the arena. Use the move buttons below, or Switch Pokémon to select a healthy teammate.')
         boss_art = None
         try:
             boss_art = await radiant_sprite_file(self.enemy, require_archive=False)
@@ -2439,7 +2446,8 @@ class NPCBattleView(TimedView):
             content=kwargs.get('content')
             view=kwargs.get('view', self)
             if content is not None and view is self:
-                e=discord.Embed(title=('🌟 Shiny Raid Battle' if self.raid else ('🔥 Legendary Boss Battle' if self.boss else '⚔️ Pokémon Battle Arena')), description=content, color=discord.Color.dark_red() if self.boss else discord.Color.red())
+                battle_title = '🌟 Shiny Raid Battle' if self.raid else ('🔥 Legendary Boss Battle' if self.boss else (getattr(self,'trainer_label','Trainer Battle') if getattr(self,'trainer_mode',False) else '⚔️ Pokémon Battle Arena'))
+                e=discord.Embed(title=battle_title, description=content, color=discord.Color.dark_red() if self.boss else discord.Color.red())
                 own=await pokemon_data(self.row[2])
                 battle_art_files=[]
                 try:
@@ -2462,6 +2470,36 @@ class NPCBattleView(TimedView):
         if kwargs.get('view', 'keep') is None:
             ACTIVE_VIEWS.pop(self.uid, None)
             if self.boss and self.active_boss_battles is not None:self.active_boss_battles.discard(self.uid)
+
+    async def _advance_rpg_opponent(self, inter, msg):
+        if not getattr(self, 'trainer_mode', False):
+            return False
+        team = getattr(self, 'trainer_team', [])
+        next_index = getattr(self, 'trainer_index', 0) + 1
+        if self.player_hp <= 0 and not any(r[0] != self.row[0] and r[8] > 0 for r in self.party):
+            await self.update_battle(inter, content='💥 **Defeat!** Your active Pokémon fainted before the opposing team was cleared, and no healthy teammate remains. Heal your team and try again.', view=None)
+            return True
+        if next_index < len(team):
+            self.trainer_index = next_index
+            self.enemy = team[next_index]
+            self.enemy_base_hp = max_hp(self.enemy, self.enemy['_level'])
+            self.enemy_max_hp = self.enemy_base_hp
+            self.enemy_hp = self.enemy_max_hp
+            self.enemy_status = ''
+            self.moves = await saved_battle_moves(self.row)
+            await self.update_battle(inter, content=(f'🏅 **{getattr(self, "trainer_label", "Trainer")}** sent out '
+                f'**{display_name(self.enemy)}** Lv.{self.enemy["_level"]}!\n{msg}\n\n'
+                f'Your Pokémon: {hp_bar(self.player_hp,self.row[9])}\n'
+                f'Opponent: {hp_bar(self.enemy_hp,self.enemy_max_hp)}'), view=self)
+            return True
+        callback = getattr(self, 'trainer_complete_callback', None)
+        if callback and not getattr(self, 'trainer_rewards_done', False):
+            self.trainer_rewards_done = True
+            try:
+                await callback(inter)
+            except Exception as exc:
+                print(f'[RPG ENCOUNTER REWARD ERROR] user={self.uid}: {exc!r}')
+        return False
 
     async def turn(self,inter,move):
         p=await pokemon_data(self.row[2]); msg=''
@@ -2511,6 +2549,7 @@ class NPCBattleView(TimedView):
             elif eff==0:msg+=' No effect!'
             msg += '\n' + battle_commentary(self.row[3], move, dmg, eff, crit, inflicted if inflicted and not status_msg == '' else '')
         if self.enemy_hp<=0:
+            if await self._advance_rpg_opponent(inter, msg): return
             with db() as mega_conn: mega_conn.execute('DELETE FROM pv_mega_active WHERE user_id=?',(self.uid,))
             # Commit the active Pokémon's final HP/status on every completed battle,
             # regardless of whether the encounter was a regular, legendary, or raid battle.
@@ -2562,10 +2601,10 @@ class NPCBattleView(TimedView):
                     await log_rare_shiny_event(inter.guild, inter.user, display_name(self.enemy), action='won', level=self.enemy.get('_level'), image_url=sprite(self.enemy, shiny=True))
                 jackpot=1_000_000 if self.boss_shiny else 0
                 if jackpot:
-                    add_progress(self.uid, xp=500)
+                    add_progress(self.uid, xp=500, coins=jackpot)
                     if inter.guild:
-                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}**.\n**Result:** Shiny boss jackpot recorded after victory; battle item rewards remain limited to potions and regular TMs.', guild=inter.guild, user=inter.user)
-                jackpot_text=f'\n\n🎰 JACKPOT! <@{self.uid}> won the shiny legendary boss!' if jackpot else ''
+                        await send_developer_log(inter.client, 'coins', '🎰 Legendary Battle Jackpot Paid', f'<@{self.uid}> defeated shiny legendary **{display_name(self.enemy)}**.\n**Result:** +{jackpot:,} VantaCoins and +500 bonus XP.', guild=inter.guild, user=inter.user)
+                jackpot_text=f'\n\n🎰 JACKPOT! **+{jackpot:,} VantaCoins** and **+500 bonus XP**!' if jackpot else ''
                 if boss_unclaimed:
                     boss_storage_note=f'📥 Saved in `!unclaimed` · Unclaimed ID `{iid}`.'
                 elif not boss_row:
@@ -2579,6 +2618,11 @@ class NPCBattleView(TimedView):
         self.enemy_hp, tickmsg=status_tick(self.enemy_status,self.enemy_hp,self.enemy_max_hp)
         if tickmsg: msg+='\n'+tickmsg
         if self.enemy_hp<=0:
+            if await self._advance_rpg_opponent(inter, msg): return
+            with db() as mega_conn: mega_conn.execute('DELETE FROM pv_mega_active WHERE user_id=?',(self.uid,))
+            with db() as c:
+                c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=? AND user_id=?',
+                          (max(0,min(self.row[9],self.player_hp)),self.player_status or '',self.row[0],self.uid))
             x=random.randint(40,90);loot=grant_battle_reward(self.uid,xp=x)
             if self.raid:
                 pv_record_activity(self.uid,'raid_win',1,getattr(inter.guild,'id',None))
@@ -2630,7 +2674,7 @@ class NPCBattleView(TimedView):
             with db() as c:
                 c.execute('UPDATE pokemon SET hp=0,status_condition=? WHERE instance_id=? AND user_id=?',
                           (self.player_status or '', self.row[0], self.uid))
-            if (self.boss or self.raid) and any(r[0]!=self.row[0] and r[8]>0 for r in self.party):
+            if (self.boss or self.raid or getattr(self,'trainer_mode',False)) and any(r[0]!=self.row[0] and r[8]>0 for r in self.party):
                 for item in list(self.children): self.remove_item(item)
                 await self.build()
                 return await self.update_battle(inter, content=f'💥 **{self.row[3].title()} fainted!**\n{msg}\nUse **Switch Pokémon** and select a healthy teammate. Moves are unavailable until you switch.',view=self)
@@ -3394,7 +3438,7 @@ class Game(commands.Cog):
             if row and row[0]:
                 return await ctx.send('🧭 **Your journey is already started!** See `!profile` to view your adventure stats.')
             c.execute('UPDATE players SET started=1 WHERE user_id=?',(ctx.author.id,))
-        e=discord.Embed(title='🎒 Adventure Started!', description=f'Welcome to **PokéVanta**, {ctx.author.mention}!\n\nYour adventure has begun and your trainer profile has been created.\n\n🌿 Use `!hunt` to find Pokémon\n👤 Use `!profile` to view your stats\n🪙 Use `!daily` to claim your daily reward', color=discord.Color.green())
+        e=discord.Embed(title='🎒 Adventure Started!', description=f'Welcome to **PokéVanta**, {ctx.author.mention}!\n\nYour adventure has begun and your trainer profile has been created.\n\n🌿 Use `!hunt` to find Pokémon\n👤 Use `!profile` to view your stats\n🪙 Use `!daily` to claim your daily reward\n🧭 Use `!rpg` for the full MMORPG adventure guide', color=discord.Color.green())
         e.set_thumbnail(url=ctx.author.display_avatar.url)
         await ctx.send(embed=e)
 
@@ -3829,12 +3873,12 @@ class Game(commands.Cog):
                 c.execute('INSERT OR REPLACE INTO boss_encounters(user_id,dex_id,name,level,shiny) VALUES(?,?,?,?,1)',(uid,d['id'],d['name'],0))
                 c.execute('DELETE FROM boss_party WHERE user_id=?',(uid,))
             boss=(d['id'],d['name'],0,1)
-            await ctx.send(f'🛠️ **Dev override enabled:** you can start this boss without completing 10 hunts. This boss is guaranteed shiny; defeating it awards **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**. Build your team with `!add <pokemon_id>` if needed.')
+            await ctx.send(f'🛠️ **Dev override enabled:** you can start this boss without completing 10 hunts. This boss is guaranteed shiny; defeating it awards the boss Pokémon, normal battle rewards, and the **1,000,000 VantaCoin + 500 XP shiny jackpot**. Build your team with `!add <pokemon_id>` if needed.')
         elif dev_override and boss and not boss[3]:
             with db() as c:
                 c.execute('UPDATE boss_encounters SET shiny=1 WHERE user_id=?',(uid,))
             boss=(boss[0],boss[1],boss[2],1)
-            await ctx.send(f'🛠️ **Dev override enabled:** this boss is now guaranteed shiny. Defeating it awards **50 Rare Candies, 5 Elite Charged TMs, and 10 Raid Passes**.')
+            await ctx.send(f'🛠️ **Dev override enabled:** this boss is now guaranteed shiny. Defeating it awards the boss Pokémon, normal battle rewards, and the **1,000,000 VantaCoin + 500 XP shiny jackpot**.')
         with db() as c:
             # Re-read in case the dev override created/updated the encounter above.
             boss=c.execute('SELECT dex_id,name,level,shiny FROM boss_encounters WHERE user_id=?',(uid,)).fetchone()
@@ -3940,9 +3984,16 @@ class Game(commands.Cog):
         try:
             d=await pokemon_data(enc[0]); mh=max_hp(d,enc[3])
         except Exception as exc:
-            # Leave the encounter untouched so the player can retry once the API responds.
+            # A server-wide encounter is reserved before the API lookup to prevent
+            # two trainers claiming it. Restore that reservation if the lookup fails.
+            if is_global:
+                with db() as restore_conn:
+                    restore_conn.execute(
+                        'INSERT OR IGNORE INTO global_encounter(id,dex_id,name,shiny,level,spawned_by,iv_hp,iv_attack,iv_defense,iv_sp_attack,iv_sp_defense,iv_speed) VALUES(1,?,?,?,?,NULL,?,?,?,?,?,?)',
+                        (enc[0],enc[1],enc[2],enc[3],*enc[6:12])
+                    )
             print(f'Catch data lookup failed for user {uid}, dex_id={enc[0]!r}: {type(exc).__name__}: {exc}')
-            return await ctx.send('⚠️ I could not load this Pokémon from PokéAPI right now. Your encounter is still saved—please try `!catch <name>` again in a moment.')
+            return await ctx.send('⚠️ I could not load this Pokémon from PokéAPI right now. Your encounter has been restored—please try `!catch <name>` again in a moment.')
         radiant=bool(enc[5]) if len(enc)>5 else False
         rare_variant=bool(enc[2]) or radiant
         with db() as c:
@@ -4137,7 +4188,7 @@ class Game(commands.Cog):
             'ccdelete', 'eventimage', 'eventtoken', 'eventitem', 'gamelogs'
         }
         categories = {
-            'start': 'Adventure', 'profile': 'Adventure', 'regions': 'Exploration & Quests', 'region': 'Exploration & Quests', 'travel': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'hidden': 'Exploration & Quests', 'cave': 'Exploration & Quests', 'typemaster': 'Exploration & Quests', 'typequiz': 'Exploration & Quests', 'explorem': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
+            'start': 'Adventure', 'profile': 'Adventure', 'rpg': 'Exploration & Quests', 'rpgprofile': 'Exploration & Quests', 'trainers': 'Exploration & Quests', 'trainer': 'Exploration & Quests', 'gyms': 'Exploration & Quests', 'gym': 'Exploration & Quests', 'badges': 'Exploration & Quests', 'rival': 'Exploration & Quests', 'regions': 'Exploration & Quests', 'region': 'Exploration & Quests', 'travel': 'Exploration & Quests', 'explore': 'Exploration & Quests', 'hidden': 'Exploration & Quests', 'cave': 'Exploration & Quests', 'typemaster': 'Exploration & Quests', 'typequiz': 'Exploration & Quests', 'explorem': 'Exploration & Quests', 'egg': 'Exploration & Quests', 'eggs': 'Exploration & Quests', 'dungeon': 'Exploration & Quests', 'mega': 'Exploration & Quests', 'quest': 'Exploration & Quests', 'quests': 'Exploration & Quests', 'guild': 'Exploration & Quests', 'fish': 'Fishing & Events', 'events': 'Fishing & Events', 'event': 'Fishing & Events', 'eventhelp': 'Fishing & Events', 'missions': 'Fishing & Events', 'missionclaim': 'Fishing & Events', 'missionboard': 'Fishing & Events', 'mprewards': 'Fishing & Events', 'mpclaim': 'Fishing & Events', 'hunt': 'Adventure', 'hint': 'Adventure', 'catch': 'Adventure', 'cancel': 'Adventure', 'fix': 'Adventure',
             'pokedex': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'box': 'Box & Pokédex', 'unclaimed': 'Box & Pokédex', 'info': 'Box & Pokédex', 'moves': 'Box & Pokédex',
             'select': 'Teams & Battles', 'setteam': 'Teams & Battles', 'team': 'Teams & Battles', 'legendarybattle': 'Teams & Battles', 'battle': 'Teams & Battles', 'challenge': 'Teams & Battles',
             'raid': 'Raids & Candies', 'candy': 'Raids & Candies', 'candyquests': 'Raids & Candies',
@@ -4268,22 +4319,38 @@ class Game(commands.Cog):
                     'quest': 'View or claim a legendary questline objective.',
                     'quests': 'View all legendary questlines and their progress.',
                     'guild': 'Create, join, view and contribute to multiplayer Trainer Guilds.',
+                    'rpg': 'Show the complete MMORPG guide and the recommended order for playing the new adventure system.',
+                    'rpgprofile': 'View your separate MMORPG Trainer Level, Trainer XP, trainer wins, badges and rival victories.',
+                    'trainers': 'Show trainers available at your current region location.',
+                    'trainer': 'Challenge location-specific regional trainers using your selected Pokémon team.',
+                    'trainer challenge': 'Battle a trainer at your current location. Defeat all of their Pokémon to earn rewards.',
+                    'gyms': 'View regional gym leaders, badge requirements and your trainer progress.',
+                    'gym': 'Challenge the regional gym after defeating its three trainers.',
+                    'gym challenge': 'Battle your current region gym leader after meeting the trainer and location requirements.',
+                    'badges': 'View the gym badges earned across all nine regions.',
+                    'rival': 'Challenge your regional rival after earning the local gym badge.',
                     'egg claim': 'Claim your one-time Starter Egg. Additional eggs can be discovered through exploration and dungeons.',
                     'egg hatch': 'Hatch an egg after it has reached its required incubation progress.',
                     'dungeon list': 'Browse the four Mystery Dungeons and their floor counts.',
                     'dungeon enter': 'Enter a Mystery Dungeon. You need at least one healthy Pokémon on your selected team.',
                     'dungeon status': 'Check your saved Mystery Dungeon run and current floor.',
-                    'dungeon explore': 'Advance one floor in your active Mystery Dungeon and earn floor rewards.',
+                    'dungeon explore': 'Start a real Pokémon battle for the current floor. Win to advance and earn dungeon rewards.',
                     'dungeon leave': 'Leave your active Mystery Dungeon while keeping rewards already earned.',
                     'mega stones': 'View the Mega Stones in your collection.',
                     'mega activate': 'Use a matching Mega Stone to prepare a temporary Mega boost for a supported battle.',
                     'quests': 'View all five Legendary Questlines and your regional exploration progress.',
                     'quest': 'View a quest, claim its completed objective, or summon its Legendary guardian.',
-                    'guild create': 'Create a new Trainer Guild. You can belong to only one guild at a time.',
+                    'guild create': 'Found a Trainer Guild for 5,000,000 VantaCoins. The fee is deducted only if creation succeeds.',
                     'guild join': 'Join an existing Trainer Guild by its name.',
                     'guild leave': 'Leave your current Trainer Guild. Guild leaders must transfer leadership if members remain.',
                     'guild info': 'View your guild level, XP, leader and member list.',
                     'guild contribute': 'Contribute 100–100,000 VantaCoins to your guild in exchange for guild XP.',
+                    'guild transfer': 'Transfer guild leadership to another member of your guild.',
+                    'guild missions': 'View weekly shared guild objectives for exploration, trainer victories and dungeon floors.',
+                    'guild mission': 'Claim completed weekly guild objectives as the Guild Leader.',
+                    'guild mission claim': 'Claim a completed weekly guild mission for Guild XP.',
+                    'guild boss': 'View your guild’s weekly boss challenge progress.',
+                    'guild boss challenge': 'Battle the weekly guild boss. Five different member victories defeat it and award Guild XP.',
                     'guild leaderboard': 'View the top Trainer Guilds by level and XP.',
                     'regions': 'View the world atlas, region unlocks and your exploration progress.',
                     'region': 'View your current region or details about an unlocked region.',
@@ -10086,7 +10153,7 @@ class CavePuzzleView(discord.ui.View):
                 item = random.choice(('rare-candy', 'super-potion', 'potion'))
                 change_item(uid, item, 1)
                 bonus = f"\n🎒 Bonus: **1 × {item.replace('-', ' ').title()}**"
-            self.cog._daily_progress(uid, 'cave_clear')
+            self.cog._daily_progress(uid, 'cave_solver')
             with db() as c:
                 c.execute('UPDATE pv_cave_daily SET completed=1 WHERE user_id=? AND day_key=?', (uid, self.day_key))
             desc = f"✅ {self.puzzle['explanation']}\n\nYou earned **{loot}** and **{xp} XP**.{bonus}"
@@ -10105,11 +10172,15 @@ class CavePuzzleView(discord.ui.View):
         if self.finished:
             return
         self.finished = True
+        # A timed-out puzzle did not produce an answer; release its reserved daily attempt.
+        with db() as c:
+            c.execute('UPDATE pv_cave_daily SET completed=0 WHERE user_id=? AND day_key=? AND completed=2',
+                      (self.ctx.author.id, self.day_key))
         for item in self.children:
             item.disabled = True
         try:
             if getattr(self, 'message', None):
-                await self.message.edit(content='⌛ The cave mechanism has gone dormant. Try again tomorrow.', view=self)
+                await self.message.edit(content='⌛ The cave mechanism has gone dormant. Your unfinished attempt was returned; you can try again today.', view=self)
         except discord.HTTPException:
             pass
 
@@ -10144,7 +10215,7 @@ class TypeMasterView(discord.ui.View):
             if first:
                 xp = 45
                 loot = grant_game_reward(uid, xp=xp, rolls=2)
-                self.cog._daily_progress(uid, 'type_quiz')
+                self.cog._daily_progress(uid, 'type_scholar')
                 reward = f'You earned **{loot}** and **{xp} XP**.'
             else:
                 reward = 'You already claimed today’s Type Master reward, but your type knowledge is sharp!'
@@ -10225,6 +10296,44 @@ class MMORPG(commands.Cog):
         'lopunny': 'lopunnite', 'gallade': 'galladite', 'audino': 'audinite',
     }
 
+    # Regional trainer teams and gym leaders. These are authored encounters, not random reward drops.
+    REGION_TRAINERS = {
+        'kanto': [('bug_catcher','Bug Catcher','Viridian Forest',['caterpie','butterfree']),('hiker','Hiker','Mt. Moon',['geodude','onix']),('swimmer','Swimmer','Cerulean Cape',['psyduck','goldeen'])],
+        'johto': [('bug_catcher','Bug Catcher','Ilex Forest',['spinarak','scyther']),('sage','Sage','Ruins of Alph',['bellsprout','hoothoot']),('hiker','Hiker','Mt. Silver',['onix','donphan'])],
+        'hoenn': [('ranger','Ranger','Petalburg Woods',['shroomish','roselia']),('hiker','Hiker','Granite Cave',['aron','lairon']),('swimmer','Swimmer','Seafloor Cavern',['wailmer','sharpedo'])],
+        'sinnoh': [('bug_catcher','Bug Catcher','Eterna Forest',['kricketune','vespiquen']),('hiker','Hiker','Mt. Coronet',['nosepass','medicham']),('ace_trainer','Ace Trainer','Spear Pillar',['luxray','garchomp'])],
+        'unova': [('ranger','Ranger','Pinwheel Forest',['lillipup','sawsbuck']),('scientist','Scientist','Chargestone Cave',['klink','galvantula']),('veteran','Veteran','Giant Chasm',['cryogonal','bisharp'])],
+        'kalos': [('bug_catcher','Bug Catcher','Santalune Forest',['scatterbug','vivillon']),('hiker','Hiker','Reflection Cave',['roggenrola','carbink']),('ace_trainer','Ace Trainer','Victory Road',['hawlucha','aegislash'])],
+        'alola': [('trial_guide','Trial Guide','Verdant Cavern',['yungoos','gumshoos']),('ranger','Ranger','Lush Jungle',['fomantis','lurantis']),('veteran','Veteran','Vast Poni Canyon',['toucannon','kommo-o'])],
+        'galar': [('schoolboy','Schoolboy','Slumbering Weald',['wooloo','corvisquire']),('worker','Worker','Galar Mine',['rolycoly','coalossal']),('veteran','Veteran','Crown Tundra',['frosmoth','mamoswine'])],
+        'paldea': [('student','Student','South Province',['lechonk','pawmi']),('ranger','Ranger','Tagtree Thicket',['shroodle','grafaiai']),('veteran','Veteran','Area Zero',['iron-treads','roaring-moon'])],
+    }
+    GYM_LEADERS = {
+        'kanto': ('Brock','Boulder Badge','Victory Road',['geodude','onix','rhydon']),
+        'johto': ('Whitney','Plain Badge','Mt. Silver',['clefairy','miltank','granbull']),
+        'hoenn': ('Roxanne','Stone Badge','Sky Pillar',['geodude','nosepass','aron']),
+        'sinnoh': ('Roark','Coal Badge','Spear Pillar',['geodude','cranidos','rampardos']),
+        'unova': ('Lenora','Basic Badge','Giant Chasm',['herdier','watchog','unfezant']),
+        'kalos': ('Viola','Bug Badge','Victory Road',['surskit','vivillon','pinsir']),
+        'alola': ('Hala','Fightinium Trial','Altar of the Sunne',['makuhita','crabrawler','hariyama']),
+        'galar': ('Milo','Grass Badge','Energy Plant',['gossifleur','eldegoss','flapple']),
+        'paldea': ('Katy','Bug Badge','Zero Lab',['nymble','tarountula','lokix']),
+    }
+    RIVAL_TEAMS = {
+        'kanto':['eevee','kadabra','arcanine'], 'johto':['bayleef','crobat','ampharos'],
+        'hoenn':['grovyle','loudred','manectric'], 'sinnoh':['staravia','floatzel','lucario'],
+        'unova':['dewott','zebstrika','krookodile'], 'kalos':['frogadier','flabebe','pyroar'],
+        'alola':['dartrix','lycanroc','vikavolt'], 'galar':['drizzile','corvisquire','drednaw'],
+        'paldea':['floragato','kilowattrel','ceruledge'],
+    }
+    GUILD_FOUNDING_FEE = 5_000_000
+    GUILD_WEEKLY_MISSIONS = {
+        'explore': ('Explore as a guild', 25, 500),
+        'trainer': ('Defeat regional trainers', 8, 750),
+        'dungeon': ('Clear dungeon floors', 10, 1000),
+    }
+
+
     def __init__(self, bot):
         self.bot = bot
 
@@ -10282,11 +10391,221 @@ class MMORPG(commands.Cog):
             CREATE TABLE IF NOT EXISTS pv_cave_daily(user_id INTEGER NOT NULL,day_key TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,day_key));
             CREATE TABLE IF NOT EXISTS pv_type_daily(user_id INTEGER NOT NULL,day_key TEXT NOT NULL,completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,day_key));
             CREATE INDEX IF NOT EXISTS idx_pv_explore_daily_user_day ON pv_explore_daily(user_id,day_key);
+            CREATE TABLE IF NOT EXISTS pv_rpg_profiles(user_id INTEGER PRIMARY KEY,trainer_xp INTEGER NOT NULL DEFAULT 0,trainer_level INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS pv_rpg_trainer_wins(user_id INTEGER NOT NULL,region TEXT NOT NULL,trainer_key TEXT NOT NULL,won_at INTEGER NOT NULL,PRIMARY KEY(user_id,region,trainer_key));
+            CREATE TABLE IF NOT EXISTS pv_rpg_badges(user_id INTEGER NOT NULL,region TEXT NOT NULL,badge_name TEXT NOT NULL,earned_at INTEGER NOT NULL,PRIMARY KEY(user_id,region));
+            CREATE TABLE IF NOT EXISTS pv_rpg_rival_wins(user_id INTEGER NOT NULL,region TEXT NOT NULL,won_at INTEGER NOT NULL,PRIMARY KEY(user_id,region));
+            CREATE TABLE IF NOT EXISTS pv_rpg_cooldowns(user_id INTEGER PRIMARY KEY,last_battle INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS pv_guild_missions(guild_id INTEGER NOT NULL,week_key TEXT NOT NULL,mission_key TEXT NOT NULL,progress INTEGER NOT NULL DEFAULT 0,claimed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(guild_id,week_key,mission_key));
+            CREATE TABLE IF NOT EXISTS pv_guild_boss_weekly(guild_id INTEGER NOT NULL,week_key TEXT NOT NULL,progress INTEGER NOT NULL DEFAULT 0,claimed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(guild_id,week_key));
+            CREATE TABLE IF NOT EXISTS pv_guild_boss_attempts(guild_id INTEGER NOT NULL,week_key TEXT NOT NULL,user_id INTEGER NOT NULL,won_at INTEGER NOT NULL,PRIMARY KEY(guild_id,week_key,user_id));
             ''')
         with db() as c:
             daily_cols={r[1] for r in c.execute('PRAGMA table_info(pv_explore_daily)').fetchall()}
             if 'reward_item' not in daily_cols: c.execute("ALTER TABLE pv_explore_daily ADD COLUMN reward_item TEXT NOT NULL DEFAULT ''")
             if 'reward_qty' not in daily_cols: c.execute('ALTER TABLE pv_explore_daily ADD COLUMN reward_qty INTEGER NOT NULL DEFAULT 0')
+
+    def _grant_trainer_xp(self, uid, amount):
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO pv_rpg_profiles(user_id) VALUES(?)',(uid,))
+            c.execute('UPDATE pv_rpg_profiles SET trainer_xp=trainer_xp+? WHERE user_id=?',(max(0,int(amount)),uid))
+            row=c.execute('SELECT trainer_xp,trainer_level FROM pv_rpg_profiles WHERE user_id=?',(uid,)).fetchone()
+            total,level=row
+            while total >= level*500:
+                total -= level*500
+                level += 1
+            c.execute('UPDATE pv_rpg_profiles SET trainer_xp=?,trainer_level=? WHERE user_id=?',(total,level,uid))
+            return level,total
+
+    def _rpg_cooldown_remaining(self, uid):
+        with db() as c:
+            row=c.execute('SELECT last_battle FROM pv_rpg_cooldowns WHERE user_id=?',(uid,)).fetchone()
+        return max(0,20-(int(time.time())-(row[0] if row else 0)))
+
+    def _rpg_start_cooldown(self, uid):
+        with db() as c:
+            c.execute('INSERT INTO pv_rpg_cooldowns(user_id,last_battle) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET last_battle=excluded.last_battle',(uid,int(time.time())))
+
+    async def _start_rpg_battle(self, ctx, opponent_names, opponent_level, title, on_win, *, allow_cooldown=True):
+        uid=ctx.author.id
+        active=ACTIVE_VIEWS.get(uid)
+        if active is not None:
+            return await ctx.send('⚠️ Finish your current battle or encounter before starting an RPG challenge.')
+        with db() as c:
+            if c.execute('SELECT 1 FROM encounters WHERE user_id=? UNION SELECT 1 FROM boss_encounters WHERE user_id=? UNION SELECT 1 FROM raid_encounters WHERE user_id=?',(uid,uid,uid)).fetchone():
+                return await ctx.send('⚠️ Finish your current hunt, raid or Legendary encounter before starting an RPG challenge.')
+            party=c.execute('SELECT DISTINCT p.* FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? AND p.hp>0 ORDER BY t.slot',(uid,)).fetchall()
+        if not party:
+            return await ctx.send('❌ You need at least one healthy Pokémon in your team. Use `!setteam <Pokémon ID> <slot>` and heal it first.')
+        if allow_cooldown:
+            remaining=self._rpg_cooldown_remaining(uid)
+            if remaining:return await ctx.send(f'⏳ RPG battle cooldown: wait **{remaining}s** before another challenge.')
+        status=await ctx.send(f'⚔️ Preparing **{title}**… loading the opposing team.')
+        enemies=[]
+        try:
+            for species in opponent_names:
+                enemy=await pokemon_data(species)
+                enemy['_level']=max(1,min(300,int(opponent_level)))
+                enemies.append(enemy)
+        except Exception as exc:
+            print(f'[RPG OPPONENT LOAD ERROR] {title}: {exc!r}')
+            return await status.edit(content='⚠️ The Pokémon data service could not load this opponent. No battle was started; try again shortly.')
+        view=NPCBattleView(uid,party[0],enemies[0])
+        view.trainer_mode=True
+        view.trainer_label=title
+        view.trainer_team=enemies
+        view.trainer_index=0
+        view.trainer_complete_callback=on_win
+        view.trainer_rewards_done=False
+        view.party=list(party)
+        await view.build()
+        own_data=await pokemon_data(party[0][2])
+        e=discord.Embed(title=f'⚔️ {title}',description=(f'**Your team:** {len(party)} healthy Pokémon\n'
+            f'**Lead:** {party[0][3].title()} Lv.{party[0][4]} · HP {hp_bar(party[0][8],party[0][9])}\n\n'
+            f'**Opponent:** {display_name(enemies[0])} Lv.{enemies[0]["_level"]}\n'
+            f'**Opposing team:** {len(enemies)} Pokémon\nHP {hp_bar(view.enemy_hp,view.enemy_max_hp)}\n\n'
+            'Choose a move using the buttons. Switch Pokémon when your active Pokémon needs help.'),color=discord.Color.red())
+        art=[]
+        try:
+            own_art=await radiant_sprite_file(own_data,require_archive=False);e.set_thumbnail(url=f'attachment://{own_art.filename}');art.append(own_art)
+        except Exception as exc: print(f'[RPG PLAYER ART] {exc!r}')
+        try:
+            enemy_art=await radiant_sprite_file(enemies[0],require_archive=False);e.set_image(url=f'attachment://{enemy_art.filename}');art.append(enemy_art)
+        except Exception as exc: print(f'[RPG ENEMY ART] {exc!r}')
+        view.message=status
+        await status.edit(content=None,embed=e,view=view,attachments=art)
+        ACTIVE_VIEWS[uid]=view
+        self._rpg_start_cooldown(uid)
+        return view
+
+    @commands.command(name='rpg', aliases=['mmorpg','adventurehelp'], description='Show the complete MMORPG adventure guide.')
+    async def rpg_guide(self,ctx):
+        e=discord.Embed(title='🧭 PokéVanta MMORPG — How to Play',description=(
+            '**1. Start and prepare**\n`!start` → `!team` → `!setteam <Pokémon ID> <slot>` → `!select <Pokémon ID>`. Keep your team healthy with Potions.\n\n'
+            '**2. Explore the world**\n`!regions` shows regions, `!region` shows your current location, `!travel <location>` moves you, and `!explore` discovers Pokémon, eggs, items, events and progress. Hidden locations unlock as you explore.\n\n'
+            '**3. Fight trainers**\nUse `!trainers` at your current location, then `!trainer challenge <name>`. Battles use your existing move buttons, type matchups, status effects, held items and team switching.\n\n'
+            '**4. Earn badges and beat rivals**\nDefeat all three regional trainers, travel to the gym location shown by `!gyms`, then use `!gym challenge`. `!badges` shows your achievements. Badges unlock the next region; use `!rival` after a badge to complete that region’s rival chapter.\n\n'
+            '**5. Clear dungeons**\n`!dungeon list` → `!dungeon enter <name>` → `!dungeon explore`. Each floor starts a real Pokémon battle. Beat the enemy to advance; every fifth floor has a milestone reward. `!dungeon status` checks progress and `!dungeon leave` ends the run.\n\n'
+            '**6. Story, eggs and Mega Evolution**\nUse `!quests` / `!quest`, `!egg`, `!eggs`, `!mega stones` and `!mega activate <Pokémon ID>`. Legendary quest rewards and battles remain separate.\n\n'
+            '**7. Join a guild**\n`!guild create <name>` costs **5,000,000 VantaCoins**. Joining an existing guild is free. Use `!guild info`, `!guild contribute <amount>`, `!guild missions`, `!guild mission claim <key>` and `!guild boss challenge`. Five different guild members must win the weekly boss challenge to earn its shared Guild XP reward.'))
+        e.add_field(name='Useful commands',value='`!rpgprofile` · `!trainers` · `!trainer challenge <name>` · `!gyms` · `!gym challenge` · `!badges` · `!rival` · `!dungeon` · `!quests` · `!guild missions` · `!guild boss challenge`',inline=False)
+        e.set_footer(text='RPG trainer battles and dungeon battles use your existing Pokémon battle system. Keep a healthy team ready!')
+        await ctx.send(embed=e)
+
+    @commands.command(name='rpgprofile', aliases=['trainerprofile'], description='View your MMORPG trainer progression.')
+    async def rpg_profile(self,ctx):
+        uid=ctx.author.id
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO pv_rpg_profiles(user_id) VALUES(?)',(uid,))
+            xp,level=c.execute('SELECT trainer_xp,trainer_level FROM pv_rpg_profiles WHERE user_id=?',(uid,)).fetchone()
+            wins=c.execute('SELECT COUNT(*) FROM pv_rpg_trainer_wins WHERE user_id=?',(uid,)).fetchone()[0]
+            badges=c.execute('SELECT COUNT(*) FROM pv_rpg_badges WHERE user_id=?',(uid,)).fetchone()[0]
+            rivals=c.execute('SELECT COUNT(*) FROM pv_rpg_rival_wins WHERE user_id=?',(uid,)).fetchone()[0]
+        await ctx.send(embed=discord.Embed(title=f'🧑‍🚀 {ctx.author.display_name} · RPG Profile',description=f'**Trainer Level:** {level}\n**Trainer XP:** {xp}/{level*500}\n**Trainers defeated:** {wins}\n**Gym badges:** {badges}/9\n**Rivals defeated:** {rivals}/9',color=discord.Color.blurple()))
+
+    @commands.command(name='trainers', description='Show trainers available at your current MMORPG location.')
+    async def trainers(self,ctx):
+        region,location,_=self._travel(ctx.author.id)
+        entries=[x for x in self.REGION_TRAINERS.get(region,[]) if x[2].lower()==location.lower()]
+        if not entries:return await ctx.send(f'👣 No regional trainer is waiting at **{location}**. Travel to another location in {region.title()} and use `!trainers` again.')
+        with db() as c:
+            lines=[]
+            for key,name,place,team in entries:
+                won=bool(c.execute('SELECT 1 FROM pv_rpg_trainer_wins WHERE user_id=? AND region=? AND trainer_key=?',(ctx.author.id,region,key)).fetchone())
+                lines.append(f'**{name}** · {"Defeated ✅" if won else "Ready to challenge"}\nTeam: {", ".join(x.title() for x in team)}\nChallenge: `!trainer challenge {name}`')
+        await ctx.send(embed=discord.Embed(title=f'👤 Trainers · {location}',description='\n\n'.join(lines),color=discord.Color.blurple()))
+
+    @commands.group(name='trainer',invoke_without_command=True)
+    async def trainer(self,ctx):
+        await ctx.send('Use `!trainers` to find trainers at your current location, then `!trainer challenge <name>` to battle one.')
+
+    @trainer.command(name='challenge')
+    async def trainer_challenge(self,ctx,*,name:str):
+        region,location,_=self._travel(ctx.author.id)
+        found=next((x for x in self.REGION_TRAINERS.get(region,[]) if x[2].lower()==location.lower() and (x[0].lower()==name.lower().replace(' ','_') or x[1].lower()==name.lower())),None)
+        if not found:return await ctx.send('❌ That trainer is not at your current location. Use `!trainers` to see who you can challenge here.')
+        key,label,place,team=found
+        with db() as c:
+            if c.execute('SELECT 1 FROM pv_rpg_trainer_wins WHERE user_id=? AND region=? AND trainer_key=?',(ctx.author.id,region,key)).fetchone():return await ctx.send('✅ You have already defeated this trainer. Find another trainer or challenge the regional gym.')
+        lead=await owned_lead(ctx.author.id)
+        level=max(3,min(300,(lead[4] if lead else 5)+2))
+        async def won(inter):
+            with db() as c:c.execute('INSERT OR IGNORE INTO pv_rpg_trainer_wins(user_id,region,trainer_key,won_at) VALUES(?,?,?,?)',(ctx.author.id,region,key,int(time.time())))
+            add_progress(ctx.author.id,coins=250,xp=0)
+            rpg_level,rpg_xp=self._grant_trainer_xp(ctx.author.id,100)
+            await self._guild_contribute(ctx.author.id,5)
+            await self._guild_mission_progress(ctx.author.id,'trainer')
+            await inter.followup.send(f'🏅 You defeated **{label}**! +250 VantaCoins · +100 Trainer XP (Trainer Lv.{rpg_level}). Regional trainer progress: use `!gyms` to check your gym unlock.',ephemeral=False)
+        return await self._start_rpg_battle(ctx,team,level,f'{label} · {region.title()}',won)
+
+    @commands.command(name='gyms',description='View regional gym leaders and badge requirements.')
+    async def gyms(self,ctx):
+        region,location,_=self._travel(ctx.author.id)
+        with db() as c:
+            lines=[]
+            for key,(leader,badge,gym_location,team) in self.GYM_LEADERS.items():
+                wins=c.execute('SELECT COUNT(*) FROM pv_rpg_trainer_wins WHERE user_id=? AND region=?',(ctx.author.id,key)).fetchone()[0]
+                earned=bool(c.execute('SELECT 1 FROM pv_rpg_badges WHERE user_id=? AND region=?',(ctx.author.id,key)).fetchone())
+                unlocked=c.execute('SELECT 1 FROM pv_region_unlocks WHERE user_id=? AND region=?',(ctx.author.id,key)).fetchone()
+                status='Badge earned ✅' if earned else ('Ready' if wins>=3 else f'{wins}/3 trainers defeated')
+                lines.append(f'**{key.title()} — {leader}**\n{badge} · {gym_location}\n{status} · {"Unlocked" if unlocked else "Region locked"}')
+        await ctx.send(embed=discord.Embed(title='🏟️ Regional Gyms',description='\n\n'.join(lines),color=discord.Color.gold()))
+
+    @commands.group(name='gym',invoke_without_command=True)
+    async def gym(self,ctx):
+        await ctx.send('Use `!gyms` to see regional gym requirements. After defeating all three regional trainers, travel to the listed gym location and use `!gym challenge`.')
+
+    @gym.command(name='challenge')
+    async def gym_challenge(self,ctx):
+        region,location,_=self._travel(ctx.author.id)
+        leader,badge,gym_location,team=self.GYM_LEADERS[region]
+        with db() as c:
+            unlocked=bool(c.execute('SELECT 1 FROM pv_region_unlocks WHERE user_id=? AND region=?',(ctx.author.id,region)).fetchone())
+            wins=c.execute('SELECT COUNT(*) FROM pv_rpg_trainer_wins WHERE user_id=? AND region=?',(ctx.author.id,region)).fetchone()[0]
+            earned=bool(c.execute('SELECT 1 FROM pv_rpg_badges WHERE user_id=? AND region=?',(ctx.author.id,region)).fetchone())
+        if not unlocked:return await ctx.send('🔒 This region is still locked. Progress through earlier regions first.')
+        if earned:return await ctx.send(f'🏅 You already earned the **{badge}** in {region.title()}.')
+        if wins<3:return await ctx.send(f'🔒 Defeat all three regional trainers first. Progress: **{wins}/3**. Use `!trainers` at each trainer location.')
+        if location.lower()!=gym_location.lower():return await ctx.send(f'📍 Travel to **{gym_location}** in {region.title()} before challenging Gym Leader **{leader}**.')
+        lead=await owned_lead(ctx.author.id)
+        level=max(8,min(300,(lead[4] if lead else 5)+5))
+        async def won(inter):
+            with db() as c:
+                c.execute('INSERT OR IGNORE INTO pv_rpg_badges(user_id,region,badge_name,earned_at) VALUES(?,?,?,?)',(ctx.author.id,region,badge,int(time.time())))
+                order=list(self.REGIONS)
+                if region in order and order.index(region)+1<len(order):
+                    next_region=order[order.index(region)+1]
+                    c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(ctx.author.id,next_region,int(time.time())))
+            add_progress(ctx.author.id,coins=5000,xp=0)
+            rpg_level,_=self._grant_trainer_xp(ctx.author.id,500)
+            await self._guild_contribute(ctx.author.id,20)
+            await inter.followup.send(f'🏆 **Gym victory!** You earned the **{badge}** and 5,000 VantaCoins! Trainer Level: {rpg_level}.',ephemeral=False)
+        return await self._start_rpg_battle(ctx,team,level,f'Gym Leader {leader}',won)
+
+    @commands.command(name='badges',description='View all regional gym badges you have earned.')
+    async def badges(self,ctx):
+        with db() as c:rows=c.execute('SELECT region,badge_name,earned_at FROM pv_rpg_badges WHERE user_id=? ORDER BY earned_at',(ctx.author.id,)).fetchall()
+        if not rows:return await ctx.send('🏅 You have no gym badges yet. Defeat regional trainers and challenge your first gym!')
+        await ctx.send(embed=discord.Embed(title='🏅 Gym Badge Case',description='\n'.join(f'**{region.title()}** — {badge} · <t:{stamp}:d>' for region,badge,stamp in rows),color=discord.Color.gold()))
+
+    @commands.command(name='rival',description='Challenge your regional rival after earning the local gym badge.')
+    async def rival(self,ctx):
+        region,_,_=self._travel(ctx.author.id)
+        with db() as c:
+            badge=c.execute('SELECT 1 FROM pv_rpg_badges WHERE user_id=? AND region=?',(ctx.author.id,region)).fetchone()
+            beaten=c.execute('SELECT 1 FROM pv_rpg_rival_wins WHERE user_id=? AND region=?',(ctx.author.id,region)).fetchone()
+        if not badge:return await ctx.send('🔒 Earn this region’s gym badge before challenging your rival.')
+        if beaten:return await ctx.send('✅ You have already defeated your rival in this region. Travel onward for the next chapter.')
+        row=await owned_lead(ctx.author.id);level=max(10,min(300,(row[4] if row else 10)+7))
+        async def won(inter):
+            with db() as c:
+                c.execute('INSERT OR IGNORE INTO pv_rpg_rival_wins(user_id,region,won_at) VALUES(?,?,?)',(ctx.author.id,region,int(time.time())))
+                order=list(self.REGIONS)
+                if region in order and order.index(region)+1<len(order):c.execute('INSERT OR IGNORE INTO pv_region_unlocks(user_id,region,unlocked_at) VALUES(?,?,?)',(ctx.author.id,order[order.index(region)+1],int(time.time())))
+            add_progress(ctx.author.id,coins=10000,xp=0)
+            lvl,_=self._grant_trainer_xp(ctx.author.id,250)
+            await inter.followup.send(f'🌟 Rival defeated! +10,000 VantaCoins · +250 Trainer XP. Trainer Level {lvl}.',ephemeral=False)
+        return await self._start_rpg_battle(ctx,self.RIVAL_TEAMS[region],level,f'{region.title()} Rival',won)
 
     def _species_id(self, species):
         try: return int(str(species.get('url','')).rstrip('/').split('/')[-1])
@@ -10408,6 +10727,7 @@ class MMORPG(commands.Cog):
         if explore_cooldown_remaining:
             return await ctx.send(f'⏳ The area is quiet. Explore again in **{explore_cooldown_remaining}s**.')
         await self._guild_contribute(uid,1)
+        await self._guild_mission_progress(uid,'explore')
         self._daily_progress(uid, 'trailblazer')
         if newly_unlocked:
             await ctx.send('🗝️ **A hidden location has been discovered!**\n' + '\n'.join(f'• **{place}** — use `!travel {place}` to visit it' for place in newly_unlocked))
@@ -10581,7 +10901,7 @@ class MMORPG(commands.Cog):
                 return await ctx.send('🪨 You have already attempted today’s mystery cave. Return after the daily reset!')
             # Reserve today's attempt before displaying the puzzle, preventing duplicate concurrent entries.
             c.execute('UPDATE pv_cave_daily SET completed=2 WHERE user_id=? AND day_key=? AND completed=0',(uid,day))
-        self._daily_progress(uid, 'cave_clear')
+        self._daily_progress(uid, 'cave_solver')
         puzzles=[
             {'question':'I have cities but no houses, forests but no trees, and rivers but no water. What am I?','options':['A map','A mirror','A clock','A book'],'answer':0,'explanation':'A map can show cities, forests and rivers without containing the real things.'},
             {'question':'What gets wetter the more it dries?','options':['A towel','A candle','A shadow','A stone'],'answer':0,'explanation':'A towel absorbs water while drying something else.'},
@@ -10609,6 +10929,17 @@ class MMORPG(commands.Cog):
         embed=discord.Embed(title='⚡ Type Master Challenge',description=f'**Which Pokémon type is completely immune to {attack.title()}-type moves?**\n\nChoose one answer. You have 60 seconds. A correct answer earns a daily reward.',color=discord.Color.blurple())
         message=await ctx.send(embed=embed,view=view)
         view.message=message
+
+    async def _guild_mission_progress(self, uid, mission_key, amount=1):
+        if mission_key not in self.GUILD_WEEKLY_MISSIONS:return
+        with db() as c:
+            member=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(uid,)).fetchone()
+            if not member:return
+            gid=member[0]
+            week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+            _,target,_=self.GUILD_WEEKLY_MISSIONS[mission_key]
+            c.execute('INSERT OR IGNORE INTO pv_guild_missions(guild_id,week_key,mission_key,progress,claimed) VALUES(?,?,?,0,0)',(gid,week,mission_key))
+            c.execute('UPDATE pv_guild_missions SET progress=MIN(?,progress+?) WHERE guild_id=? AND week_key=? AND mission_key=?',(target,max(0,int(amount)),gid,week,mission_key))
 
     async def _guild_contribute(self, uid, points):
         week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
@@ -10674,7 +11005,7 @@ class MMORPG(commands.Cog):
 
     @commands.group(name='dungeon', invoke_without_command=True)
     async def dungeon(self,ctx):
-        await ctx.send('🏰 **Mystery Dungeons**\n`!dungeon list` · Browse dungeons\n`!dungeon enter <name>` · Start a run (requires a selected team)\n`!dungeon explore` · Advance one floor\n`!dungeon status` · View progress\n`!dungeon leave` · End the run and keep earned rewards\nEvery floor is saved, so a restart will not erase your run.')
+        await ctx.send('🏰 **Mystery Dungeons**\n`!dungeon list` · Browse dungeons\n`!dungeon enter <name>` · Start a run (requires a selected team)\n`!dungeon explore` · Fight the current floor encounter\n`!dungeon status` · View progress\n`!dungeon leave` · End the run and keep earned rewards\nEvery floor is saved, so a restart will not erase your run.')
 
     @dungeon.command(name='list')
     async def dungeon_list(self,ctx):
@@ -10682,7 +11013,9 @@ class MMORPG(commands.Cog):
 
     @dungeon.command(name='enter')
     async def dungeon_enter(self,ctx,*,name:str):
-        uid=ctx.author.id; key=name.lower().strip().replace(' ','_')
+        uid=ctx.author.id
+        if ACTIVE_VIEWS.get(uid):return await ctx.send('⚠️ Finish your current battle or encounter before entering a dungeon.')
+        key=name.lower().strip().replace(' ','_')
         aliases={'verdant':'verdant_labyrinth','verdant_labyrinth':'verdant_labyrinth','ember':'ember_mountain','ember_mountain':'ember_mountain','abyssal':'abyssal_rift','abyssal_rift':'abyssal_rift','temporal':'temporal_tower','temporal_tower':'temporal_tower'}
         key=aliases.get(key)
         if not key:return await ctx.send('❌ Choose Verdant Labyrinth, Ember Mountain, Abyssal Rift or Temporal Tower.')
@@ -10704,40 +11037,64 @@ class MMORPG(commands.Cog):
     async def dungeon_explore(self,ctx):
         uid=ctx.author.id
         with db() as c:
-            c.execute('BEGIN IMMEDIATE')
-            r=c.execute('SELECT dungeon,floor,max_floor FROM pv_dungeon_runs WHERE user_id=? AND state=\'active\'',(uid,)).fetchone()
-            if not r:return await ctx.send('❌ You are not in a dungeon. Use `!dungeon enter <name>`.')
-            key,floor,maxfloors=r
+            r=c.execute("SELECT dungeon,floor,max_floor FROM pv_dungeon_runs WHERE user_id=? AND state='active'",(uid,)).fetchone()
             region_row=c.execute('SELECT region FROM pv_travel WHERE user_id=?',(uid,)).fetchone()
-            active_region=region_row[0] if region_row else 'kanto'
-            c.execute('UPDATE pv_eggs SET progress=MIN(progress+1,required) WHERE user_id=? AND hatched=0',(uid,))
-            for quest_key, quest_cfg in self.QUESTS.items():
-                if quest_cfg[1]==active_region:
-                    c.execute('INSERT INTO pv_quest_progress(user_id,quest_key,progress) VALUES(?,?,1) ON CONFLICT(user_id,quest_key) DO UPDATE SET progress=progress+1',(uid,quest_key))
-            team=c.execute('SELECT COALESCE(AVG(p.level),1) FROM team t JOIN pokemon p ON p.instance_id=t.instance_id WHERE t.user_id=? AND p.hp>0',(uid,)).fetchone()[0]
-            if floor>=maxfloors:
-                c.execute('DELETE FROM pv_dungeon_runs WHERE user_id=?',(uid,)); c.execute('INSERT INTO pv_dungeon_history(user_id,dungeon,floor_reached,result,finished_at) VALUES(?,?,?,\'cleared\',?)',(uid,key,floor,int(time.time())))
-                cleared=True
+        if not r:return await ctx.send('❌ You are not in a dungeon. Use `!dungeon enter <name>`.')
+        key,floor,maxfloors=r
+        region=region_row[0] if region_row else 'kanto'
+        lo,hi,_=self.REGIONS.get(region,self.REGIONS['kanto'])
+        pool=[x for x in POKEMON_LIST if lo<=self._species_id(x)<=hi and x.get('name','') not in LEGENDARY_NAMES]
+        if not pool:pool=POKEMON_LIST
+        boss_floor=(floor%5==0 or floor==maxfloors)
+        if boss_floor:
+            boss_species=random.choice([x for x in pool if x.get('name','') not in LEGENDARY_NAMES] or pool)['name']
+            enemy_names=[boss_species,random.choice(pool)['name']]
+        else:
+            enemy_names=[random.choice(pool)['name']]
+            if floor%3==0:enemy_names.append(random.choice(pool)['name'])
+        lead=await owned_lead(uid)
+        level=max(3,min(300,(lead[4] if lead else 5)+floor//2+2))
+        async def won(inter):
+            with db() as c:
+                current=c.execute("SELECT dungeon,floor,max_floor FROM pv_dungeon_runs WHERE user_id=? AND state='active'",(uid,)).fetchone()
+                if not current or current[0]!=key or current[1]!=floor:return
+                c.execute('UPDATE pv_eggs SET progress=MIN(progress+1,required) WHERE user_id=? AND hatched=0',(uid,))
+                active_region=(c.execute('SELECT region FROM pv_travel WHERE user_id=?',(uid,)).fetchone() or ('kanto',))[0]
+                for quest_key,quest_cfg in self.QUESTS.items():
+                    if quest_cfg[1]==active_region:
+                        c.execute('INSERT INTO pv_quest_progress(user_id,quest_key,progress) VALUES(?,?,1) ON CONFLICT(user_id,quest_key) DO UPDATE SET progress=progress+1',(uid,quest_key))
+                if floor>=maxfloors:
+                    c.execute('DELETE FROM pv_dungeon_runs WHERE user_id=?',(uid,))
+                    c.execute("INSERT INTO pv_dungeon_history(user_id,dungeon,floor_reached,result,finished_at) VALUES(?,?,?,'cleared',?)",(uid,key,floor,int(time.time())))
+                    cleared=True
+                else:
+                    c.execute('UPDATE pv_dungeon_runs SET floor=floor+1 WHERE user_id=?',(uid,))
+                    cleared=False
+            floor_loot=grant_game_reward(uid,xp=25*floor,rolls=1 if floor<5 else 2)
+            extra=''
+            if floor%5==0:
+                stone=random.choice(list(self.MEGA_STONES.values()))
+                with db() as c:c.execute('INSERT INTO pv_mega_stones(user_id,stone,quantity) VALUES(?,?,1) ON CONFLICT(user_id,stone) DO UPDATE SET quantity=quantity+1',(uid,stone))
+                extra+=f'\n🌟 Milestone reward: **{stone.replace("-"," ").title()}**.'
+            if random.random()<.22 and not cleared:
+                egg_type=random.choice(['common','regional','rare']);req={'common':3,'regional':5,'rare':8}[egg_type]
+                with db() as c:c.execute('INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,?,?,?,?,?)',(uid,egg_type,region,req,int(time.time()),'dungeon'))
+                extra+=f'\n🥚 You found a **{egg_type.title()} Egg**.'
+            await self._guild_contribute(uid,3 if not cleared else 25)
+            await self._guild_mission_progress(uid,'dungeon')
+            if cleared:
+                final_loot=grant_game_reward(uid,xp=500,guaranteed_items={'rare-candy':10,'elite-charged-tm':1,'raid-pass':3},rolls=2)
+                await inter.followup.send(f'🏆 **Dungeon cleared!** You conquered all {maxfloors} floors of **{key.replace("_"," ").title()}**.\nFloor reward: {floor_loot}.\nFinal reward: {final_loot} + 500 XP.{extra}',ephemeral=False)
             else:
-                c.execute('UPDATE pv_dungeon_runs SET floor=floor+1 WHERE user_id=?',(uid,)); cleared=False
-        if cleared:
-            loot=grant_game_reward(uid,xp=500,guaranteed_items={'rare-candy':10,'elite-charged-tm':1,'raid-pass':3},rolls=2); self._guild_contribute(uid,25)
-            return await ctx.send(f'🏆 **Dungeon cleared!** You conquered all **{maxfloors} floors** of {key.replace("_"," ").title()}!\nReward: **{loot} + 500 XP**.')
-        loot=grant_game_reward(uid,xp=25*floor,rolls=1 if floor<5 else 2)
-        if floor%5==0:
-            stone=random.choice(list(self.MEGA_STONES.values()))
-            with db() as c:c.execute('INSERT INTO pv_mega_stones(user_id,stone,quantity) VALUES(?,?,1) ON CONFLICT(user_id,stone) DO UPDATE SET quantity=quantity+1',(uid,stone))
-            return await ctx.send(f'⚔️ **Floor {floor} boss defeated!** Your team average level is {int(team)}.\n🎁 You earned **{loot}**, **{25*floor} XP**, and a **Mystery Mega Stone**.')
-        if random.random()<.22:
-            egg_type=random.choice(['common','regional','rare']); req={'common':3,'regional':5,'rare':8}[egg_type]
-            with db() as c:c.execute('INSERT INTO pv_eggs(user_id,egg_type,region,required,created_at,source) VALUES(?,?,?,?,?,?)',(uid,egg_type,self._travel(uid)[0],req,int(time.time()),'dungeon'))
-            extra=f'\n🥚 You discovered a **{egg_type.title()} Egg**!'
-        else:extra=''
-        self._guild_contribute(uid,3)
-        await ctx.send(f'🧭 **Floor {floor} cleared!** You advanced to floor **{floor+1}/{maxfloors}**.\nReward: **{loot} + {25*floor} XP**.{extra}')
+                await inter.followup.send(f'⚔️ **Floor {floor} cleared!** You defeated the dungeon encounter.\nReward: {floor_loot} + {25*floor} XP.\nNext: floor **{floor+1}/{maxfloors}**.{extra}\nUse `!dungeon explore` when ready.',ephemeral=False)
+        floor_title=f'Boss Floor {floor}' if boss_floor else f'Floor {floor}'
+        return await self._start_rpg_battle(ctx,enemy_names,level,f'{key.replace("_"," " ).title()} · {floor_title}',won,allow_cooldown=False)
 
     @dungeon.command(name='leave')
     async def dungeon_leave(self,ctx):
+        active=ACTIVE_VIEWS.get(ctx.author.id)
+        if getattr(active,'trainer_mode',False) and 'Floor' in getattr(active,'trainer_label',''):
+            return await ctx.send('⚠️ Finish the current dungeon battle before leaving the run. You can leave afterward and keep earned rewards.')
         with db() as c:
             r=c.execute('SELECT dungeon,floor FROM pv_dungeon_runs WHERE user_id=?',(ctx.author.id,)).fetchone()
             if not r:return await ctx.send('You are not in a dungeon.')
@@ -10851,21 +11208,32 @@ class MMORPG(commands.Cog):
 
     @commands.group(name='guild', invoke_without_command=True)
     async def guild(self,ctx):
-        await ctx.send('🏰 **Trainer Guilds**\n`!guild create <name>` · Create a guild\n`!guild join <name>` · Join a public guild\n`!guild leave` · Leave your guild\n`!guild info` · Guild profile\n`!guild contribute <amount>` · Donate VantaCoins for guild XP\n`!guild leaderboard` · Top guilds\nExploration and dungeon progress also contribute guild XP automatically.')
+        await ctx.send('🏰 **Trainer Guilds**\n`!guild create <name>` · Found a guild for **5,000,000 VantaCoins**\n`!guild join <name>` · Join a public guild for free\n`!guild leave` · Leave your guild\n`!guild transfer @member` · Transfer leadership\n`!guild info` · Guild profile\n`!guild contribute <amount>` · Donate VantaCoins for guild XP\n`!guild missions` · Weekly shared goals\n`!guild boss challenge` · Help your guild defeat its weekly boss\n`!guild leaderboard` · Top guilds\nExploration, dungeon clears and quest claims also contribute guild XP automatically.')
 
-    @guild.command(name='create')
+    @guild.command(name='create',description='Found a guild for 5,000,000 VantaCoins.')
     async def guild_create(self,ctx,*,name:str):
         name=name.strip()
         if len(name)<3 or len(name)>32:return await ctx.send('Guild names must be 3–32 characters.')
+        fee=self.GUILD_FOUNDING_FEE
         with db() as c:
-            if c.execute('SELECT 1 FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone():return await ctx.send('You already belong to a guild. Leave it first.')
+            c.execute('BEGIN IMMEDIATE')
+            if c.execute('SELECT 1 FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone():
+                c.rollback();return await ctx.send('You already belong to a guild. Leave it first.')
+            wallet=c.execute('SELECT coins FROM players WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if not wallet or int(wallet[0])<fee:
+                balance=int(wallet[0]) if wallet else 0
+                c.rollback();return await ctx.send(f'❌ Creating a guild costs **5,000,000 VantaCoins**. Your balance: **{balance:,}**. You need **{max(0,fee-balance):,}** more.')
+            if c.execute('SELECT 1 FROM pv_guilds WHERE name=? COLLATE NOCASE',(name,)).fetchone():
+                c.rollback();return await ctx.send('That guild name is already taken. No coins were deducted.')
             try:
                 cur=c.execute('INSERT INTO pv_guilds(name,owner_id,created_at) VALUES(?,?,?)',(name,ctx.author.id,int(time.time())))
-            except sqlite3.IntegrityError:return await ctx.send('That guild name is already taken.')
-            c.execute('INSERT INTO pv_guild_members(user_id,guild_id,role,joined_at) VALUES(?,?,\'leader\',?)',(ctx.author.id,cur.lastrowid,int(time.time())))
-        await ctx.send(f'🏰 **{name}** has been founded! You are its Guild Leader.')
+                c.execute('UPDATE players SET coins=coins-? WHERE user_id=?',(fee,ctx.author.id))
+                c.execute('INSERT INTO pv_guild_members(user_id,guild_id,role,joined_at) VALUES(?,?,\'leader\',?)',(ctx.author.id,cur.lastrowid,int(time.time())))
+            except sqlite3.IntegrityError:
+                c.rollback();return await ctx.send('Guild creation failed because that name is unavailable. No coins were deducted.')
+        await ctx.send(f'🏰 **{name}** has been founded! You are its Guild Leader.\n💰 Founding fee paid: **5,000,000 VantaCoins**.')
 
-    @guild.command(name='join')
+    @guild.command(name='join',description='Join an existing public guild for free.')
     async def guild_join(self,ctx,*,name:str):
         with db() as c:
             if c.execute('SELECT 1 FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone():return await ctx.send('You already belong to a guild.')
@@ -10884,6 +11252,20 @@ class MMORPG(commands.Cog):
             c.execute('DELETE FROM pv_guild_members WHERE user_id=?',(ctx.author.id,))
             if row[1]=='leader':c.execute('DELETE FROM pv_guilds WHERE guild_id=?',(row[0],))
         await ctx.send('You left your guild.')
+
+    @guild.command(name='transfer')
+    async def guild_transfer(self,ctx,member:discord.Member):
+        if member.bot or member.id==ctx.author.id:return await ctx.send('Choose another human member of your guild.')
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            current=c.execute('SELECT guild_id,role FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+            target=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(member.id,)).fetchone()
+            if not current or current[1]!='leader':c.rollback();return await ctx.send('Only the guild leader can transfer leadership.')
+            if not target or target[0]!=current[0]:c.rollback();return await ctx.send('That member is not in your guild.')
+            c.execute("UPDATE pv_guild_members SET role='member' WHERE user_id=?",(ctx.author.id,))
+            c.execute("UPDATE pv_guild_members SET role='leader' WHERE user_id=?",(member.id,))
+            c.execute('UPDATE pv_guilds SET owner_id=? WHERE guild_id=?',(member.id,current[0]))
+        await ctx.send(f'👑 Leadership of your guild has been transferred to {member.mention}.')
 
     @guild.command(name='info')
     async def guild_info(self,ctx):
@@ -10909,6 +11291,94 @@ class MMORPG(commands.Cog):
             week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
             c.execute('INSERT INTO pv_guild_contributions(user_id,guild_id,week_key,points) VALUES(?,?,?,?) ON CONFLICT(user_id,guild_id,week_key) DO UPDATE SET points=points+excluded.points',(ctx.author.id,row[0],week,points))
         await ctx.send(f'🤝 You contributed **{amount:,} VantaCoins** and added **{points} guild XP**!')
+
+    @guild.command(name='missions')
+    async def guild_missions(self,ctx):
+        with db() as c:member=c.execute('SELECT guild_id,role FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+        if not member:return await ctx.send('Join a guild first with `!guild join <name>`.')
+        gid,role=member
+        week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+        lines=[]
+        with db() as c:
+            for key,(label,target,reward) in self.GUILD_WEEKLY_MISSIONS.items():
+                c.execute('INSERT OR IGNORE INTO pv_guild_missions(guild_id,week_key,mission_key,progress,claimed) VALUES(?,?,?,0,0)',(gid,week,key))
+                progress,claimed=c.execute('SELECT progress,claimed FROM pv_guild_missions WHERE guild_id=? AND week_key=? AND mission_key=?',(gid,week,key)).fetchone()
+                lines.append(f'**{label}** · `{key}`\nProgress: **{progress}/{target}** · Reward: **{reward:,} Guild XP** · {"Claimed ✅" if claimed else "Ready to claim" if progress>=target else "In progress"}')
+        e=discord.Embed(title='🏰 Weekly Guild Missions',description='\n\n'.join(lines),color=discord.Color.blurple())
+        e.set_footer(text='Resets every Monday at 00:00 IST. Guild Leader claims completed missions with !guild mission claim <key>.')
+        await ctx.send(embed=e)
+
+    @guild.group(name='mission',invoke_without_command=True)
+    async def guild_mission(self,ctx):
+        await ctx.send('Use `!guild missions` to view progress, then `!guild mission claim <explore|trainer|dungeon>` when a mission is complete. Only the Guild Leader can claim guild-wide rewards.')
+
+    @guild_mission.command(name='claim')
+    async def guild_mission_claim(self,ctx,mission_key:str):
+        key=mission_key.lower().strip()
+        if key not in self.GUILD_WEEKLY_MISSIONS:return await ctx.send('Choose `explore`, `trainer` or `dungeon`. Use `!guild missions` to view objectives.')
+        week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+        label,target,reward=self.GUILD_WEEKLY_MISSIONS[key]
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            member=c.execute('SELECT guild_id,role FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+            if not member:c.rollback();return await ctx.send('Join a guild first.')
+            gid,role=member
+            if role!='leader':c.rollback();return await ctx.send('Only the Guild Leader can claim a guild-wide mission reward.')
+            c.execute('INSERT OR IGNORE INTO pv_guild_missions(guild_id,week_key,mission_key,progress,claimed) VALUES(?,?,?,0,0)',(gid,week,key))
+            progress,claimed=c.execute('SELECT progress,claimed FROM pv_guild_missions WHERE guild_id=? AND week_key=? AND mission_key=?',(gid,week,key)).fetchone()
+            if claimed:c.rollback();return await ctx.send('That guild mission reward has already been claimed this week.')
+            if progress<target:c.rollback();return await ctx.send(f'⏳ **{label}** is at **{progress}/{target}**. Keep working together!')
+            c.execute('UPDATE pv_guild_missions SET claimed=1 WHERE guild_id=? AND week_key=? AND mission_key=?',(gid,week,key))
+            c.execute('UPDATE pv_guilds SET xp=xp+?,level=1+CAST((xp+?)/1000 AS INTEGER) WHERE guild_id=?',(reward,reward,gid))
+        await ctx.send(f'🏆 Your guild completed **{label}**! The guild received **{reward:,} Guild XP**.')
+
+    @guild.group(name='boss',invoke_without_command=True)
+    async def guild_boss(self,ctx):
+        with db() as c:member=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+        if not member:return await ctx.send('Join a guild first. A guild must work together to challenge its weekly boss.')
+        gid=member[0]
+        week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO pv_guild_boss_weekly(guild_id,week_key,progress,claimed) VALUES(?,?,0,0)',(gid,week))
+            progress,claimed=c.execute('SELECT progress,claimed FROM pv_guild_boss_weekly WHERE guild_id=? AND week_key=?',(gid,week)).fetchone()
+            winners=c.execute('SELECT user_id FROM pv_guild_boss_attempts WHERE guild_id=? AND week_key=? ORDER BY won_at',(gid,week)).fetchall()
+            guild_name=c.execute('SELECT name FROM pv_guilds WHERE guild_id=?',(gid,)).fetchone()[0]
+        winner_text=', '.join(f'<@{r[0]}>' for r in winners) or 'No victories yet'
+        await ctx.send(embed=discord.Embed(title=f'🐉 {guild_name} · Weekly Guild Boss',description=f'**Guild victories:** {progress}/5\n**Reward:** 3,000 Guild XP when five different members win.\n**Contributors:** {winner_text}\n\nEach member can contribute one victory per week. Use `!guild boss challenge` to fight the boss. A loss does not consume your weekly victory.',color=discord.Color.dark_purple()))
+
+    @guild_boss.command(name='challenge')
+    async def guild_boss_challenge(self,ctx):
+        with db() as c:member=c.execute('SELECT guild_id FROM pv_guild_members WHERE user_id=?',(ctx.author.id,)).fetchone()
+        if not member:return await ctx.send('Join a guild before challenging its weekly boss.')
+        gid=member[0]
+        week=datetime.now(timezone(timedelta(hours=5,minutes=30))).strftime('%G-W%V')
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO pv_guild_boss_weekly(guild_id,week_key,progress,claimed) VALUES(?,?,0,0)',(gid,week))
+            if c.execute('SELECT 1 FROM pv_guild_boss_attempts WHERE guild_id=? AND week_key=? AND user_id=?',(gid,week,ctx.author.id)).fetchone():return await ctx.send('✅ You have already contributed a victory to your guild boss this week. Check `!guild boss` for the guild progress.')
+            progress=c.execute('SELECT progress FROM pv_guild_boss_weekly WHERE guild_id=? AND week_key=?',(gid,week)).fetchone()[0]
+        if progress>=5:return await ctx.send('🏆 Your guild has already defeated this week’s boss! Come back after the weekly reset.')
+        lead=await owned_lead(ctx.author.id)
+        level=max(15,min(300,(lead[4] if lead else 10)+10))
+        async def won(inter):
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                c.execute('INSERT OR IGNORE INTO pv_guild_boss_attempts(guild_id,week_key,user_id,won_at) VALUES(?,?,?,?)',(gid,week,ctx.author.id,int(time.time())))
+                if c.execute('SELECT changes()').fetchone()[0]:
+                    c.execute('UPDATE pv_guild_boss_weekly SET progress=MIN(5,progress+1) WHERE guild_id=? AND week_key=?',(gid,week))
+                progress_now,claimed=c.execute('SELECT progress,claimed FROM pv_guild_boss_weekly WHERE guild_id=? AND week_key=?',(gid,week)).fetchone()
+                guild_reward=False
+                if progress_now>=5 and not claimed:
+                    c.execute('UPDATE pv_guild_boss_weekly SET claimed=1 WHERE guild_id=? AND week_key=?',(gid,week))
+                    c.execute('UPDATE pv_guilds SET xp=xp+3000,level=1+CAST((xp+3000)/1000 AS INTEGER) WHERE guild_id=?',(gid,))
+                    guild_reward=True
+            add_progress(ctx.author.id,coins=2000,xp=0)
+            trainer_level,_=self._grant_trainer_xp(ctx.author.id,200)
+            if guild_reward:
+                note='\n🏆 Your guild has defeated the weekly boss! **+3,000 Guild XP** awarded.'
+            else:
+                note=f'\nGuild boss progress: **{progress_now}/5** unique member victories.'
+            await inter.followup.send(f'🐉 **Guild boss victory!** You earned **2,000 VantaCoins** and **200 Trainer XP** (Trainer Lv.{trainer_level}).{note}',ephemeral=False)
+        return await self._start_rpg_battle(ctx,['dragonite','tyranitar','metagross'],level,'Guild Boss · Ancient Trio',won)
 
     @guild.command(name='leaderboard')
     async def guild_leaderboard(self,ctx):
