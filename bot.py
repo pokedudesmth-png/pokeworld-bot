@@ -611,9 +611,18 @@ def get_player(uid):
     ensure_player(uid)
     with db() as c: return c.execute('SELECT coins,xp,level,daily,daily_streak FROM players WHERE user_id=?',(uid,)).fetchone()
 def add_progress(uid,coins=0,xp=0):
-    coins0,xp0,level,daily,*_=get_player(uid); xp0+=xp
-    while xp0>=level*100: xp0-=level*100; level+=1
-    with db() as c: c.execute('UPDATE players SET coins=?,xp=?,level=? WHERE user_id=?',(coins0+coins,xp0,level,uid))
+    """Atomically add VantaCoins/XP without losing concurrent rewards."""
+    coins=int(coins); xp=int(xp)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT OR IGNORE INTO players(user_id) VALUES(?)',(uid,))
+        row=c.execute('SELECT coins,xp,level FROM players WHERE user_id=?',(uid,)).fetchone()
+        coins0,xp0,level=(int(row[0] or 0),int(row[1] or 0),max(1,int(row[2] or 1)))
+        xp0+=xp
+        while xp0>=level*100:
+            xp0-=level*100
+            level+=1
+        c.execute('UPDATE players SET coins=?,xp=?,level=? WHERE user_id=?',(coins0+coins,xp0,level,uid))
     return level
 
 GAMEPLAY_REWARD_ITEMS = (
@@ -2407,11 +2416,22 @@ class NPCBattleView(TimedView):
             await self.perform_switch(self.party[i], interaction=inter)
         return f
     async def perform_switch(self,target,interaction=None):
-        if target[0]==self.row[0] or target[8]<=0:
+        if target[0]==self.row[0]:
             if interaction and not interaction.response.is_done():
                 return await interaction.response.send_message('Choose a different, healthy teammate.',ephemeral=True)
             return
-        with db() as c:c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=?',(self.player_hp,self.player_status,self.row[0]))
+        # Party rows are snapshots. Re-read the selected teammate after saving the
+        # outgoing Pokémon so switching back later cannot restore stale full HP.
+        with db() as c:
+            c.execute('UPDATE pokemon SET hp=?,status_condition=? WHERE instance_id=? AND user_id=?',
+                      (self.player_hp,self.player_status,self.row[0],self.uid))
+            fresh_target=c.execute('SELECT * FROM pokemon WHERE instance_id=? AND user_id=?',
+                                   (target[0],self.uid)).fetchone()
+        if not fresh_target or fresh_target[8]<=0:
+            if interaction and not interaction.response.is_done():
+                return await interaction.response.send_message('That teammate is no longer available or has fainted. Choose another healthy Pokémon.',ephemeral=True)
+            return
+        target=fresh_target
         self.energy_by_pokemon[self.row[0]]=self.energy
         self.row=target; self.player_hp=target[8]; self.player_status=(target[11] or '') if len(target)>11 else ''
         self.energy=self.energy_by_pokemon.get(target[0],0); self.moves=await saved_battle_moves(target)
@@ -3252,7 +3272,7 @@ class HuntChoiceView(discord.ui.View):
 
 
 class Game(commands.Cog):
-    def __init__(self,bot):self.bot=bot;self.challenges={};self.coin_bets={};self.active_boss_battles=set()
+    def __init__(self,bot):self.bot=bot;self.challenges={};self.coin_bets={};self.active_boss_battles=set();self.active_npc_battle_starts=set()
 
     @commands.hybrid_command(name='boosterperks', aliases=['boostperks', 'serverboostperks'], description='View the rewards for boosting this server.')
     async def booster_perks(self, ctx):
@@ -3370,18 +3390,20 @@ class Game(commands.Cog):
         view = ACTIVE_VIEWS.get(uid)
         raid_battle_active = isinstance(view, NPCBattleView) and bool(getattr(view, 'raid', False))
         legendary_battle_active = (uid in self.active_boss_battles and isinstance(view, NPCBattleView) and bool(getattr(view, 'boss', False)) and not bool(getattr(view, 'raid', False)))
-        hunt_active = hunt_active or (isinstance(view, NPCBattleView) and not getattr(view, 'boss', False) and not getattr(view, 'raid', False))
+        npc_battle_active = isinstance(view, NPCBattleView) and not getattr(view, 'boss', False) and not getattr(view, 'raid', False)
+        pvp_battle_active = isinstance(view, PvPBattle) or (view is not None and not isinstance(view, (HuntChoiceView, NPCBattleView)))
+        hunt_active = hunt_active or npc_battle_active
         raid_active = raid_encounter_exists or raid_battle_active
         legendary_active = legendary_active or legendary_battle_active
 
-        if is_hunt and (legendary_active or raid_active):
-            await ctx.send('⚠️ You cannot start a hunt while a legendary battle or raid is active. Finish that encounter first.')
+        if is_hunt and (legendary_active or raid_active or pvp_battle_active):
+            await ctx.send('⚠️ You cannot start a hunt while a legendary battle, raid or PvP battle is active. Finish that activity first.')
             return False
-        if is_legendary and (hunt_active or raid_active):
-            await ctx.send('⚠️ You cannot start a legendary battle while a hunt or raid is active. Finish that encounter first.')
+        if is_legendary and (hunt_active or raid_active or pvp_battle_active):
+            await ctx.send('⚠️ You cannot start a legendary battle while a hunt, raid or PvP battle is active. Finish that activity first.')
             return False
-        if is_raid_battle and (hunt_active or legendary_active):
-            await ctx.send('⚠️ You cannot start a raid battle while a hunt or legendary battle is active. Finish that encounter first.')
+        if is_raid_battle and (hunt_active or legendary_active or pvp_battle_active):
+            await ctx.send('⚠️ You cannot start a raid battle while a hunt, legendary battle or PvP battle is active. Finish that activity first.')
             return False
 
         # IMPORTANT: An active encounter must not lock ordinary commands.
@@ -3391,7 +3413,10 @@ class Game(commands.Cog):
         if is_hunt and hunt_active:
             await ctx.send('⚠️ You already have an active hunt. Finish it or use `!cancel` first.')
             return False
-        if is_legendary and legendary_active:
+        # A pending boss_encounters row is the setup state for a Legendary battle:
+        # players must be able to use !add to build the 3-Pokémon boss party and
+        # then invoke !lbattle. Block only when the actual battle view is running.
+        if is_legendary and legendary_battle_active:
             await ctx.send('⚠️ You already have an active legendary battle. Finish it or use `!cancel` first.')
             return False
         if is_raid_battle and raid_battle_active:
@@ -3623,29 +3648,46 @@ class Game(commands.Cog):
     @fish.command(name='sell', aliases=['sellall'])
     async def fish_sell(self, ctx, quantity: str = 'all'):
         uid = ctx.author.id
-        with db() as c:
-            rows = c.execute('SELECT fish_key,fish_name,sell_value,amount FROM pv_fish_inventory WHERE user_id=? AND amount>0 ORDER BY sell_value ASC', (uid,)).fetchall()
-            total_fish = sum(row[3] for row in rows)
-            if total_fish <= 0:
-                return await ctx.send('🧺 Your fish basket is empty. Use `!fish` to catch something first.')
-            if quantity.lower() == 'all':
-                to_sell = total_fish
-            else:
-                try: to_sell = int(quantity)
-                except ValueError: return await ctx.send('Usage: `!fish sell all` or `!fish sell <quantity>`.')
-                if to_sell <= 0: return await ctx.send('Please choose a quantity greater than zero.')
-                if to_sell > total_fish: return await ctx.send(f'You only have **{total_fish}** fish in your basket.')
-            remaining = to_sell
-            earned = 0
-            sold = []
-            for fish_key, fish_name, sell_value, amount in rows:
-                if remaining <= 0: break
-                take = min(amount, remaining)
-                c.execute('UPDATE pv_fish_inventory SET amount=amount-? WHERE user_id=? AND fish_key=?', (take, uid, fish_key))
-                remaining -= take
-                earned += take * sell_value
-                sold.append(f'{fish_name} ×{take}')
-        add_progress(uid, coins=earned)
+        try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                rows = c.execute('SELECT fish_key,fish_name,sell_value,amount FROM pv_fish_inventory WHERE user_id=? AND amount>0 ORDER BY sell_value ASC', (uid,)).fetchall()
+                total_fish = sum(row[3] for row in rows)
+                if total_fish <= 0:
+                    error = '🧺 Your fish basket is empty. Use `!fish` to catch something first.'
+                else:
+                    error = None
+                    if quantity.lower() == 'all':
+                        to_sell = total_fish
+                    else:
+                        try: to_sell = int(quantity)
+                        except ValueError:
+                            to_sell = 0
+                            error = 'Usage: `!fish sell all` or `!fish sell <quantity>`.'
+                        if error is None and to_sell <= 0:
+                            error = 'Please choose a quantity greater than zero.'
+                        if error is None and to_sell > total_fish:
+                            error = f'You only have **{total_fish}** fish in your basket.'
+                    if error is None:
+                        remaining = to_sell
+                        earned = 0
+                        sold = []
+                        for fish_key, fish_name, sell_value, amount in rows:
+                            if remaining <= 0: break
+                            take = min(amount, remaining)
+                            cur = c.execute('UPDATE pv_fish_inventory SET amount=amount-? WHERE user_id=? AND fish_key=? AND amount>=?', (take, uid, fish_key, take))
+                            if cur.rowcount != 1:
+                                raise sqlite3.IntegrityError('Fish inventory changed during sale; retry the command.')
+                            remaining -= take
+                            earned += take * sell_value
+                            sold.append(f'{fish_name} ×{take}')
+                        c.execute('INSERT OR IGNORE INTO players(user_id) VALUES(?)', (uid,))
+                        c.execute('UPDATE players SET coins=coins+? WHERE user_id=?', (earned, uid))
+        except sqlite3.Error as exc:
+            print(f'Fish sale failed for user {uid}: {exc!r}')
+            return await ctx.send('❌ Your fish sale could not be completed. No fish or coins were changed; please try again.')
+        if error:
+            return await ctx.send(error)
         description = f"You sold **{to_sell}** fish for **{earned:,} {get_vantacoin_emoji()} VantaCoins**.\n\n" + ', '.join(sold[:8]) + (' …' if len(sold)>8 else '')
         e = discord.Embed(title='💰 Fish sold!', description=description, color=discord.Color.green())
         await ctx.send(embed=e)
@@ -3679,19 +3721,29 @@ class Game(commands.Cog):
                 return await ctx.send('⚠️ Pokémon data did not include a valid Pokédex ID. Your fish is still in your Fish Basket; please try again shortly.')
         try:
             with db() as c:
+                c.execute('BEGIN IMMEDIATE')
                 owned_count, storage_capacity = pokemon_storage_status(c, uid)
                 if owned_count >= storage_capacity:
-                    return await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity) + '\nYour fish remains in your Fish Basket.')
-                row = c.execute('SELECT amount FROM pv_fish_inventory WHERE user_id=? AND fish_key=?', (uid, fish_key)).fetchone()
-                if not row or row[0] < 1:
-                    return await ctx.send(f'🧺 You do not have **{fish_name}** in your Fish Basket.')
-                # Reserve the fish and create the box Pokémon in the same transaction.
-                c.execute('UPDATE pv_fish_inventory SET amount=amount-1 WHERE user_id=? AND fish_key=? AND amount>0', (uid, fish_key))
-                if c.total_changes == 0:
-                    return await ctx.send('🧺 That catch is no longer available in your basket.')
-                c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,xp,shiny,hp,max_hp,held_item,status_condition) VALUES(?,?,?,?,?,?,?,?,?,?)', (uid, dex_id, fish_name.lower(), 5, 0, 0, 20, 20, '', ''))
-                instance_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
-                existing = assign_box_id(c, uid, instance_id)
+                    transfer_error = pokemon_storage_full_message(owned_count, storage_capacity) + '\nYour fish remains in your Fish Basket.'
+                    c.rollback()
+                else:
+                    row = c.execute('SELECT amount FROM pv_fish_inventory WHERE user_id=? AND fish_key=?', (uid, fish_key)).fetchone()
+                    if not row or row[0] < 1:
+                        transfer_error = f'🧺 You do not have **{fish_name}** in your Fish Basket.'
+                        c.rollback()
+                    else:
+                        # Reserve the fish and create the box Pokémon in the same transaction.
+                        cur = c.execute('UPDATE pv_fish_inventory SET amount=amount-1 WHERE user_id=? AND fish_key=? AND amount>0', (uid, fish_key))
+                        if cur.rowcount != 1:
+                            transfer_error = '🧺 That catch is no longer available in your basket.'
+                            c.rollback()
+                        else:
+                            transfer_error = None
+                            c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,xp,shiny,hp,max_hp,held_item,status_condition) VALUES(?,?,?,?,?,?,?,?,?,?)', (uid, dex_id, fish_name.lower(), 5, 0, 0, 20, 20, '', ''))
+                            instance_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+                            existing = assign_box_id(c, uid, instance_id)
+            if transfer_error:
+                return await ctx.send(transfer_error)
         except sqlite3.Error as exc:
             return await ctx.send(f'❌ Database issue while transferring your catch. Your fish should remain safe; please try again. (`{type(exc).__name__}`)')
         e = discord.Embed(title='📦 Pokémon Transferred to Your Box!', description=f'**{fish_name}** ({rarity}) has left your Fish Basket and joined your Pokémon collection as a normal Pokémon.\n\n**Box ID:** `{existing}` · **Level:** 5\nUse `!box` to view it and `!team` to manage your team.', color=discord.Color.from_rgb(126, 82, 220))
@@ -3888,31 +3940,50 @@ class Game(commands.Cog):
         if all(r[8]<=0 for r in party):return await ctx.send('💤 All three Pokémon have fainted. Use a potion with `!useitem Potion <pokemon_id>` .')
         remaining = pv_battle_cooldown_remaining(uid, 'legendary')
         if remaining: return await ctx.send(f'⏳ Legendary battle cooldown: wait **{remaining}s** before starting another legendary battle.')
-        pv_start_battle_cooldown(uid, 'legendary')
         lead=next((r for r in party if r[8]>0),party[0])
         # Scale boss level to the strongest of all three selected Pokémon, not the active lead.
         boss_level=min(300, max(r[4] for r in party)+random.randint(18,25))
         with db() as c:c.execute('UPDATE boss_encounters SET level=? WHERE user_id=?',(boss_level,uid))
-        d=await pokemon_data(boss[0]);d['_level']=boss_level
+        try:
+            d=await pokemon_data(boss[0]);d['_level']=boss_level
+        except Exception as exc:
+            print(f'[LEGENDARY START] Boss data lookup failed for user={uid}: {exc!r}')
+            return await ctx.send('⚠️ I could not load the Legendary boss right now. Your encounter and selected team are safe; try `!lbattle` again shortly.')
+        with db() as c:
+            encounter_still_exists=bool(c.execute('SELECT 1 FROM boss_encounters WHERE user_id=?',(uid,)).fetchone())
+        if not encounter_still_exists:
+            return await ctx.send('🛑 Your Legendary encounter was cancelled while the battle was loading.')
         self.active_boss_battles.add(uid)
         v=NPCBattleView(uid,lead,d,boss=True,boss_shiny=bool(boss[3]),active_boss_battles=self.active_boss_battles)
         try:
             await v.build()
-        except Exception:
-            self.active_boss_battles.discard(uid)
-            raise
-        e=discord.Embed(title='🔥 LEGENDARY BOSS — 3 VS 1',description=f'**Boss:** {display_name(d)} Lv. **{boss_level}**\nHP {hp_bar(max_hp(d,boss_level),max_hp(d,boss_level))}\nStatus: **Healthy**\n**Your squad:**\n'+'\n'.join(f'• **{r[3].title()}** Lv.{r[4]}\n  HP {hp_bar(r[8],r[9])}\n  Status: **{status_label(r[11] or "")}**' for r in party)+'\n\nChoose a move using the move buttons below. If a Pokémon faints, only the Switch button remains; select a healthy teammate to continue. Boss level is 18–25 levels above your highest-level teammate. Shiny status and odds were determined when this boss appeared.')
-        e.color=discord.Color.dark_red()
-        try: boss_art=await radiant_sprite_file(d)
+            e=discord.Embed(title='🔥 LEGENDARY BOSS — 3 VS 1',description=f'**Boss:** {display_name(d)} Lv. **{boss_level}**\nHP {hp_bar(max_hp(d,boss_level),max_hp(d,boss_level))}\nStatus: **Healthy**\n**Your squad:**\n'+'\n'.join(f'• **{r[3].title()}** Lv.{r[4]}\n  HP {hp_bar(r[8],r[9])}\n  Status: **{status_label(r[11] or "")}**' for r in party)+'\n\nChoose a move using the move buttons below. If a Pokémon faints, only the Switch button remains; select a healthy teammate to continue. Boss level is 18–25 levels above your highest-level teammate. Shiny status and odds were determined when this boss appeared.')
+            e.color=discord.Color.dark_red()
+            try: boss_art=await radiant_sprite_file(d)
+            except Exception as exc:
+                print(f'RADIANTDEX legendary boss artwork failed: {exc!r}')
+                boss_art=None
+            if boss_art: e.set_image(url=f'attachment://{boss_art.filename}')
+            else:
+                art=sprite(d,shiny=bool(boss[3]))
+                if art:e.set_image(url=art)
+            if uid not in self.active_boss_battles:
+                v.stop()
+                return await ctx.send('🛑 Your Legendary battle was cancelled while it was being prepared.')
+            v.message=await ctx.send(embed=e,view=v,file=boss_art) if boss_art else await ctx.send(embed=e,view=v)
+            if uid not in self.active_boss_battles:
+                try: await v.message.edit(content='🛑 Legendary battle cancelled.',embed=None,view=None)
+                except Exception: pass
+                v.stop()
+                return
+            ACTIVE_VIEWS[uid]=v
+            # Start the cooldown only after Discord successfully receives the battle.
+            pv_start_battle_cooldown(uid, 'legendary')
         except Exception as exc:
-            print(f'RADIANTDEX legendary boss artwork failed: {exc!r}')
-            boss_art=None
-        if boss_art: e.set_image(url=f'attachment://{boss_art.filename}')
-        else:
-            art=sprite(d,shiny=bool(boss[3]))
-            if art:e.set_image(url=art)
-        v.message=await ctx.send(embed=e,view=v,file=boss_art) if boss_art else await ctx.send(embed=e,view=v)
-        ACTIVE_VIEWS[uid]=v
+            self.active_boss_battles.discard(uid)
+            ACTIVE_VIEWS.pop(uid,None)
+            print(f'[LEGENDARY START] Could not start battle for user={uid}: {exc!r}')
+            return await ctx.send('⚠️ I could not post the Legendary battle controls. Your encounter and selected team are still saved; try `!lbattle` again shortly.')
 
     @commands.command(name='hint',aliases=['i','clue'],description='Get one of two hints for your current wild Pokémon.')
     async def hint(self,ctx):
@@ -4091,22 +4162,26 @@ class Game(commands.Cog):
         if ctx.guild:
             active = getattr(self.bot, 'active_match_announces', {})
             state = active.get(ctx.guild.id)
-            if state:
-                extensions = self.bot.get_cog('CarlStyleExtensions')
-                if not extensions or not await extensions.require_dev(ctx):
-                    return
+            # Only a member with Manage Server may cancel the server-wide
+            # announcement. Other users must still be able to cancel their own
+            # Pokémon battle/trade/encounter while an announcement is scheduled.
+            can_manage_match = bool(ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild)
+            if state and can_manage_match:
                 task = state.get('task')
                 if task and task is not asyncio.current_task():
                     task.cancel()
                     return await ctx.send('🛑 Match setup/schedule cancelled.')
-                return await ctx.send('ℹ️ There is no cancellable match task running right now.')
         trade = ACTIVE_TRADES.get(TRADE_BY_USER.get(ctx.author.id))
         if trade:
             await end_trade(trade, f'🚫 Trade cancelled by <@{ctx.author.id}>. No Pokémon or VantaCoins were transferred.')
             return
         uid=ctx.author.id; changes=[]
-        hunt_view=ACTIVE_VIEWS.pop(uid,None)
+        # Inspect first; leave non-hunt battle views registered until the shared
+        # cleanup block below can retrieve and stop them. Popping here used to
+        # make the later NPC/PvP/Legendary cancellation handler see None.
+        hunt_view=ACTIVE_VIEWS.get(uid)
         if isinstance(hunt_view,HuntChoiceView):
+            ACTIVE_VIEWS.pop(uid,None)
             hunt_view.claimed=True
             hunt_view.stop()
             if hunt_view.message:
@@ -4121,9 +4196,14 @@ class Game(commands.Cog):
                 c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 1) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+1",(uid,))
                 changes.append('raid (Raid Pass refunded)')
             c.execute('DELETE FROM raid_party WHERE user_id=?',(uid,))
+        self.active_boss_battles.discard(uid)
         partner=self.challenges.pop(uid,None)
         if partner is not None:
-            self.challenges.pop(partner,None); changes.append('challenge')
+            self.challenges.pop(partner,None)
+            # Both participants reference the same invitation view; remove the
+            # partner's registry entry too so RPG commands are not falsely locked.
+            ACTIVE_VIEWS.pop(partner,None)
+            changes.append('challenge')
         view=ACTIVE_VIEWS.pop(uid,None)
         if view:
             try:
@@ -4134,6 +4214,7 @@ class Game(commands.Cog):
                 elif getattr(view,'message',None):
                     if hasattr(view,'active_boss_battles') and view.active_boss_battles is not None:view.active_boss_battles.discard(uid)
                     await view.message.edit(content=f'🛑 Battle cancelled by <@{uid}>.',embed=None,view=None)
+                    if isinstance(view, discord.ui.View): view.stop()
                 else:view.stop()
                 changes.append('battle/menu')
             except Exception: pass
@@ -5020,6 +5101,8 @@ class Game(commands.Cog):
             if not inv or inv[0]<1:return await ctx.send(f'❌ You do not have a {SHOP_ITEMS[pid][1]}. Buy one with `!shop buy {item}`.')
         fast=pid==52; pool=await move_pool(row[2],fast=fast)
         if pid==54: pool=await move_pool(row[2],fast=False)
+        if not pool:
+            return await ctx.send('⚠️ No compatible moves were returned for this Pokémon. Your TM was not consumed; please try again later.')
         if chosen_move:
             target=chosen_move.lower().replace(' ','-')
             selected=next((m for m in pool if m['name'].lower()==target),None)
@@ -5027,23 +5110,45 @@ class Game(commands.Cog):
         else:selected=random.choice(pool)
         column='fast_move' if fast else 'charged_move'
         with db() as c:
-            c.execute('UPDATE pokemon SET '+column+'=? WHERE instance_id=?',(selected['name'],pokemon_id))
+            c.execute('BEGIN IMMEDIATE')
+            current=c.execute('SELECT amount FROM inventory WHERE user_id=? AND item=?',(ctx.author.id,item)).fetchone()
+            owned=c.execute('SELECT 1 FROM pokemon WHERE instance_id=? AND user_id=?',(pokemon_id,ctx.author.id)).fetchone()
+            if not owned:
+                c.rollback()
+                return await ctx.send('❌ That Pokémon is no longer in your box. Your TM was not consumed.')
+            if not current or current[0]<1:
+                c.rollback()
+                return await ctx.send(f'❌ You no longer have a {SHOP_ITEMS[pid][1]}. Your TM was not consumed.')
+            c.execute('UPDATE pokemon SET '+column+'=? WHERE instance_id=? AND user_id=?',(selected['name'],pokemon_id,ctx.author.id))
             c.execute('UPDATE inventory SET amount=amount-1 WHERE user_id=? AND item=?',(ctx.author.id,item))
             c.execute('DELETE FROM inventory WHERE user_id=? AND item=? AND amount<=0',(ctx.author.id,item))
         return await ctx.send(f'✅ **{row[3].title()}** learned **{selected["name"].replace("-"," ").title()}** using {SHOP_ITEMS[pid][1]}.')
     @commands.command(name='battle',aliases=['fight','b'],description='Battle an NPC with move buttons; NPC battles have their own 60-second cooldown.')
     async def battle(self,ctx):
-        if isinstance(ACTIVE_VIEWS.get(ctx.author.id), (NPCBattleView, PvPBattle)):
-            return await ctx.send('⚠️ You already have an active battle. Finish it or use `!cancel` first.')
+        if ACTIVE_VIEWS.get(ctx.author.id) is not None or ctx.author.id in self.active_npc_battle_starts:
+            return await ctx.send('⚠️ You already have an active or starting battle. Finish it or use `!cancel` first.')
+        with db() as c:
+            pending=c.execute('SELECT 1 FROM encounters WHERE user_id=? UNION SELECT 1 FROM boss_encounters WHERE user_id=? UNION SELECT 1 FROM raid_encounters WHERE user_id=?',(ctx.author.id,ctx.author.id,ctx.author.id)).fetchone()
+        if pending:
+            return await ctx.send('⚠️ Resolve your active hunt, Legendary encounter or raid first. Use `!catch`, `!lbattle` or `!raid battle` as appropriate.')
         row=await owned_lead(ctx.author.id)
         if not row:return await ctx.send('❌ Catch a Pokémon and put it in your team with `!setteam ID 1`.')
         if row[8]<=0:return await ctx.send('❌ Your lead is fainted. Use `!useitem Potion <pokemon_id>` .')
         remaining = pv_battle_cooldown_remaining(ctx.author.id, 'npc')
         if remaining: return await ctx.send(f'⏳ NPC battle cooldown: wait **{remaining}s** before starting another NPC battle.')
-        pv_start_battle_cooldown(ctx.author.id, 'npc')
-        status_message = await ctx.send('⚔️ Preparing your battle… loading Pokémon and moves.')
-        enemy=await random_pokemon(); low=max(3,min(50,row[4]-2)); high=max(low,min(50,row[4]+3)); enemy['_level']=random.randint(low,high);v=NPCBattleView(ctx.author.id,row,enemy);await v.build();own_data=await pokemon_data(row[2])
-        e=discord.Embed(title=f'⚔️ Pokémon Battle Arena — {row[3].title()} vs {display_name(enemy)}',description=f'''🔴 **Your Pokémon:** {row[3].title()} Lv. {row[4]}
+        self.active_npc_battle_starts.add(ctx.author.id)
+        try:
+            status_message = await ctx.send('⚔️ Preparing your battle… loading Pokémon and moves.')
+        except Exception:
+            self.active_npc_battle_starts.discard(ctx.author.id)
+            raise
+        try:
+            enemy=await random_pokemon()
+            low=max(3,min(50,row[4]-2)); high=max(low,min(50,row[4]+3)); enemy['_level']=random.randint(low,high)
+            v=NPCBattleView(ctx.author.id,row,enemy)
+            await v.build()
+            own_data=await pokemon_data(row[2])
+            e=discord.Embed(title=f'⚔️ Pokémon Battle Arena — {row[3].title()} vs {display_name(enemy)}',description=f'''🔴 **Your Pokémon:** {row[3].title()} Lv. {row[4]}
 HP {hp_bar(row[8],row[9])}
 
 🔵 **Opponent:** {display_name(enemy)} Lv. {enemy['_level']}
@@ -5051,27 +5156,44 @@ HP {hp_bar(v.enemy_hp,max_hp(enemy,enemy['_level']))}
 Type: **{type_text(enemy)}**
 
 Click **Choose Move**. Your move options are private, just like trainer challenges.''')
-        e.color=discord.Color.red()
-        battle_art_files=[]
-        try:
-            own_art=await radiant_sprite_file(own_data, require_archive=False)
-            e.set_thumbnail(url=f'attachment://{own_art.filename}')
-            battle_art_files.append(own_art)
+            e.color=discord.Color.red()
+            battle_art_files=[]
+            try:
+                own_art=await radiant_sprite_file(own_data, require_archive=False)
+                e.set_thumbnail(url=f'attachment://{own_art.filename}')
+                battle_art_files.append(own_art)
+            except Exception as exc:
+                print(f'RADIANTDEX NPC player artwork failed: {exc!r}')
+            try:
+                enemy_art=await radiant_sprite_file(enemy, require_archive=False)
+                e.set_image(url=f'attachment://{enemy_art.filename}')
+                battle_art_files.append(enemy_art)
+            except Exception as exc:
+                print(f'RADIANTDEX NPC opponent artwork failed: {exc!r}')
+            v.message=status_message
+            await status_message.edit(content=None, embed=e, view=v, attachments=battle_art_files)
+            ACTIVE_VIEWS[ctx.author.id]=v
+            pv_start_battle_cooldown(ctx.author.id, 'npc')
         except Exception as exc:
-            print(f'RADIANTDEX NPC player artwork failed: {exc!r}')
-        try:
-            enemy_art=await radiant_sprite_file(enemy, require_archive=False)
-            e.set_image(url=f'attachment://{enemy_art.filename}')
-            battle_art_files.append(enemy_art)
-        except Exception as exc:
-            print(f'RADIANTDEX NPC opponent artwork failed: {exc!r}')
-        v.message=status_message
-        await status_message.edit(content=None, embed=e, view=v, attachments=battle_art_files)
-        ACTIVE_VIEWS[ctx.author.id]=v
+            ACTIVE_VIEWS.pop(ctx.author.id,None)
+            print(f'[NPC BATTLE START] Could not start battle for user={ctx.author.id}: {exc!r}')
+            try:
+                await status_message.edit(content='⚠️ I could not prepare your battle. No cooldown was consumed; please try again shortly.',embed=None,view=None,attachments=[])
+            except Exception:
+                pass
+        finally:
+            self.active_npc_battle_starts.discard(ctx.author.id)
     @commands.command(name='challenge',aliases=['pvp','duel','chall'],description='Challenge another trainer to a PvP battle; PvP battles have their own 60-second cooldown.')
     async def challenge(self,ctx,opponent:discord.Member):
         if opponent.bot or opponent.id==ctx.author.id:return await ctx.send('❌ Choose another human trainer.')
         if opponent.id in self.challenges or ctx.author.id in self.challenges:return await ctx.send('❌ One of you is already in a challenge.')
+        if ACTIVE_VIEWS.get(ctx.author.id) is not None or ACTIVE_VIEWS.get(opponent.id) is not None:
+            return await ctx.send('⚠️ Both trainers must finish their current battle or encounter before starting PvP.')
+        with db() as c:
+            pending=c.execute('SELECT 1 FROM encounters WHERE user_id=? UNION SELECT 1 FROM boss_encounters WHERE user_id=? UNION SELECT 1 FROM raid_encounters WHERE user_id=?',(ctx.author.id,ctx.author.id,ctx.author.id)).fetchone()
+            opponent_pending=c.execute('SELECT 1 FROM encounters WHERE user_id=? UNION SELECT 1 FROM boss_encounters WHERE user_id=? UNION SELECT 1 FROM raid_encounters WHERE user_id=?',(opponent.id,opponent.id,opponent.id)).fetchone()
+        if pending or opponent_pending:
+            return await ctx.send('⚠️ Both trainers must resolve any active hunt, Legendary encounter or raid before starting PvP.')
         ra,rb=await owned_lead(ctx.author.id),await owned_lead(opponent.id)
         if not ra or not rb:return await ctx.send('❌ Both trainers need a Pokémon in team slot 1.')
         if ra[8]<=0 or rb[8]<=0:return await ctx.send('❌ Both lead Pokémon must have HP.')
@@ -5094,13 +5216,13 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 ACTIVE_VIEWS.pop(ctx.author.id,None); ACTIVE_VIEWS.pop(opponent.id,None)
                 wait = max(rem_a, rem_b)
                 return await ctx.send(f'⏳ One trainer is on battle cooldown. Wait **{wait}s** before starting this battle.')
-            pv_start_battle_cooldown(ctx.author.id, 'pvp'); pv_start_battle_cooldown(opponent.id, 'pvp')
             p=PvPBattle(ctx.author.id,opponent.id,ra,rb)
             try:
                 await p.setup()
                 pv=p.view()
                 p.message=i.message;pv.message=i.message
                 await i.edit_original_response(content=None,embed=await p.make_embed(),attachments=getattr(p,'radiant_art_files',[]),view=pv)
+                pv_start_battle_cooldown(ctx.author.id, 'pvp'); pv_start_battle_cooldown(opponent.id, 'pvp')
                 ACTIVE_VIEWS[ctx.author.id]=p;ACTIVE_VIEWS[opponent.id]=p
             except Exception as exc:
                 print(f'PvP challenge acceptance failed: {exc!r}')
@@ -5614,9 +5736,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 if existed:
                     c.execute("INSERT INTO inventory(user_id,item,amount) VALUES(?, 'raid-pass', 1) ON CONFLICT(user_id,item) DO UPDATE SET amount=amount+1",(uid,))
             if not existed:return await ctx.send('ℹ️ You do not have an active raid to cancel.')
+            # Also clear the in-flight marker when !raid battle is still loading
+            # and has not registered its message/view yet.
+            if self.active_boss_battles is not None:self.active_boss_battles.discard(uid)
             view=ACTIVE_VIEWS.pop(uid,None)
             if view and getattr(view,'raid',False):
-                if self.active_boss_battles is not None:self.active_boss_battles.discard(uid)
                 try:
                     if view.message: await view.message.edit(content='🛑 Raid cancelled. Your Raid Pass has been refunded.',embed=None,view=None)
                 except Exception: pass
@@ -5631,8 +5755,10 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             remaining = pv_battle_cooldown_remaining(uid, 'raid')
             if remaining: return await ctx.send(f'⏳ Raid cooldown: wait **{remaining}s** before starting another raid battle.')
             existing_view=ACTIVE_VIEWS.get(uid)
-            if isinstance(existing_view,NPCBattleView) and getattr(existing_view,'raid',False):
-                return await ctx.send('⚠️ Your raid battle is already running. Use its move buttons to continue.')
+            if uid in self.active_boss_battles:
+                if isinstance(existing_view,NPCBattleView) and getattr(existing_view,'raid',False):
+                    return await ctx.send('⚠️ Your raid battle is already running. Use its move buttons to continue.')
+                return await ctx.send('⚠️ You already have a Legendary or raid battle starting/in progress. Finish it before starting another battle.')
             level=max(r[4] for r in party)+100
             try:
                 d=await pokemon_data(boss[0])
@@ -5640,7 +5766,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             except Exception as exc:
                 print(f'[RAID START] Pokémon data lookup failed for user={uid}: {exc!r}')
                 return await ctx.send('⚠️ I could not load the raid boss right now. Your Raid Pass and team are safe—try `!raid battle` again shortly.')
-            with db() as c:c.execute('UPDATE raid_encounters SET level=? WHERE user_id=?',(level,uid))
+            with db() as c:
+                encounter_still_exists=bool(c.execute('SELECT 1 FROM raid_encounters WHERE user_id=?',(uid,)).fetchone())
+                if encounter_still_exists:c.execute('UPDATE raid_encounters SET level=? WHERE user_id=?',(level,uid))
+            if not encounter_still_exists:
+                return await ctx.send('🛑 Your raid was cancelled while the boss was loading.')
             lead=next((r for r in party if r[8]>0),party[0])
             view=NPCBattleView(uid,lead,d,boss=False,boss_shiny=True,active_boss_battles=self.active_boss_battles,raid=True)
             if self.active_boss_battles is not None:self.active_boss_battles.add(uid)
@@ -5662,6 +5792,11 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
                 if art:em.set_image(url=art)
             try:
                 view.message=await ctx.send(embed=em,view=view,file=raid_art) if raid_art else await ctx.send(embed=em,view=view)
+                if self.active_boss_battles is not None and uid not in self.active_boss_battles:
+                    try: await view.message.edit(content='🛑 Raid cancelled.',embed=None,view=None)
+                    except Exception: pass
+                    view.stop()
+                    return
             except Exception as exc:
                 if self.active_boss_battles is not None:self.active_boss_battles.discard(uid)
                 print(f'[RAID START] Could not send battle message for user={uid}: {exc!r}')
@@ -5670,6 +5805,9 @@ Click **Choose Move**. Your move options are private, just like trainer challeng
             pv_start_battle_cooldown(uid, 'raid')
             return
         if action=='spawn':
+            active_view=ACTIVE_VIEWS.get(uid)
+            if active_view is not None or uid in self.active_boss_battles:
+                return await ctx.send('⚠️ Finish your current battle or encounter before spawning a raid.')
             with db() as c:
                 # Serialize simultaneous spawn attempts so a single Raid Pass
                 # cannot create multiple overlapping raids.
@@ -10336,6 +10474,7 @@ class MMORPG(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.active_rpg_starts = set()
 
     def _day_key(self):
         return datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d')
@@ -10429,7 +10568,7 @@ class MMORPG(commands.Cog):
     async def _start_rpg_battle(self, ctx, opponent_names, opponent_level, title, on_win, *, allow_cooldown=True):
         uid=ctx.author.id
         active=ACTIVE_VIEWS.get(uid)
-        if active is not None:
+        if active is not None or uid in self.active_rpg_starts:
             return await ctx.send('⚠️ Finish your current battle or encounter before starting an RPG challenge.')
         with db() as c:
             if c.execute('SELECT 1 FROM encounters WHERE user_id=? UNION SELECT 1 FROM boss_encounters WHERE user_id=? UNION SELECT 1 FROM raid_encounters WHERE user_id=?',(uid,uid,uid)).fetchone():
@@ -10440,43 +10579,48 @@ class MMORPG(commands.Cog):
         if allow_cooldown:
             remaining=self._rpg_cooldown_remaining(uid)
             if remaining:return await ctx.send(f'⏳ RPG battle cooldown: wait **{remaining}s** before another challenge.')
-        status=await ctx.send(f'⚔️ Preparing **{title}**… loading the opposing team.')
-        enemies=[]
+        self.active_rpg_starts.add(uid)
         try:
-            for species in opponent_names:
-                enemy=await pokemon_data(species)
-                enemy['_level']=max(1,min(300,int(opponent_level)))
-                enemies.append(enemy)
-        except Exception as exc:
-            print(f'[RPG OPPONENT LOAD ERROR] {title}: {exc!r}')
-            return await status.edit(content='⚠️ The Pokémon data service could not load this opponent. No battle was started; try again shortly.')
-        view=NPCBattleView(uid,party[0],enemies[0])
-        view.trainer_mode=True
-        view.trainer_label=title
-        view.trainer_team=enemies
-        view.trainer_index=0
-        view.trainer_complete_callback=on_win
-        view.trainer_rewards_done=False
-        view.party=list(party)
-        await view.build()
-        own_data=await pokemon_data(party[0][2])
-        e=discord.Embed(title=f'⚔️ {title}',description=(f'**Your team:** {len(party)} healthy Pokémon\n'
-            f'**Lead:** {party[0][3].title()} Lv.{party[0][4]} · HP {hp_bar(party[0][8],party[0][9])}\n\n'
-            f'**Opponent:** {display_name(enemies[0])} Lv.{enemies[0]["_level"]}\n'
-            f'**Opposing team:** {len(enemies)} Pokémon\nHP {hp_bar(view.enemy_hp,view.enemy_max_hp)}\n\n'
-            'Choose a move using the buttons. Switch Pokémon when your active Pokémon needs help.'),color=discord.Color.red())
-        art=[]
-        try:
-            own_art=await radiant_sprite_file(own_data,require_archive=False);e.set_thumbnail(url=f'attachment://{own_art.filename}');art.append(own_art)
-        except Exception as exc: print(f'[RPG PLAYER ART] {exc!r}')
-        try:
-            enemy_art=await radiant_sprite_file(enemies[0],require_archive=False);e.set_image(url=f'attachment://{enemy_art.filename}');art.append(enemy_art)
-        except Exception as exc: print(f'[RPG ENEMY ART] {exc!r}')
-        view.message=status
-        await status.edit(content=None,embed=e,view=view,attachments=art)
-        ACTIVE_VIEWS[uid]=view
-        self._rpg_start_cooldown(uid)
-        return view
+            status=await ctx.send(f'⚔️ Preparing **{title}**… loading the opposing team.')
+            enemies=[]
+            try:
+                for species in opponent_names:
+                    enemy=await pokemon_data(species)
+                    enemy['_level']=max(1,min(300,int(opponent_level)))
+                    enemies.append(enemy)
+            except Exception as exc:
+                print(f'[RPG OPPONENT LOAD ERROR] {title}: {exc!r}')
+                return await status.edit(content='⚠️ The Pokémon data service could not load this opponent. No battle was started; try again shortly.')
+            view=NPCBattleView(uid,party[0],enemies[0])
+            view.trainer_mode=True
+            view.trainer_label=title
+            view.trainer_team=enemies
+            view.trainer_index=0
+            view.trainer_complete_callback=on_win
+            view.trainer_rewards_done=False
+            view.party=list(party)
+            await view.build()
+            own_data=await pokemon_data(party[0][2])
+            e=discord.Embed(title=f'⚔️ {title}',description=(f'**Your team:** {len(party)} healthy Pokémon\n'
+                f'**Lead:** {party[0][3].title()} Lv.{party[0][4]} · HP {hp_bar(party[0][8],party[0][9])}\n\n'
+                f'**Opponent:** {display_name(enemies[0])} Lv.{enemies[0]["_level"]}\n'
+                f'**Opposing team:** {len(enemies)} Pokémon\nHP {hp_bar(view.enemy_hp,view.enemy_max_hp)}\n\n'
+                'Choose a move using the buttons. Switch Pokémon when your active Pokémon needs help.'),color=discord.Color.red())
+            art=[]
+            try:
+                own_art=await radiant_sprite_file(own_data,require_archive=False);e.set_thumbnail(url=f'attachment://{own_art.filename}');art.append(own_art)
+            except Exception as exc: print(f'[RPG PLAYER ART] {exc!r}')
+            try:
+                enemy_art=await radiant_sprite_file(enemies[0],require_archive=False);e.set_image(url=f'attachment://{enemy_art.filename}');art.append(enemy_art)
+            except Exception as exc: print(f'[RPG ENEMY ART] {exc!r}')
+            view.message=status
+            await status.edit(content=None,embed=e,view=view,attachments=art)
+            ACTIVE_VIEWS[uid]=view
+            self._rpg_start_cooldown(uid)
+            return view
+
+        finally:
+            self.active_rpg_starts.discard(uid)
 
     @commands.command(name='rpg', aliases=['mmorpg','adventurehelp'], description='Show the complete MMORPG adventure guide.')
     async def rpg_guide(self,ctx):
@@ -11015,6 +11159,9 @@ class MMORPG(commands.Cog):
     async def dungeon_enter(self,ctx,*,name:str):
         uid=ctx.author.id
         if ACTIVE_VIEWS.get(uid):return await ctx.send('⚠️ Finish your current battle or encounter before entering a dungeon.')
+        with db() as c:
+            pending=c.execute('SELECT 1 FROM encounters WHERE user_id=? UNION SELECT 1 FROM boss_encounters WHERE user_id=? UNION SELECT 1 FROM raid_encounters WHERE user_id=?',(uid,uid,uid)).fetchone()
+        if pending:return await ctx.send('⚠️ Resolve your active hunt, Legendary encounter or raid before entering a dungeon.')
         key=name.lower().strip().replace(' ','_')
         aliases={'verdant':'verdant_labyrinth','verdant_labyrinth':'verdant_labyrinth','ember':'ember_mountain','ember_mountain':'ember_mountain','abyssal':'abyssal_rift','abyssal_rift':'abyssal_rift','temporal':'temporal_tower','temporal_tower':'temporal_tower'}
         key=aliases.get(key)
