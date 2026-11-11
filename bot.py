@@ -338,6 +338,15 @@ def setup():
         if 'held_item' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN held_item TEXT DEFAULT ""')
         if 'status_condition' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN status_condition TEXT DEFAULT ""')
         if 'radiant' not in pcols: c.execute('ALTER TABLE pokemon ADD COLUMN radiant INTEGER NOT NULL DEFAULT 0')
+        for iv_col in ('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed'):
+            if iv_col not in pcols:
+                c.execute(f'ALTER TABLE pokemon ADD COLUMN {iv_col} INTEGER NOT NULL DEFAULT -1')
+        # New global-spawn IV columns are nullable for compatibility with existing spawns.
+        global_cols=[r[1] for r in c.execute('PRAGMA table_info(global_encounter)').fetchall()]
+        for iv_col in ('iv_hp','iv_attack','iv_defense','iv_sp_attack','iv_sp_defense','iv_speed'):
+            if iv_col not in global_cols:
+                c.execute(f'ALTER TABLE global_encounter ADD COLUMN {iv_col} INTEGER')
+
         # Radiant Dex IDs are permanent species IDs: R0001 is Bulbasaur, R0025 is Pikachu, etc.
         # Move legacy sequential IDs out of the way first to avoid UNIQUE/PRIMARY KEY collisions.
         c.execute('UPDATE radiant_pokedex_entries SET radiant_dex_id=radiant_dex_id+1000000')
@@ -3062,6 +3071,127 @@ class DexView(TimedView):
         await interaction.response.edit_message(embed=embed,attachments=[artwork] if artwork else [],view=self)
 
 
+
+# Interactive wild encounters: cooldowns are applied only after a completed catch
+# or a wrong choice. The view claims synchronously before awaiting, so simultaneous
+# button presses cannot award the same encounter twice.
+HUNT_COOLDOWNS = {}
+HUNT_COOLDOWN_SECONDS = 5
+
+
+class HuntChoiceView(discord.ui.View):
+    def __init__(self, cog, *, owner_id, dex_id, answer, options, global_spawn=False):
+        super().__init__(timeout=30)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.dex_id = int(dex_id)
+        self.answer = str(answer).lower()
+        self.global_spawn = bool(global_spawn)
+        self.claimed = False
+        self.message = None
+        for option in options[:4]:
+            button = discord.ui.Button(
+                label=str(option).replace('-', ' ').title()[:80],
+                style=discord.ButtonStyle.primary,
+                custom_id=f"hunt:{self.dex_id}:{len(self.children)}"
+            )
+            button.callback = self._make_callback(str(option).lower())
+            self.add_item(button)
+
+    async def interaction_check(self, interaction):
+        if not self.global_spawn and interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "These Pokémon choices belong to the trainer who started this hunt.",
+                ephemeral=True
+            )
+            return False
+        remaining = HUNT_COOLDOWNS.get(interaction.user.id, 0) - time.monotonic()
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"⏳ Wait **{remaining:.1f}s** before trying another catch.",
+                ephemeral=True
+            )
+            return False
+        if self.claimed:
+            await interaction.response.send_message(
+                "This encounter has already been claimed or escaped.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    def _make_callback(self, selected):
+        async def callback(interaction):
+            # No await before this assignment: the first interaction wins the race.
+            if self.claimed:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("This encounter is already resolved.", ephemeral=True)
+                return
+            self.claimed = True
+            for child in self.children:
+                child.disabled = True
+            if selected != self.answer:
+                HUNT_COOLDOWNS[interaction.user.id] = time.monotonic() + HUNT_COOLDOWN_SECONDS
+                with db() as conn:
+                    if self.global_spawn:
+                        conn.execute("DELETE FROM global_encounter WHERE id=1 AND dex_id=?", (self.dex_id,))
+                    else:
+                        conn.execute("DELETE FROM encounters WHERE user_id=? AND dex_id=?", (self.owner_id, self.dex_id))
+                await interaction.response.edit_message(
+                    content="💨 **Wrong choice!** The Pokémon escaped. Try `!hunt` again in 5 seconds.",
+                    embed=None, view=None, attachments=[]
+                )
+                self.stop()
+                ACTIVE_VIEWS.pop(self.owner_id, None)
+                return
+
+            HUNT_COOLDOWNS[interaction.user.id] = time.monotonic() + HUNT_COOLDOWN_SECONDS
+            await interaction.response.defer()
+            if self.message:
+                try:
+                    await self.message.edit(view=None)
+                except Exception:
+                    pass
+
+            class InteractionContext:
+                def __init__(self, inter, is_global):
+                    self.author = inter.user
+                    self.guild = inter.guild
+                    self.channel = inter.channel
+                    self.button_catch = True
+                    self.button_global = is_global
+                async def send(self, *args, **kwargs):
+                    return await interaction.followup.send(*args, **kwargs)
+
+            fake_ctx = InteractionContext(interaction, self.global_spawn)
+            try:
+                await self.cog.catch.callback(self.cog, fake_ctx, name=selected)
+            except Exception as exc:
+                print(f"Button catch failed for user {interaction.user.id}: {exc!r}")
+                await interaction.followup.send("⚠️ Catch processing failed. Please contact a developer.")
+            self.stop()
+            ACTIVE_VIEWS.pop(self.owner_id, None)
+        return callback
+
+    async def on_timeout(self):
+        if not self.claimed:
+            self.claimed = True
+            with db() as conn:
+                if self.global_spawn:
+                    conn.execute("DELETE FROM global_encounter WHERE id=1 AND dex_id=?", (self.dex_id,))
+                else:
+                    conn.execute("DELETE FROM encounters WHERE user_id=? AND dex_id=?", (self.owner_id, self.dex_id))
+            if self.message:
+                try:
+                    await self.message.edit(
+                        content="⌛ **The Pokémon got away!** The 30-second choices have expired. Use `!hunt` to search again.",
+                        embed=None, view=None, attachments=[]
+                    )
+                except Exception:
+                    pass
+            ACTIVE_VIEWS.pop(self.owner_id, None)
+
+
 class Game(commands.Cog):
     def __init__(self,bot):self.bot=bot;self.challenges={};self.coin_bets={};self.active_boss_battles=set()
 
@@ -3134,7 +3264,7 @@ class Game(commands.Cog):
         if name not in {'gameoff', 'gameon', 'maintenance'} and root_name not in {'gameoff', 'gameon', 'maintenance'} and GAMEPLAY_MAINTENANCE_ENABLED:
             maintenance_gameplay = {
                 'start', 'hunt', 'hint', 'catch', 'cancel', 'legendarybattle', 'battle', 'challenge',
-                'shinyhunt', 'setteam', 'select', 'team', 'usetm', 'raid', 'candy', 'candyquests',
+                'setteam', 'select', 'team', 'usetm', 'raid', 'candy', 'candyquests',
                 'fish', 'shop', 'market', 'giveitem', 'takeitem', 'useitem', 'inventory', 'daily',
                 'bet', 'trade', 'tradeadd', 'traderemove', 'tradeconfirm', 'tradeaccept',
                 'pokemonadd', 'addboss', 'removeboss', 'pokedex', 'dex', 'box', 'info', 'moves',
@@ -3150,7 +3280,7 @@ class Game(commands.Cog):
         gameplay_commands = {
             'hunt','h','search','hint','i','clue','catch','c','guess','cancel','stop','quit',
             'fix','repair','legendarybattle','lbattle','lgbattle','bossfight','battle','fight','b',
-            'challenge','pvp','duel','chall','shinyhunt','spawnshiny','shinyspawn','setteam','teamset','slotteam',
+            'challenge','pvp','duel','chall','setteam','teamset','slotteam',
             'select','s','sel','team','myteam','tm','usetm','tmuse','shop','market','store','giveitem','equip','holditem',
             'takeitem','unequip','removehelditem','useitem','use','itemuse','inventory','inv','bag','raid','candy',
             'daily','d','claim','fish','fish inventory','fish sell','balance','bal','money','bet','trade','tradeadd','ta','traderemove','tr','tradeconfirm',
@@ -3508,60 +3638,68 @@ class Game(commands.Cog):
         e.set_footer(text='PokéVanta Fishing • Fish are converted one at a time')
         await ctx.send(embed=e)
 
-    @commands.command(name='hunt',aliases=['h','search'],description='Find a wild Pokémon; 1/4096 chance of a Radiant variant. Every 25th successful catch unlocks a legendary boss.')
-    @commands.cooldown(1, 7, commands.BucketType.user)
+    @commands.command(name='hunt',aliases=['h','search'],description='Find a wild Pokémon and catch it by choosing from four buttons.')
     async def hunt(self,ctx):
+        uid=ctx.author.id
+        remaining=HUNT_COOLDOWNS.get(uid,0)-time.monotonic()
+        if remaining>0:
+            return await ctx.send(f'⏳ Catch cooldown: wait **{remaining:.1f}s** before hunting again.')
         try:
-            uid=ctx.author.id
             with db() as c:
-                # Never overwrite an encounter: the current Pokémon/boss must be resolved first.
-                wild=c.execute('SELECT 1 FROM encounters WHERE user_id=?',(uid,)).fetchone()
+                wild=c.execute('SELECT dex_id,name FROM encounters WHERE user_id=?',(uid,)).fetchone()
                 active=c.execute('SELECT 1 FROM boss_encounters WHERE user_id=?',(uid,)).fetchone()
                 if wild:
-                    return await ctx.send('⚠️ You already have a wild Pokémon waiting! Catch it with `!catch <name>` before using `!hunt` again.')
+                    return await ctx.send('⚠️ You already have a Pokémon waiting. Choose one of its four buttons or use `!cancel`.')
                 if active:
                     return await ctx.send('⚠️ You already have an active legendary boss! Defeat it with `!legendarybattle` before hunting again.')
                 c.execute('INSERT OR IGNORE INTO hunt_counts(user_id,count) VALUES(?,0)',(uid,))
                 count=c.execute('SELECT count FROM hunt_counts WHERE user_id=?',(uid,)).fetchone()[0]
-            # Starting a hunt does not advance catch progress. Only a successful catch does.
-            d=await random_pokemon(); radiant=(random.randint(1,4096)==1); shiny=(not radiant and random.random()<1/2048); lvl=random.randint(3,20)
-            with db() as c:c.execute('INSERT OR REPLACE INTO encounters(user_id,dex_id,name,shiny,level,hints_used,radiant) VALUES(?,?,?,?,?,0,?)',(uid,d['id'],d['name'],int(shiny),lvl,int(radiant)))
+
+            d=await random_pokemon()
+            radiant=(random.randint(1,4096)==1)
+            shiny=(not radiant and random.random()<1/2048)
+            lvl=random.randint(3,20)
+            with db() as c:
+                c.execute('INSERT OR REPLACE INTO encounters(user_id,dex_id,name,shiny,level,hints_used,radiant) VALUES(?,?,?,?,?,0,?)',
+                          (uid,d['id'],d['name'],int(shiny),lvl,int(radiant)))
+
+            # Four distinct species; exactly one is the encountered Pokémon.
+            pool=[p.get('name') for p in POKEMON_LIST if p.get('name') and p.get('name') != d['name']]
+            distractors=random.sample(pool,min(3,len(pool)))
+            options=[d['name']]+distractors
+            random.shuffle(options)
+            view=HuntChoiceView(self,owner_id=uid,dex_id=d['id'],answer=d['name'],options=options)
             pv_record_activity(uid,'hunt',1,getattr(ctx.guild,'id',None))
-            e=discord.Embed(title='🌿 A wild Pokémon appeared!',description=f'**Catch progress:** {count}/50 • **Level:** {lvl}\n**Type:** ???\n\n👀 Look at the picture and guess the Pokémon!\nUse `!hint` for up to 2 missing-letter hints and `!catch <name>` to catch it. Every 25 successful catches unlocks a legendary boss; boss shiny odds are **1/1000**, improved to **1/250** on every 50th successful catch!\n\n{RADIANT_EMOJI} **Radiant odds:** 1/4096 per hunt.')
+
+            title='🌿 A wild Pokémon appeared!'
+            description=(f'**Catch progress:** {count}/50 • **Level:** {lvl}\n'
+                         'Choose the correct Pokémon name below before it escapes!\n'
+                         '⏱️ You have **30 seconds**. A wrong choice makes it escape.\n'
+                         f'{RADIANT_EMOJI} **Radiant odds:** 1/4096 per hunt.')
+            e=discord.Embed(title=title,description=description,color=discord.Color.green())
             if radiant:
                 e.title=f'{RADIANT_EMOJI} A RADIANT Pokémon appeared!'
-                e.description=f'{RADIANT_EMOJI} **INCREDIBLY RARE RADIANT ENCOUNTER!**\n'+e.description
-                e.color=discord.Color.from_rgb(80, 235, 220)
+                e.description=f'{RADIANT_EMOJI} **INCREDIBLY RARE RADIANT ENCOUNTER!**\n'+description
+                e.color=discord.Color.from_rgb(80,235,220)
+                e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
             elif shiny:
-                e.description='✨ **A rare shiny Pokémon appeared!**\n'+e.description
+                e.description='✨ **A rare shiny Pokémon appeared!**\n'+description
                 e.color=discord.Color.gold()
-            if radiant:e.set_footer(text='RADIANT VARIANT • 1 in 4,096 hunt chance • Distinct from Shiny')
-            # Only an actual 1-in-4096 Radiant encounter may use the purple
-            # RadiantDex artwork. Normal and Shiny encounters use their own
-            # standard PokéAPI artwork and must never look Radiant.
+
+            attachment=None
             if radiant:
-                try:
-                    radiant_file = await radiant_sprite_file(d, require_archive=True)
-                except Exception as exc:
-                    print(f'RADIANTDEX hunt artwork failed for {d.get("name", "unknown")}: {exc!r}')
-                    radiant_file = None
-                if radiant_file:
-                    e.set_image(url=f'attachment://{radiant_file.filename}')
-                    await ctx.reply(embed=e, file=radiant_file, mention_author=False)
-                else:
-                    # Keep the rare encounter valid even if its special artwork
-                    # archive is missing; the embed title still identifies it.
-                    art = sprite(d)
-                    if art:
-                        e.set_image(url=art)
-                    e.set_footer(text='RadiantDex artwork unavailable; this is still a genuine Radiant encounter.')
-                    await ctx.reply(embed=e, mention_author=False)
+                try: attachment=await radiant_sprite_file(d,require_archive=True)
+                except Exception as exc: print(f'RADIANTDEX hunt artwork failed for {d.get("name","unknown")}: {exc!r}')
+            if attachment:
+                e.set_image(url=f'attachment://{attachment.filename}')
+                view.message=await ctx.reply(embed=e,file=attachment,view=view,mention_author=False)
             else:
-                art = sprite(d, shiny=shiny)
-                if art:
-                    e.set_image(url=art)
-                await ctx.reply(embed=e, mention_author=False)
-        except Exception as e:await ctx.send(f'❌ Hunt error: `{e}`')
+                art=sprite(d,shiny=shiny)
+                if art:e.set_image(url=art)
+                view.message=await ctx.reply(embed=e,view=view,mention_author=False)
+            ACTIVE_VIEWS[uid]=view
+        except Exception as exc:
+            await ctx.send(f'❌ Hunt error: `{exc}`')
 
     @commands.command(name='add',aliases=['addboss','bossadd'])
     async def add_boss_pokemon(self,ctx,*pokemon_ids:int):
@@ -3754,6 +3892,9 @@ class Game(commands.Cog):
     @commands.command(name='catch',aliases=['c','guess'],description='Guess and automatically catch a wild Pokémon.')
     async def catch(self,ctx,*,name:str):
         uid=ctx.author.id
+        remaining=HUNT_COOLDOWNS.get(uid,0)-time.monotonic()
+        if remaining>0 and not getattr(ctx,'button_catch',False):
+            return await ctx.send(f'⏳ Catch cooldown: wait **{remaining:.1f}s**.')
         def norm(value):
             return re.sub(r'[^a-z0-9]', '', value.lower().replace('♀','f').replace('♂','m'))
         guess=norm(name)
@@ -3762,7 +3903,7 @@ class Game(commands.Cog):
         # claim atomic, so only the first correct user can receive this Pokémon.
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            global_enc=c.execute('SELECT dex_id,name,shiny,level FROM global_encounter WHERE id=1').fetchone()
+            global_enc=None if (getattr(ctx,'button_catch',False) and not getattr(ctx,'button_global',False)) else c.execute('SELECT dex_id,name,shiny,level,iv_hp,iv_attack,iv_defense,iv_sp_attack,iv_sp_defense,iv_speed FROM global_encounter WHERE id=1').fetchone()
             if global_enc:
                 if guess != norm(global_enc[1]) and guess != str(global_enc[0]):
                     c.commit()
@@ -3770,7 +3911,7 @@ class Game(commands.Cog):
                 # Remove it while holding the write lock so no second user can claim it.
                 c.execute('DELETE FROM global_encounter WHERE id=1')
                 c.commit()
-                enc=(global_enc[0],global_enc[1],global_enc[2],global_enc[3],0,0)
+                enc=(global_enc[0],global_enc[1],global_enc[2],global_enc[3],0,0,*global_enc[4:10])
                 is_global=True
             else:
                 c.commit()
@@ -3792,7 +3933,8 @@ class Game(commands.Cog):
             owned_count, storage_capacity = pokemon_storage_status(c, uid)
             if not rare_variant and owned_count >= storage_capacity:
                 return await ctx.send(pokemon_storage_full_message(owned_count, storage_capacity) + '\nYour wild encounter has been kept. Catch it after making room.')
-            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant) VALUES(?,?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh,int(radiant))); iid=cur.lastrowid
+            ivs=tuple(enc[6:12]) if len(enc)>=12 and all(v is not None for v in enc[6:12]) else tuple(random.randint(0,31) for _ in range(6))
+            cur=c.execute('INSERT INTO pokemon(user_id,dex_id,name,level,shiny,hp,max_hp,radiant,iv_hp,iv_attack,iv_defense,iv_sp_attack,iv_sp_defense,iv_speed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(uid,d['id'],d['name'],enc[3],enc[2],mh,mh,int(radiant),*ivs)); iid=cur.lastrowid
             stored_row=c.execute('SELECT unclaimed FROM pokemon WHERE instance_id=? AND user_id=?',(iid,uid)).fetchone()
             stored=bool(stored_row)
             is_unclaimed=bool(stored_row and stored_row[0])
@@ -3805,6 +3947,14 @@ class Game(commands.Cog):
                 c.execute('INSERT OR REPLACE INTO team(user_id,slot,instance_id) VALUES(?,?,?)',(uid,1,iid))
             if not is_global:
                 c.execute('DELETE FROM encounters WHERE user_id=?',(uid,))
+        HUNT_COOLDOWNS[uid]=time.monotonic()+HUNT_COOLDOWN_SECONDS
+        active_hunt_view=ACTIVE_VIEWS.pop(uid,None)
+        if isinstance(active_hunt_view,HuntChoiceView):
+            active_hunt_view.claimed=True
+            active_hunt_view.stop()
+            if active_hunt_view.message:
+                try: await active_hunt_view.message.edit(view=None)
+                except Exception: pass
         pv_record_activity(uid,'catch',1,getattr(ctx.guild,'id',None))
         pv_candy_quest_progress(uid, 'catch')
         if bool(enc[2]):
@@ -3818,6 +3968,9 @@ class Game(commands.Cog):
         booster_active = is_server_booster(ctx.author) if ctx.guild else False
         catch_coin_reward = 50
         add_progress(uid,coins=catch_coin_reward,xp=25)
+        if is_global:
+            change_item(uid,'rare-candy',5)
+            change_item(uid,'elite-charged-tm',1)
         if bool(enc[2]) and ctx.guild:
             await log_rare_shiny_event(ctx.guild, ctx.author, display_name(d), action='caught', level=enc[3], image_url=sprite(d, shiny=True))
         boss_unlocked=False
@@ -3843,6 +3996,8 @@ class Game(commands.Cog):
         else:
             storage_note=f' ID: `{box_id}`'
         response=f'🎉 {ctx.author.mention} caught {variant}{display_name(d)}!{note}{storage_note}' + (f' • Radiant Dex ID: `R{radiant_dex_id:04d}`' if radiant_dex_id else '') + '\n💰 Reward: **+'+str(catch_coin_reward)+' coins**' + ' • ⭐ **+25 XP**.'
+        if is_global:
+            response += '\n🎁 Server-wide reward: **5 Rare Candies + 1 Elite Charged TM**.'
         if not is_global:
             response+=f'\n📈 Catch progress: **{catch_progress}/50**.'
         if boss_unlocked:
@@ -3886,6 +4041,14 @@ class Game(commands.Cog):
             await end_trade(trade, f'🚫 Trade cancelled by <@{ctx.author.id}>. No Pokémon or VantaCoins were transferred.')
             return
         uid=ctx.author.id; changes=[]
+        hunt_view=ACTIVE_VIEWS.pop(uid,None)
+        if isinstance(hunt_view,HuntChoiceView):
+            hunt_view.claimed=True
+            hunt_view.stop()
+            if hunt_view.message:
+                try: await hunt_view.message.edit(content='🛑 Hunt cancelled. Use `!hunt` when ready.',embed=None,view=None)
+                except Exception: pass
+            changes.append('wild hunt buttons')
         with db() as c:
             if c.execute('DELETE FROM encounters WHERE user_id=?',(uid,)).rowcount: changes.append('wild hunt')
             if c.execute('DELETE FROM boss_encounters WHERE user_id=?',(uid,)).rowcount: changes.append('boss encounter')
@@ -3955,7 +4118,7 @@ class Game(commands.Cog):
     async def help_command(self, ctx, *, category: str = None):
         """Show one general help embed, or one embed for a selected category."""
         developer_only = {
-            'add', 'remove', 'pokemonadd', 'shinyhunt', 'pass', 'banbot', 'unbanbot',
+            'add', 'remove', 'pokemonadd', 'mufasa', 'pass', 'banbot', 'unbanbot',
             'ban', 'unban', 'coinsadd', 'removecoins', 'removepokemon',
             'setupitememojis', 'setupvantacoin', 'tagset', 'tagdelete', 'ccset',
             'ccdelete', 'eventimage', 'eventtoken', 'eventitem', 'gamelogs'
@@ -3974,7 +4137,7 @@ class Game(commands.Cog):
             'mute': 'Moderation', 'unmute': 'Moderation', 'kick': 'Moderation', 'clear': 'Moderation', 'slowmode': 'Moderation', 'lock': 'Moderation', 'unlock': 'Moderation', 'warn': 'Moderation', 'warnings': 'Moderation', 'clearwarnings': 'Moderation', 'removewarn': 'Moderation', 'role': 'Moderation', 'dump': 'Moderation',
             'ping': 'Utilities',
             'setwelcome': 'Server Setup', 'setgoodbye': 'Server Setup', 'setlog': 'Server Setup', 'setautorole': 'Server Setup', 'setstarboard': 'Server Setup', 'rradd': 'Server Setup', 'rrremove': 'Server Setup', 'automodword': 'Server Setup', 'automodwords': 'Server Setup', 'setnick': 'Server Setup', 'roleadd': 'Server Setup', 'roleremove': 'Server Setup', 'rolecreate': 'Server Setup', 'roledelete': 'Server Setup', 'announce': 'Server Setup',
-            'banbot': 'Developer Controls', 'unbanbot': 'Developer Controls', 'ban': 'Developer Controls', 'unban': 'Developer Controls', 'coinsadd': 'Developer Controls', 'removecoins': 'Developer Controls', 'removepokemon': 'Developer Controls', 'pokemonadd': 'Developer Controls', 'shinyhunt': 'Developer Controls', 'pass': 'Developer Controls', 'eventimage': 'Developer Controls', 'eventtoken': 'Developer Controls', 'eventitem': 'Developer Controls', 'gamelogs': 'Developer Controls', 'devhelp': 'Developer Controls', 'setupitememojis': 'Developer Setup', 'setupvantacoin': 'Developer Setup'
+            'banbot': 'Developer Controls', 'unbanbot': 'Developer Controls', 'ban': 'Developer Controls', 'unban': 'Developer Controls', 'coinsadd': 'Developer Controls', 'removecoins': 'Developer Controls', 'removepokemon': 'Developer Controls', 'pokemonadd': 'Developer Controls', 'mufasa': 'Developer Controls', 'pass': 'Developer Controls', 'eventimage': 'Developer Controls', 'eventtoken': 'Developer Controls', 'eventitem': 'Developer Controls', 'gamelogs': 'Developer Controls', 'devhelp': 'Developer Controls', 'setupitememojis': 'Developer Setup', 'setupvantacoin': 'Developer Setup'
         }
         category_aliases = {
             'box': 'Box & Pokédex', 'dex': 'Box & Pokédex', 'pokedex': 'Box & Pokédex', 'pokemon': 'Box & Pokédex',
@@ -4655,44 +4818,67 @@ class Game(commands.Cog):
             return f'Removed {RADIANT_EMOJI} **{row[1].title()}** Lv. {row[2]} (ID `{pokemon_id}`) from {member.mention}.'
         await self.dev_confirmation(ctx, 'Confirm Radiant Pokémon removal', f'Remove {RADIANT_EMOJI} **{row[1].title()}** (ID `{pokemon_id}`) from {member.mention}?', action)
 
-    @commands.command(name='shinyhunt', aliases=['spawnshiny','shinyspawn'])
-    async def shinyhunt(self, ctx, *, pokemon_name: str = None):
-        """Owner-only: spawn a random shiny, or specify one; first correct server guess wins."""
+
+    @commands.command(name='mufasa')
+    async def mufasa(self,ctx,*,arguments:str=None):
+        """Developer: spawn a server-wide shiny. Syntax: !mufasa <pokemon name> <IV percentage> <level>; no args = random shiny."""
         if not self.is_dev(ctx):
-            return await ctx.send('🔒 Developer access denied. Configure your Discord user ID in OWNER_IDS / DISCORD_OWNER_IDS, then restart the bot.')
+            return await ctx.send('🔒 `!mufasa` is restricted to configured developers.')
+        if not POKEMON_LIST:
+            return await ctx.send('Pokémon data is still loading. Try again shortly.')
 
-        # No name supplied = choose a random Pokémon. A name supplied = spawn that one.
-        if pokemon_name and pokemon_name.strip():
-            lookup=pokemon_name.strip().lower().replace(' ', '-').removeprefix('shiny-')
-            try:
-                d=await pokemon_data(lookup)
-            except Exception:
-                return await ctx.send('❌ Pokémon not found. Use `!shinyhunt` for a random shiny or `!shinyhunt eternatus` for a specific one.')
+        def percentage_to_ivs(percent):
+            # Existing battle/storage uses six 0–31 stat IVs. Convert the requested
+            # overall percentage into an exact total out of 186, then distribute it.
+            total=max(0,min(186,round(float(percent)*186/100)))
+            values=[0]*6
+            for _ in range(total):
+                choices=[i for i,v in enumerate(values) if v<31]
+                values[random.choice(choices)]+=1
+            return values
+
+        if not arguments:
+            d=await random_pokemon()
+            ivs=[random.randint(0,31) for _ in range(6)]
+            iv_percent=sum(ivs)/186*100
+            level=random.randint(1,100)
         else:
+            parts=arguments.rsplit(maxsplit=2)
+            if len(parts)!=3:
+                return await ctx.send('Usage: `!mufasa <pokemon name> <IV percentage> <level>`\nExample: `!mufasa pikachu 87% 50`')
+            pokemon_name,raw_percent,raw_level=parts
             try:
-                d=await random_pokemon()
-            except Exception as e:
-                return await ctx.send(f'❌ Could not choose a random Pokémon: `{e}`')
+                iv_percent=float(raw_percent.strip().removesuffix('%'))
+                level=int(raw_level)
+                if not 0<=iv_percent<=100 or not 1<=level<=100: raise ValueError
+                ivs=percentage_to_ivs(iv_percent)
+            except ValueError:
+                return await ctx.send('❌ IV percentage must be from 0% to 100%, and level must be 1–100.')
+            try: d=await pokemon_data(pokemon_name.strip().lower().replace(' ','-'))
+            except Exception: return await ctx.send('❌ Pokémon not found. Example: `!mufasa pikachu 87% 50`.')
 
-        lvl=random.randint(3,20)
         with db() as c:
             existing=c.execute('SELECT name FROM global_encounter WHERE id=1').fetchone()
             if existing:
-                return await ctx.send(f'⚠️ A server-wide shiny (**{existing[0].title()}**) is already active. Let someone catch it first!')
-            c.execute('INSERT INTO global_encounter(id,dex_id,name,shiny,level,spawned_by) VALUES(1,?,?,1,?,?)', (d['id'],d['name'],lvl,ctx.author.id))
-        embed=discord.Embed(title='✨ A SERVER-WIDE SHINY Pokémon appeared!', description=f'**A wild shiny appeared!**\n**Level:** {lvl}\n**Type:** ???\n\nLook at the artwork and guess its name with `!catch <pokemon name>`.\n💰 First correct guess wins **5 Rare Candies and 1 Elite Charged TM**. Only one user can catch it!')
-        try:
-            radiant_file=await radiant_sprite_file(d)
-        except Exception as exc:
-            print(f'RADIANTDEX shinyhunt artwork failed: {exc!r}')
-            radiant_file=None
-        if radiant_file:
-            embed.set_image(url=f'attachment://{radiant_file.filename}')
-            await ctx.send(embed=embed,file=radiant_file)
-        else:
-            art=sprite(d,shiny=True)
-            if art: embed.set_image(url=art)
-            await ctx.send(embed=embed)
+                return await ctx.send(f'⚠️ A server-wide encounter (**{existing[0].title()}**) is already active.')
+            c.execute(
+                'INSERT INTO global_encounter(id,dex_id,name,shiny,level,spawned_by,iv_hp,iv_attack,iv_defense,iv_sp_attack,iv_sp_defense,iv_speed) VALUES(1,?,?,1,?,?,?,?,?,?,?,?)',
+                (d['id'],d['name'],level,ctx.author.id,*ivs)
+            )
+        options=[d['name']]
+        pool=[p.get('name') for p in POKEMON_LIST if p.get('name') and p.get('name')!=d['name']]
+        options += random.sample(pool,min(3,len(pool)))
+        random.shuffle(options)
+        view=HuntChoiceView(self,owner_id=0,dex_id=d['id'],answer=d['name'],options=options,global_spawn=True)
+        e=discord.Embed(
+            title='✨ SERVER-WIDE SHINY ENCOUNTER!',
+            description=f'**{display_name(d)}** appeared at **Level {level}** with **{iv_percent:.1f}% IVs**!\nChoose the correct name. The first correct click wins; you have **30 seconds**.\n🎁 Reward: **5 Rare Candies + 1 Elite Charged TM**.',
+            color=discord.Color.gold()
+        )
+        art=sprite(d,shiny=True)
+        if art:e.set_image(url=art)
+        view.message=await ctx.send(embed=e,view=view)
+        ACTIVE_VIEWS[0]=view
 
     @commands.command(name='setteam',aliases=['teamset','slotteam'],description='Set a Pokémon into team slot 1-6.')
     async def setteam(self,ctx,pokemon_id:int,slot:int):
@@ -9435,7 +9621,7 @@ class EventsMissions(commands.Cog):
         if ctx.author.id not in OWNER_IDS:
             return await ctx.send('🔒 This command is restricted to configured PokéVanta developers. Add your Discord user ID to OWNER_IDS / DISCORD_OWNER_IDS and restart the bot.')
         e = discord.Embed(title='🛠️ PokéVanta Developer Command Guide', description='Current developer tools for Pokémon gameplay, economy, and the Event Token shop. Double-check currency or inventory changes before confirming.', color=discord.Color.from_rgb(118, 83, 220))
-        e.add_field(name='🎮 Pokémon & gameplay', value='`!pokemonadd @user <pokemon name>` — add normal Pokémon; prefix with `shiny` or `radiant` for variants (confirmation)\n`!removepokemon @user <box ID>` — remove Pokémon (confirmation)\n`!radiantremove @user <box ID>` — remove only a Radiant Pokémon (confirmation)\n`!shinyhunt [pokemon name]` — spawn a server-wide shiny\n`!pass add @user <quantity>` — grant Raid Passes\n`!gameoff` / `!gameon` — maintenance pause/resume', inline=False)
+        e.add_field(name='🎮 Pokémon & gameplay', value='`!pokemonadd @user <pokemon name>` — add normal Pokémon; prefix with `shiny` or `radiant` for variants (confirmation)\n`!removepokemon @user <box ID>` — remove Pokémon (confirmation)\n`!radiantremove @user <box ID>` — remove only a Radiant Pokémon (confirmation)\n`!mufasa <pokemon name> <IV %> <level>` — spawn a server-wide shiny; no arguments chooses a random shiny\n`!pass add @user <quantity>` — grant Raid Passes\n`!gameoff` / `!gameon` — maintenance pause/resume', inline=False)
         e.add_field(name='💰 Economy & inventory', value='`!coinsadd @user <amount>` / `!removecoins @user <amount>` — adjust VantaCoins\n`!eventtoken add @user <amount>` / `remove` — adjust Event Tokens\n`!eventitem add @user <event_relic|champion_trophy> <quantity>` / `remove` — manage shop collectibles', inline=False)
         e.add_field(name='🌌 Events & missions', value='`!event start <type>|<goal>|<hours>` — start global event\n`!event end` / `pause` / `resume` — manage event state\n`!event setgoal <points>` / `setduration <hours>` / `announce`\n`!eventimage set <event> <HTTPS URL>` / `show` / `remove` / `list`\n`!mprewards` / `!mpclaim` — weekly MP rewards (reset Monday 00:00 IST)', inline=False)
         e.add_field(name='🧩 Setup & logs', value='`!setupitememojis` — install shop item emojis\n`!setupvantacoin` — configure VantaCoin emoji\n`!gamelogs` — view developer Pokémon/trading/economy logs', inline=False)
